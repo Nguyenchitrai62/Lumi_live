@@ -228,6 +228,17 @@ h1 { margin: 0; font-size: clamp(23px, 2vw, 29px); letter-spacing: -.05em; line-
 .microphone-device select:focus { border-color: #a796dd; }
 .microphone-device select:disabled { opacity: .62; }
 .microphone-device > small { color: #958ca5; font-size: 8px; white-space: nowrap; }
+.video-source { padding: 7px 7px 2px 58px; border-top: 1px solid rgba(122, 104, 179, .1); }
+.video-source-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.video-source-head > span { color: #968da9; font-size: 8px; font-weight: 900; letter-spacing: .13em; }
+.video-source-head > small { color: #958ca5; font-size: 8px; }
+.video-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.video-options button { height: 28px; border: 1px solid var(--control-border); border-radius: 9px; color: var(--muted); background: var(--surface-solid); font-size: 9px; font-weight: 800; cursor: pointer; }
+.video-options button.selected { color: #6752b6; border-color: #ac9bdd; background: #eee9ff; }
+.video-options button:disabled { opacity: .62; cursor: not-allowed; }
+.video-preview { display: none; align-items: center; gap: 8px; margin-top: 7px; color: #6d6580; font-size: 8px; font-weight: 700; }
+.video-preview-active { display: flex; }
+.video-preview video { width: 72px; height: 41px; border: 1px solid var(--control-border); border-radius: 8px; background: #17141f; object-fit: cover; }
 .microphone-end { align-self: stretch; border: 0; border-radius: 11px; padding: 0 12px; color: #b34f66; background: #ffeaef; font-size: 10px; font-weight: 800; cursor: pointer; }
 .microphone-panel-ready { border-color: rgba(73, 176, 139, .19); background: linear-gradient(135deg, #effaf6, #f4f7ff); }
 .microphone-panel-ready .microphone-orb { background: linear-gradient(145deg, #62c6a4, #3d9f7f); }
@@ -278,6 +289,9 @@ h1 { margin: 0; font-size: clamp(23px, 2vw, 29px); letter-spacing: -.05em; line-
 :root[data-theme="dark"] .microphone-action { color: #ece5fa; }
 :root[data-theme="dark"] .microphone-copy small { color: #afa5c1; }
 :root[data-theme="dark"] .microphone-device { border-top-color: #493f61; }
+:root[data-theme="dark"] .video-source { border-top-color: #493f61; }
+:root[data-theme="dark"] .video-options button.selected { color: #d3c7ff; border-color: #7867ad; background: #3a3151; }
+:root[data-theme="dark"] .video-preview { color: #b6acc8; }
 :root[data-theme="dark"] .mic-signal i { background: #5e566c; }
 :root[data-theme="dark"] .mic-signal-1 i:nth-child(-n+1),
 :root[data-theme="dark"] .mic-signal-2 i:nth-child(-n+2),
@@ -320,6 +334,7 @@ h1 { margin: 0; font-size: clamp(23px, 2vw, 29px); letter-spacing: -.05em; line-
   .side-panel { padding: 20px 17px 16px; }
   .microphone-device { padding-left: 7px; flex-wrap: wrap; }
   .microphone-device > small { width: 100%; padding-left: 40px; }
+  .video-source { padding-left: 7px; }
   .customize-panel { grid-template-columns: 1fr; }
   .privacy-note { font-size: 8px; }
 }

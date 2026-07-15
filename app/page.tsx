@@ -29,8 +29,54 @@ type Outfit = keyof typeof outfits;
 type Scene = (typeof scenes)[number]["id"];
 type SessionStatus = "idle" | "connecting" | "ready" | "error";
 type ThemePreference = "system" | "light" | "dark";
+type VideoMode = "screen" | "camera" | "none";
 type Role = "user" | "lumi";
 type ChatMessage = { id: string; role: Role; text: string };
+
+const DEFAULT_VIDEO_MODE: VideoMode = "screen";
+const videoModes: ReadonlyArray<{ id: VideoMode; label: string }> = [
+  { id: "screen", label: "Screen" },
+  { id: "camera", label: "Camera" },
+  { id: "none", label: "None" },
+];
+
+function requestVideoStream(mode: VideoMode) {
+  if (mode === "none") return Promise.resolve<MediaStream | null>(null);
+
+  if (mode === "screen") {
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      return Promise.reject(new Error("Screen sharing is not supported by this browser."));
+    }
+    return navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 1, max: 1 } },
+      audio: false,
+    });
+  }
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return Promise.reject(new Error("Camera access is not supported by this browser."));
+  }
+  return navigator.mediaDevices.getUserMedia({
+    video: {
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 5, max: 10 },
+      facingMode: "user",
+    },
+    audio: false,
+  });
+}
+
+function describeVideoError(error: unknown, mode: VideoMode) {
+  const source = mode === "screen" ? "Screen sharing" : "Camera access";
+  if (error instanceof DOMException && error.name === "NotAllowedError") {
+    return `${source} was skipped; voice chat is still available.`;
+  }
+  if (error instanceof Error && error.message) {
+    return `${source} failed: ${error.message}`;
+  }
+  return `${source} could not be started; voice chat is still available.`;
+}
 
 function describeMicrophoneError(error: unknown) {
   if (!(error instanceof DOMException)) {
@@ -90,6 +136,23 @@ function floatToPcm16(floatData: Float32Array) {
   return new Uint8Array(pcm.buffer);
 }
 
+function mergeTranscriptText(current: string, incoming: string) {
+  if (!current) return incoming;
+  if (!incoming) return current;
+  if (incoming.startsWith(current)) return incoming;
+  if (current.startsWith(incoming) || current.endsWith(incoming)) return current;
+
+  const maxOverlap = Math.min(current.length, incoming.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    if (current.endsWith(incoming.slice(0, overlap))) {
+      return `${current}${incoming.slice(overlap)}`;
+    }
+  }
+
+  const needsSpace = !/\s$/.test(current) && !/^[\s.,!?;:'")\]}]/.test(incoming);
+  return `${current}${needsSpace ? " " : ""}${incoming}`;
+}
+
 export default function Home() {
   const [scene, setScene] = useState<Scene>("bedroom");
   const [outfit, setOutfit] = useState<Outfit>("casual");
@@ -100,6 +163,8 @@ export default function Home() {
   const [micLevel, setMicLevel] = useState(0);
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
+  const [videoMode, setVideoMode] = useState<VideoMode>(DEFAULT_VIDEO_MODE);
+  const [activeVideoMode, setActiveVideoMode] = useState<VideoMode>("none");
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -117,6 +182,12 @@ export default function Home() {
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const micProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const silentGainRef = useRef<GainNode | null>(null);
+  const videoStreamRef = useRef<MediaStream | null>(null);
+  const videoElementRef = useRef<HTMLVideoElement | null>(null);
+  const videoCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const videoFrameTimerRef = useRef<number | null>(null);
+  const activeVideoModeRef = useRef<VideoMode>("none");
+  const videoNoticeRef = useRef("");
   const playbackSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const nextPlaybackTimeRef = useRef(0);
   const intentionalCloseRef = useRef(false);
@@ -126,6 +197,9 @@ export default function Home() {
   const lastMicUiUpdateRef = useRef(0);
   const userPartialIdRef = useRef<string | null>(null);
   const lumiPartialIdRef = useRef<string | null>(null);
+  const transcriptFinalizeTimersRef = useRef<Record<Role, number | null>>({ user: null, lumi: null });
+  const awaitingNewUserTurnRef = useRef(false);
+  const transcriptMessageSequenceRef = useRef(0);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -230,31 +304,63 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const transcriptTimers = transcriptFinalizeTimersRef.current;
     return () => {
       intentionalCloseRef.current = true;
       websocketRef.current?.close();
       micStreamRef.current?.getTracks().forEach((track) => track.stop());
+      if (videoFrameTimerRef.current !== null) window.clearTimeout(videoFrameTimerRef.current);
+      Object.values(transcriptTimers).forEach((timer) => {
+        if (timer !== null) window.clearTimeout(timer);
+      });
+      videoStreamRef.current?.getTracks().forEach((track) => track.stop());
       audioContextRef.current?.close();
     };
   }, []);
 
-  const updateTranscript = (role: Role, text: string) => {
-    if (!text) return;
+  const finalizeTranscript = (role: Role) => {
     const idRef = role === "user" ? userPartialIdRef : lumiPartialIdRef;
+    const timer = transcriptFinalizeTimersRef.current[role];
+    if (timer !== null) window.clearTimeout(timer);
+    transcriptFinalizeTimersRef.current[role] = null;
+    idRef.current = null;
+  };
+
+  const scheduleTranscriptFinalization = (role: Role, delay = 900) => {
+    const previousTimer = transcriptFinalizeTimersRef.current[role];
+    if (previousTimer !== null) window.clearTimeout(previousTimer);
+    transcriptFinalizeTimersRef.current[role] = window.setTimeout(() => {
+      finalizeTranscript(role);
+    }, delay);
+  };
+
+  const updateTranscript = (role: Role, text: string) => {
+    if (!text.trim()) return;
+    const idRef = role === "user" ? userPartialIdRef : lumiPartialIdRef;
+    const pendingTimer = transcriptFinalizeTimersRef.current[role];
+    if (pendingTimer !== null) {
+      window.clearTimeout(pendingTimer);
+      transcriptFinalizeTimersRef.current[role] = null;
+    }
+
+    if (!idRef.current) {
+      transcriptMessageSequenceRef.current += 1;
+      idRef.current = `${role}-transcript-${transcriptMessageSequenceRef.current}`;
+    }
+    const messageId = idRef.current;
+    idRef.current = messageId;
 
     setMessages((current) => {
-      if (idRef.current) {
-        return current.map((message) => {
-          if (message.id !== idRef.current) return message;
-          const nextText = text.startsWith(message.text) ? text : `${message.text}${text}`;
-          return { ...message, text: nextText };
-        });
-      }
-
-      const id = `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      idRef.current = id;
-      return [...current, { id, role, text }];
+      const existing = current.find((message) => message.id === messageId);
+      if (!existing) return [...current, { id: messageId, role, text }];
+      const mergedText = mergeTranscriptText(existing.text, text);
+      if (mergedText === existing.text) return current;
+      return current.map((message) => (
+        message.id === messageId ? { ...message, text: mergedText } : message
+      ));
     });
+
+    if (awaitingNewUserTurnRef.current) scheduleTranscriptFinalization(role);
   };
 
   const stopPlayback = () => {
@@ -305,6 +411,93 @@ export default function Home() {
     if (websocket?.readyState === WebSocket.OPEN) websocket.send(JSON.stringify(payload));
   };
 
+  const stopVideoCapture = () => {
+    if (videoFrameTimerRef.current !== null) {
+      window.clearTimeout(videoFrameTimerRef.current);
+      videoFrameTimerRef.current = null;
+    }
+
+    const stream = videoStreamRef.current;
+    videoStreamRef.current = null;
+    stream?.getTracks().forEach((track) => {
+      track.onended = null;
+      track.stop();
+    });
+
+    const video = videoElementRef.current;
+    if (video) {
+      video.pause();
+      video.srcObject = null;
+    }
+    activeVideoModeRef.current = "none";
+    setActiveVideoMode("none");
+  };
+
+  const sendVideoFrame = () => {
+    const video = videoElementRef.current;
+    if (!readyRef.current || activeVideoModeRef.current === "none" || !video || video.readyState < 2) {
+      return;
+    }
+
+    const sourceWidth = video.videoWidth;
+    const sourceHeight = video.videoHeight;
+    if (!sourceWidth || !sourceHeight) return;
+
+    const maxDimension = 1024;
+    const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+    const canvas = videoCanvasRef.current ?? document.createElement("canvas");
+    videoCanvasRef.current = canvas;
+    canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+    const drawingContext = canvas.getContext("2d", { alpha: false });
+    if (!drawingContext) return;
+
+    drawingContext.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.72);
+    const data = dataUrl.slice(dataUrl.indexOf(",") + 1);
+    sendJson({
+      realtimeInput: {
+        video: { data, mimeType: "image/jpeg" },
+      },
+    });
+  };
+
+  const startVideoFrames = () => {
+    if (videoFrameTimerRef.current !== null) window.clearTimeout(videoFrameTimerRef.current);
+    if (activeVideoModeRef.current === "none") return;
+
+    const tick = () => {
+      sendVideoFrame();
+      if (activeVideoModeRef.current !== "none") {
+        videoFrameTimerRef.current = window.setTimeout(tick, 1000);
+      }
+    };
+    videoFrameTimerRef.current = window.setTimeout(tick, 1000);
+  };
+
+  const attachVideoStream = async (stream: MediaStream, mode: Exclude<VideoMode, "none">) => {
+    const video = videoElementRef.current;
+    if (!video) throw new Error("The video preview is not ready.");
+
+    videoStreamRef.current = stream;
+    activeVideoModeRef.current = mode;
+    setActiveVideoMode(mode);
+    video.srcObject = stream;
+    await video.play();
+
+    const track = stream.getVideoTracks()[0];
+    if (track) {
+      track.onended = () => {
+        if (videoStreamRef.current !== stream) return;
+        stopVideoCapture();
+        setVideoMode("none");
+        if (readyRef.current) {
+          setStatusMessage(`${mode === "screen" ? "Screen sharing" : "Camera"} stopped — voice chat is still live`);
+        }
+      };
+    }
+  };
+
   const toggleMute = () => {
     const nextMuted = !mutedRef.current;
     mutedRef.current = nextMuted;
@@ -333,6 +526,12 @@ export default function Home() {
           : Math.min(1, Math.max(0, (rms - 0.0035) * 16));
         setMicLevel(visibleLevel);
         lastMicUiUpdateRef.current = now;
+      }
+
+      if (readyRef.current && !mutedRef.current && awaitingNewUserTurnRef.current && rms >= 0.012) {
+        awaitingNewUserTurnRef.current = false;
+        finalizeTranscript("user");
+        finalizeTranscript("lumi");
       }
 
       if (!readyRef.current || mutedRef.current) return;
@@ -366,8 +565,16 @@ export default function Home() {
 
     if (response.setupComplete) {
       readyRef.current = true;
+      awaitingNewUserTurnRef.current = false;
       setStatus("ready");
-      setStatusMessage("Lumi is listening");
+      const activeSource = activeVideoModeRef.current;
+      const sourceMessage = activeSource === "screen"
+        ? "Lumi is listening and viewing your shared screen"
+        : activeSource === "camera"
+          ? "Lumi is listening and viewing your camera"
+          : videoNoticeRef.current || "Lumi is listening — vision is off";
+      setStatusMessage(sourceMessage);
+      startVideoFrames();
       sendJson({
         realtimeInput: {
           text: "Greet the player warmly in one short sentence and invite them to begin our roleplay.",
@@ -379,7 +586,6 @@ export default function Home() {
     const parts = serverContent?.modelTurn?.parts ?? [];
     for (const part of parts) {
       if (part.inlineData?.data) playPcmChunk(part.inlineData.data);
-      if (part.text) updateTranscript("lumi", part.text);
     }
 
     if (serverContent?.inputTranscription?.text) {
@@ -388,19 +594,27 @@ export default function Home() {
     if (serverContent?.outputTranscription?.text) {
       updateTranscript("lumi", serverContent.outputTranscription.text);
     }
-    if (serverContent?.interrupted) stopPlayback();
+    if (serverContent?.interrupted) {
+      stopPlayback();
+      scheduleTranscriptFinalization("lumi");
+    }
     if (serverContent?.turnComplete) {
-      userPartialIdRef.current = null;
-      lumiPartialIdRef.current = null;
+      awaitingNewUserTurnRef.current = true;
+      scheduleTranscriptFinalization("user");
+      scheduleTranscriptFinalization("lumi");
     }
   };
 
   const stopSession = (showIdle = true) => {
     intentionalCloseRef.current = true;
     readyRef.current = false;
+    awaitingNewUserTurnRef.current = false;
+    finalizeTranscript("user");
+    finalizeTranscript("lumi");
     stopPlayback();
     websocketRef.current?.close();
     websocketRef.current = null;
+    stopVideoCapture();
     micProcessorRef.current?.disconnect();
     micSourceRef.current?.disconnect();
     silentGainRef.current?.disconnect();
@@ -424,9 +638,15 @@ export default function Home() {
       return;
     }
 
+    const requestedVideoMode = videoMode;
     setStatus("connecting");
-    setStatusMessage("Opening a starlight channel…");
+    setStatusMessage(requestedVideoMode === "screen"
+      ? "Choose the screen or window you want Lumi to see…"
+      : requestedVideoMode === "camera"
+        ? "Requesting camera and microphone access…"
+        : "Opening a voice channel…");
     intentionalCloseRef.current = false;
+    videoNoticeRef.current = "";
 
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
@@ -435,7 +655,6 @@ export default function Home() {
 
       const context = new AudioContext();
       audioContextRef.current = context;
-      await context.resume();
       const analyser = context.createAnalyser();
       analyser.fftSize = 256;
       analyser.smoothingTimeConstant = 0.45;
@@ -443,7 +662,7 @@ export default function Home() {
       analyserRef.current = analyser;
       nextPlaybackTimeRef.current = context.currentTime;
 
-      const [tokenResponse, stream] = await Promise.all([
+      const [tokenResponse, stream, videoResult] = await Promise.all([
         fetch("/api/token", { method: "POST", headers: { "Content-Type": "application/json" } }),
         navigator.mediaDevices.getUserMedia({
           audio: {
@@ -453,7 +672,17 @@ export default function Home() {
             noiseSuppression: true,
             autoGainControl: true,
           },
+        }).then((mediaStream) => {
+          micStreamRef.current = mediaStream;
+          return mediaStream;
         }),
+        requestVideoStream(requestedVideoMode)
+          .then((mediaStream) => {
+            videoStreamRef.current = mediaStream;
+            return { stream: mediaStream, error: null as unknown };
+          })
+          .catch((error: unknown) => ({ stream: null, error })),
+        context.resume(),
       ]);
 
       if (!tokenResponse.ok) {
@@ -462,7 +691,18 @@ export default function Home() {
       }
 
       const { token } = await tokenResponse.json();
-      micStreamRef.current = stream;
+      if (videoResult.error) {
+        videoNoticeRef.current = describeVideoError(videoResult.error, requestedVideoMode);
+        setVideoMode("none");
+      } else if (videoResult.stream && requestedVideoMode !== "none") {
+        try {
+          await attachVideoStream(videoResult.stream, requestedVideoMode);
+        } catch (error) {
+          stopVideoCapture();
+          videoNoticeRef.current = describeVideoError(error, requestedVideoMode);
+          setVideoMode("none");
+        }
+      }
       try {
         const availableDevices = await navigator.mediaDevices.enumerateDevices();
         setAudioInputs(availableDevices.filter((device) => device.kind === "audioinput"));
@@ -480,6 +720,7 @@ export default function Home() {
               model: `models/${MODEL}`,
               generationConfig: {
                 responseModalities: ["AUDIO"],
+                mediaResolution: "MEDIA_RESOLUTION_MEDIUM",
                 speechConfig: {
                   voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
                 },
@@ -496,7 +737,7 @@ export default function Home() {
               systemInstruction: {
                 parts: [
                   {
-                    text: "You are Lumi, a warm, playful anime roleplay companion. Stay in character, use vivid but concise replies, follow the player's chosen scenario, never claim to be human, and keep the conversation friendly and safe. Speak naturally and leave space for the player to respond.",
+                    text: "You are Lumi, a warm, playful anime roleplay companion. Stay in character, use vivid but concise replies, follow the player's chosen scenario, never claim to be human, and keep the conversation friendly and safe. Speak naturally and leave space for the player to respond. When current visual frames are provided, use them to answer questions about the user's shared screen or camera. Never pretend to see anything when vision is off or a current frame is unavailable.",
                   },
                 ],
               },
@@ -512,9 +753,11 @@ export default function Home() {
         setStatusMessage("The voice channel hit a snag");
       };
       websocket.onclose = (event) => {
+        const wasIntentional = intentionalCloseRef.current;
         readyRef.current = false;
         speakingRef.current = false;
-        if (!intentionalCloseRef.current) {
+        if (!wasIntentional) {
+          stopSession(false);
           const reason = event.reason.replace(/\s+/g, " ").trim();
           const detail = reason
             ? ` (${event.code}): ${reason.slice(0, 150)}`
@@ -533,6 +776,9 @@ export default function Home() {
   const sendText = (text: string) => {
     const clean = text.trim();
     if (!clean || status !== "ready") return;
+    awaitingNewUserTurnRef.current = false;
+    finalizeTranscript("user");
+    finalizeTranscript("lumi");
     setMessages((current) => [
       ...current,
       { id: `typed-${Date.now()}`, role: "user", text: clean },
@@ -636,7 +882,7 @@ export default function Home() {
             )}
             <button className={`voice-button voice-button-${status}`} type="button" onClick={startSession} disabled={status === "connecting"}>
               <span className={status === "ready" ? "stop-symbol" : "mic-icon"} aria-hidden="true" />
-              <span>{status === "ready" ? "End voice chat" : status === "connecting" ? "Connecting microphone…" : "Start microphone"}</span>
+              <span>{status === "ready" ? "End live chat" : status === "connecting" ? "Connecting live chat…" : "Start live chat"}</span>
             </button>
           </div>
         </section>
@@ -701,6 +947,30 @@ export default function Home() {
                 {status === "ready" && <small>End the call to change input</small>}
               </label>
             )}
+            <div className="video-source">
+              <div className="video-source-head">
+                <span>VISION</span>
+                <small>{status === "ready" ? "End the call to change source" : "Screen is the default"}</small>
+              </div>
+              <div className="video-options" role="group" aria-label="What Lumi can see">
+                {videoModes.map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    className={videoMode === mode.id ? "selected" : ""}
+                    onClick={() => setVideoMode(mode.id)}
+                    disabled={status === "ready" || status === "connecting"}
+                    aria-pressed={videoMode === mode.id}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
+              <div className={`video-preview ${activeVideoMode !== "none" ? "video-preview-active" : ""}`}>
+                <video ref={videoElementRef} autoPlay muted playsInline aria-label={`${activeVideoMode} preview`} />
+                <span>{activeVideoMode === "screen" ? "Sharing screen at 1 FPS" : "Camera frames at 1 FPS"}</span>
+              </div>
+            </div>
           </div>
 
           <div className="transcript" aria-live="polite">
@@ -745,7 +1015,7 @@ export default function Home() {
             </div>
           </div>
 
-          <p className="privacy-note"><span>◇</span> Your API key stays on the server. Voice streams directly to Gemini using a short-lived token.</p>
+          <p className="privacy-note"><span>◇</span> Your API key stays on the server. Voice and the selected visual source stream to Gemini using a short-lived token.</p>
         </aside>
       </section>
     </main>

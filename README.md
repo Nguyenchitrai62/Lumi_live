@@ -1,6 +1,6 @@
 # Lumi Live
 
-Lumi Live is a small Next.js experiment for real-time voice roleplay with an animated anime character. It uses Gemini 3.1 Flash Live Preview, live transcripts, switchable scenes and outfits, and audio-driven lip sync.
+Lumi Live is a small Next.js experiment for real-time voice roleplay with an animated anime character. It uses Gemini 3.1 Flash Live Preview, live transcripts, switchable scenes and outfits, audio-driven lip sync, and optional screen or camera vision.
 
 ## Requirements
 
@@ -24,6 +24,8 @@ GEMINI_API_KEY=your_google_ai_studio_key
 ```
 
 Then open [http://localhost:3000](http://localhost:3000).
+
+The visual source defaults to `Screen`. Before starting a live chat, you can choose `Screen`, `Camera`, or `None`. The browser asks for the corresponding permission when the chat starts; Gemini receives at most one JPEG frame per second.
 
 ## Commands
 
