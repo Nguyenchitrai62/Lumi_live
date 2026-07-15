@@ -29,7 +29,7 @@ export async function POST(request: Request) {
       config: {
         uses: 1,
         expireTime,
-        newSessionExpireTime: new Date(now + 60 * 1000),
+        newSessionExpireTime: new Date(now + 60 * 1000).toISOString(),
         httpOptions: { apiVersion: "v1alpha" },
       },
     });

@@ -606,6 +606,8 @@ export default function Home() {
 
           <div className={`avatar avatar-${outfit}`} aria-label={`Lumi wearing the ${outfit} outfit`}>
             {currentFrames.map((src, index) => (
+              // The lip-sync layers must keep identical raw image geometry.
+              // eslint-disable-next-line @next/next/no-img-element
               <img
                 key={src}
                 className={`avatar-frame ${index === 0 ? "avatar-frame-base" : "avatar-mouth-frame"} ${index > 0 && mouthFrame === index ? "avatar-mouth-frame-active" : ""}`}
