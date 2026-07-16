@@ -1,0 +1,67 @@
+.lumi-rig {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+  user-select: none;
+}
+
+.lumi-rig-canvas {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 72%;
+  animation: lumi-rig-breathe 5.8s ease-in-out infinite;
+  will-change: transform;
+}
+
+.lumi-rig-layer {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center bottom;
+  opacity: 0;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.lumi-rig-base {
+  z-index: 1;
+  opacity: 1;
+}
+
+.lumi-rig-hair-back {
+  z-index: 0;
+  opacity: 1;
+}
+
+.lumi-rig-eye-sprite {
+  z-index: 2;
+  transition: opacity 28ms linear;
+}
+
+.lumi-rig-mouth-sprite {
+  z-index: 3;
+  transition: opacity 48ms ease-out;
+}
+
+.lumi-rig-hair-front {
+  z-index: 4;
+  opacity: 1;
+}
+
+.lumi-rig-layer.is-active {
+  opacity: 1;
+}
+
+@keyframes lumi-rig-breathe {
+  0%, 100% { transform: translateY(0) rotate(-.08deg) scale(1); }
+  50% { transform: translateY(-.35%) rotate(.08deg) scale(1.003); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lumi-rig-canvas { animation: none !important; }
+}

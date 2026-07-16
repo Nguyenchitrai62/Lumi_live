@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lumi Live Side Panel</title>
+    <link rel="stylesheet" href="assets/lumi-rig.css" />
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div class="brand">
+          <img src="icons/lumi-sidepanel.png" alt="" />
+          <span>Lumi <strong>Live</strong></span>
+        </div>
+        <div class="top-actions">
+          <span id="liveBadge" class="badge badge-offline">Offline</span>
+          <button id="settingsButton" class="icon-button" type="button" aria-label="Open Gemini settings">⚙</button>
+        </div>
+      </header>
+
+      <section id="settingsPanel" class="settings" hidden>
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">LOCAL SETTINGS</span>
+            <h1>Gemini connection</h1>
+          </div>
+          <button id="closeSettingsButton" class="icon-button" type="button" aria-label="Close settings">×</button>
+        </div>
+        <label for="apiKeyInput">Gemini API key</label>
+        <div class="key-row">
+          <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste a Google AI Studio key" />
+          <button id="toggleKeyButton" type="button" aria-label="Show or hide API key">Show</button>
+        </div>
+        <button id="saveKeyButton" class="primary wide" type="button">Save key on this device</button>
+        <div class="permission-row">
+          <div class="permission-copy">
+            <strong>Microphone access</strong>
+            <span id="microphonePermissionStatus" data-state="prompt">Not enabled yet</span>
+          </div>
+          <button id="enableMicrophoneButton" class="permission-button" type="button">Enable</button>
+        </div>
+        <div class="visual-setting">
+          <div class="permission-copy">
+            <strong>Page element guides</strong>
+            <span>Show PageAgent boxes and index numbers</span>
+          </div>
+          <label class="toggle-switch" for="showElementHighlightsInput">
+            <input id="showElementHighlightsInput" type="checkbox" />
+            <span aria-hidden="true"></span>
+            <span class="sr-only">Show PageAgent element boxes and numbers</span>
+          </label>
+        </div>
+        <p id="settingsNote" class="fine-print">The key stays in Chrome extension storage and is sent directly to Google Gemini. For a published extension, use a backend with ephemeral tokens instead.</p>
+      </section>
+
+      <section class="target-card" aria-live="polite">
+        <span id="targetDot" class="target-dot"></span>
+        <div class="target-copy">
+          <small>PAGEAGENT TARGET</small>
+          <strong id="targetTitle">No tab connected</strong>
+          <span id="targetHint">Switch to a web page and Lumi will follow it.</span>
+        </div>
+        <button id="connectTabButton" class="connect-button" type="button" disabled>Auto</button>
+      </section>
+
+      <section id="activityCard" class="activity" hidden aria-live="polite">
+        <span class="activity-orb"><i></i><i></i><i></i></span>
+        <div>
+          <small>GEMINI TOOL CALL</small>
+          <strong id="activityLabel">Reading the page</strong>
+          <span id="activityDetail">PageAgent is indexing visible controls</span>
+        </div>
+      </section>
+
+      <section id="transcript" class="transcript" aria-live="polite">
+        <article class="message message-lumi">
+          <span>Lumi</span>
+          <p>Hi! Save your Gemini key, open any web page, then talk to me. I follow your active tab automatically. ✦</p>
+        </article>
+      </section>
+
+      <aside class="vtuber" aria-label="Lumi VTuber">
+        <div class="vtuber-glow"></div>
+        <div class="lumi-rig">
+          <div class="lumi-rig-canvas">
+            <img class="lumi-rig-layer lumi-rig-hair-back" src="assets/avatars/rig/lumi-face-v2/hair-back-casual.png" alt="" aria-hidden="true" draggable="false" />
+            <img class="lumi-rig-layer lumi-rig-base" src="assets/avatars/rig/lumi-face-v2/base-casual.png" alt="Lumi, a blue-haired anime VTuber" draggable="false" />
+            <img id="eyesOpen" class="lumi-rig-layer lumi-rig-eye-sprite is-active" src="assets/avatars/rig/lumi-face-v2/eyes-open.png" alt="" aria-hidden="true" draggable="false" />
+            <img id="eyesHalf" class="lumi-rig-layer lumi-rig-eye-sprite" src="assets/avatars/rig/lumi-face-v2/eyes-half.png" alt="" aria-hidden="true" draggable="false" />
+            <img id="eyesClosed" class="lumi-rig-layer lumi-rig-eye-sprite" src="assets/avatars/rig/lumi-face-v2/eyes-closed.png" alt="" aria-hidden="true" draggable="false" />
+            <img id="mouthNeutral" class="lumi-rig-layer lumi-rig-mouth-sprite is-active" src="assets/avatars/rig/lumi-face-v2/mouth-neutral.png" alt="" aria-hidden="true" draggable="false" />
+            <img id="mouthSmall" class="lumi-rig-layer lumi-rig-mouth-sprite" src="assets/avatars/rig/lumi-face-v2/mouth-small.png" alt="" aria-hidden="true" draggable="false" />
+            <img id="mouthWide" class="lumi-rig-layer lumi-rig-mouth-sprite" src="assets/avatars/rig/lumi-face-v2/mouth-wide.png" alt="" aria-hidden="true" draggable="false" />
+            <img class="lumi-rig-layer lumi-rig-hair-front" src="assets/avatars/rig/lumi-face-v2/hair-front-casual.png" alt="" aria-hidden="true" draggable="false" />
+          </div>
+        </div>
+        <span id="vtuberMood">Ready</span>
+      </aside>
+
+      <footer class="composer-area">
+        <div class="voice-controls">
+          <button id="startButton" class="primary" type="button"><span class="mic-mark"></span><span>Start voice</span></button>
+          <button id="muteButton" class="secondary" type="button" disabled>Mute</button>
+        </div>
+        <form id="messageForm" class="message-form">
+          <label class="sr-only" for="messageInput">Message Lumi</label>
+          <input id="messageInput" type="text" placeholder="Start voice to type a message…" disabled />
+          <button type="submit" aria-label="Send message" disabled>↑</button>
+        </form>
+        <div class="status-row">
+          <p id="statusLine" class="status-line">Open settings and save your Gemini API key.</p>
+          <button id="microphoneHelpButton" class="status-help" type="button" hidden>Enable microphone</button>
+        </div>
+      </footer>
+    </main>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

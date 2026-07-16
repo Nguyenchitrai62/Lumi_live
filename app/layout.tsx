@@ -12,6 +12,11 @@ export async function generateMetadata(): Promise<Metadata> {
     metadataBase: new URL(origin),
     title: "Lumi Live — Voice Roleplay Companion",
     description: "A cozy real-time voice roleplay experience with Lumi, powered by Gemini Live.",
+    icons: {
+      icon: [{ url: "/branding/logo.png", type: "image/png" }],
+      shortcut: "/branding/logo.png",
+      apple: "/branding/logo.png",
+    },
     openGraph: {
       title: "Lumi Live",
       description: "A voice, a story, a world together.",
