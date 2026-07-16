@@ -69,9 +69,11 @@ The second extension in [`extensions/side-panel`](./extensions/side-panel) does 
 1. Run `npm run build:extension`.
 2. Open `chrome://extensions`, choose **Load unpacked**, and select [`extensions/side-panel`](./extensions/side-panel).
 3. Click the new Lumi portrait icon to open the Side Panel.
-4. Open settings, paste a Gemini API key from Google AI Studio, and save it locally.
+4. Click the gear button. Lumi opens a dedicated Settings tab where you can paste a Gemini API key, choose one of Gemini's 30 voices, enable the microphone, and configure PageAgent guides.
 5. Open or switch to a normal HTTP/HTTPS page. **PAGEAGENT TARGET** follows the active tab automatically.
 6. Press **Start voice** and speak or type normally.
+
+During a conversation, Gemini can call `browser_list_tabs`, `browser_open_tab`, and `browser_switch_tab` to move a multi-page task across normal HTTP/HTTPS tabs. Switching is protected by a short-lived tab list, so the model cannot guess stale tab IDs. DOM actions still follow the PageAgent observe-act-observe loop on the newly active page.
 
 The standalone extension sends its locally stored key directly to Gemini Live. That is suitable for a local unpacked extension owned by the user. A publicly distributed build should replace the long-lived key with backend-issued ephemeral tokens.
 

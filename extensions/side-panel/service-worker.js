@@ -5,6 +5,8 @@ const TARGET_CHANGED_MESSAGE = "lumi_sidepanel_target_changed";
 const ELEMENT_HIGHLIGHTS_STORAGE_KEY = "lumiShowElementHighlights";
 
 let connectedTabId = null;
+let listedTabIds = new Set();
+let listedTabsExpireAt = 0;
 
 async function loadTarget() {
   const stored = await chrome.storage.session.get(TARGET_STORAGE_KEY);
@@ -163,6 +165,86 @@ async function sendBrowserTool(tool, args) {
   return result;
 }
 
+function serializeTab(tab) {
+  return {
+    tabId: tab.id,
+    windowId: tab.windowId,
+    title: tab.title || "Untitled page",
+    url: tab.url || "",
+    active: Boolean(tab.active),
+  };
+}
+
+async function listBrowserTabs() {
+  const focusedWindow = await chrome.windows.getLastFocused();
+  const tabs = await chrome.tabs.query({ windowId: focusedWindow.id });
+  const controllableTabs = tabs.filter((tab) => Number.isInteger(tab.id) && isWebPage(tab.url));
+  listedTabIds = new Set(controllableTabs.map((tab) => tab.id));
+  listedTabsExpireAt = Date.now() + 30000;
+  return {
+    windowId: focusedWindow.id,
+    tabs: controllableTabs.map(serializeTab),
+  };
+}
+
+function requireWebUrl(rawUrl) {
+  let url;
+  try {
+    url = new URL(String(rawUrl || ""));
+  } catch {
+    throw new Error("Open-tab URL must be an absolute http/https address.");
+  }
+  if (!isWebPage(url.href)) {
+    throw new Error("Lumi can open only normal http/https pages.");
+  }
+  return url.href;
+}
+
+async function waitForTabToSettle(tabId) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.status === "complete") return tab;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return chrome.tabs.get(tabId);
+}
+
+async function openBrowserTab(args = {}) {
+  const url = requireWebUrl(args.url);
+  const createdTab = await chrome.tabs.create({ url, active: true });
+  if (!createdTab.id) throw new Error("Chrome created the tab without an ID.");
+  await setConnectedTab(createdTab.id);
+  const tab = await waitForTabToSettle(createdTab.id);
+  const controllerReady = await ensureController(createdTab.id, 5);
+  return {
+    opened: true,
+    controllerReady,
+    ...serializeTab(tab),
+  };
+}
+
+async function switchBrowserTab(args = {}) {
+  const tabId = Number(args.tabId);
+  if (!Number.isInteger(tabId)) {
+    throw new Error("browser_switch_tab requires a numeric tabId from browser_list_tabs.");
+  }
+  if (Date.now() > listedTabsExpireAt || !listedTabIds.has(tabId)) {
+    throw new Error("That tabId is stale or was not returned by the latest browser_list_tabs call. List tabs again.");
+  }
+  const tab = await chrome.tabs.get(tabId);
+  if (!isWebPage(tab.url)) throw new Error("The selected tab is not a controllable http/https page.");
+  await chrome.tabs.update(tabId, { active: true });
+  await chrome.windows.update(tab.windowId, { focused: true });
+  await setConnectedTab(tabId);
+  const controllerReady = await ensureController(tabId, 5);
+  const activeTab = await chrome.tabs.get(tabId);
+  return {
+    switched: true,
+    controllerReady,
+    ...serializeTab(activeTab),
+  };
+}
+
 async function handleMessage(message) {
   if (message.command === "connect_active_tab") return getStatus();
   if (message.command === "disconnect_tab") return getStatus();
@@ -180,6 +262,9 @@ async function handleMessage(message) {
     return visualPreferences;
   }
   if (message.command === "browser_tool") {
+    if (message.tool === "browser_list_tabs") return listBrowserTabs();
+    if (message.tool === "browser_open_tab") return openBrowserTab(message.args || {});
+    if (message.tool === "browser_switch_tab") return switchBrowserTab(message.args || {});
     return sendBrowserTool(message.tool, message.args || {});
   }
   throw new Error(`Unsupported side panel command: ${message.command}`);

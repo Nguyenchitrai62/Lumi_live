@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lumi Live Settings</title>
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <main class="settings-shell">
+      <header class="settings-head">
+        <div class="brand">
+          <img src="icons/lumi-sidepanel.png" alt="" />
+          <div>
+            <span>LUMI LIVE</span>
+            <h1>Settings</h1>
+          </div>
+        </div>
+        <p>Connection, voice, microphone, and PageAgent preferences.</p>
+      </header>
+
+      <section class="settings-grid">
+        <article class="settings-card connection-card">
+          <span class="eyebrow">GEMINI CONNECTION</span>
+          <h2>API and voice</h2>
+
+          <label for="apiKeyInput">Gemini API key</label>
+          <div class="key-row">
+            <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste a Google AI Studio key" />
+            <button id="toggleKeyButton" class="secondary" type="button">Show</button>
+          </div>
+
+          <label for="voiceInput">Lumi voice</label>
+          <div class="voice-row">
+          <select id="voiceInput">
+            <option value="Zephyr">Zephyr - Bright</option>
+            <option value="Puck">Puck - Upbeat</option>
+            <option value="Charon">Charon - Informative</option>
+            <option value="Kore">Kore - Firm</option>
+            <option value="Fenrir">Fenrir - Excitable</option>
+            <option value="Leda">Leda - Youthful</option>
+            <option value="Orus">Orus - Firm</option>
+            <option value="Aoede">Aoede - Breezy</option>
+            <option value="Callirrhoe">Callirrhoe - Easy-going</option>
+            <option value="Autonoe">Autonoe - Bright</option>
+            <option value="Enceladus">Enceladus - Breathy</option>
+            <option value="Iapetus">Iapetus - Clear</option>
+            <option value="Umbriel">Umbriel - Easy-going</option>
+            <option value="Algieba">Algieba - Smooth</option>
+            <option value="Despina">Despina - Smooth</option>
+            <option value="Erinome">Erinome - Clear</option>
+            <option value="Algenib">Algenib - Gravelly</option>
+            <option value="Rasalgethi">Rasalgethi - Informative</option>
+            <option value="Laomedeia">Laomedeia - Upbeat</option>
+            <option value="Achernar">Achernar - Soft</option>
+            <option value="Alnilam">Alnilam - Firm</option>
+            <option value="Schedar">Schedar - Even</option>
+            <option value="Gacrux">Gacrux - Mature</option>
+            <option value="Pulcherrima">Pulcherrima - Forward</option>
+            <option value="Achird">Achird - Friendly</option>
+            <option value="Zubenelgenubi">Zubenelgenubi - Casual</option>
+            <option value="Vindemiatrix">Vindemiatrix - Gentle</option>
+            <option value="Sadachbia">Sadachbia - Lively</option>
+            <option value="Sadaltager">Sadaltager - Knowledgeable</option>
+            <option value="Sulafat">Sulafat - Warm</option>
+          </select>
+          <button id="previewVoiceButton" class="secondary preview-voice" type="button">▶ Test voice</button>
+          </div>
+          <div id="voiceProfile" class="voice-profile" aria-live="polite">
+            <span id="voiceGender" class="voice-tag voice-tag-female">♀ Female</span>
+            <span id="voiceStyle" class="voice-tag">Bright</span>
+            <small>English preview</small>
+          </div>
+          <p class="field-help">Listen before saving. Changing the voice stops the current preview immediately.</p>
+          <button id="saveSettingsButton" class="primary" type="button">Save connection settings</button>
+          <p id="saveNote" class="note" role="status">Your key stays in Chrome extension storage on this device.</p>
+        </article>
+
+        <div class="settings-column">
+          <article class="settings-card compact-card">
+            <span class="eyebrow">AUDIO</span>
+            <div class="setting-row">
+              <div>
+                <h2>Microphone access</h2>
+                <p id="microphonePermissionStatus" data-state="prompt">Checking Chrome permission...</p>
+              </div>
+              <button id="enableMicrophoneButton" class="secondary" type="button">Enable</button>
+            </div>
+          </article>
+
+          <article class="settings-card compact-card">
+            <span class="eyebrow">PAGEAGENT</span>
+            <div class="setting-row">
+              <div>
+                <h2>Page element guides</h2>
+                <p>Show DOM boxes and index numbers while Lumi acts.</p>
+              </div>
+              <label class="toggle-switch" for="showElementHighlightsInput">
+                <input id="showElementHighlightsInput" type="checkbox" />
+                <span aria-hidden="true"></span>
+                <span class="sr-only">Show PageAgent element guides</span>
+              </label>
+            </div>
+          </article>
+
+          <article class="privacy-card">
+            <strong>Local extension note</strong>
+            <p>The unpacked extension sends the stored key directly to Google Gemini. A published build should use backend-issued ephemeral tokens.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+    <script src="settings.js"></script>
+  </body>
+</html>

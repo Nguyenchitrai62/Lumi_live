@@ -85,10 +85,24 @@ const scenes = [
   { id: "garden", name: "Moon garden", symbol: "❀" },
 ] as const;
 
+const voices = [
+  ["Zephyr", "Female", "Bright"], ["Puck", "Male", "Upbeat"], ["Charon", "Male", "Informative"],
+  ["Kore", "Female", "Firm"], ["Fenrir", "Male", "Excitable"], ["Leda", "Female", "Youthful"],
+  ["Orus", "Male", "Firm"], ["Aoede", "Female", "Breezy"], ["Callirrhoe", "Female", "Easy-going"],
+  ["Autonoe", "Female", "Bright"], ["Enceladus", "Male", "Breathy"], ["Iapetus", "Male", "Clear"],
+  ["Umbriel", "Male", "Easy-going"], ["Algieba", "Male", "Smooth"], ["Despina", "Female", "Smooth"],
+  ["Erinome", "Female", "Clear"], ["Algenib", "Male", "Gravelly"], ["Rasalgethi", "Male", "Informative"],
+  ["Laomedeia", "Female", "Upbeat"], ["Achernar", "Female", "Soft"], ["Alnilam", "Male", "Firm"],
+  ["Schedar", "Male", "Even"], ["Gacrux", "Female", "Mature"], ["Pulcherrima", "Female", "Forward"],
+  ["Achird", "Male", "Friendly"], ["Zubenelgenubi", "Male", "Casual"], ["Vindemiatrix", "Female", "Gentle"],
+  ["Sadachbia", "Male", "Lively"], ["Sadaltager", "Male", "Knowledgeable"], ["Sulafat", "Female", "Warm"],
+] as const;
+
 type Outfit = "casual" | "moonlit";
 type Scene = (typeof scenes)[number]["id"];
 type SessionStatus = "idle" | "connecting" | "ready" | "error";
 type ThemePreference = "system" | "light" | "dark";
+type VoiceName = (typeof voices)[number][0];
 type VideoMode = "screen" | "camera" | "none";
 type Role = "user" | "lumi";
 type ChatMessage = { id: string; role: Role; text: string };
@@ -116,6 +130,14 @@ const videoModes: ReadonlyArray<{ id: VideoMode; label: string }> = [
   { id: "camera", label: "Camera" },
   { id: "none", label: "None" },
 ];
+
+function PetalLayer({ className = "" }: { className?: string }) {
+  return (
+    <div className={`web-petal-field ${className}`} aria-hidden="true">
+      {Array.from({ length: 14 }, (_, index) => <i key={index} />)}
+    </div>
+  );
+}
 
 async function requestVideoStream(mode: VideoMode) {
   if (mode === "none") return Promise.resolve<MediaStream | null>(null);
@@ -227,6 +249,138 @@ function base64ToInt16(base64: string) {
   return new Int16Array(bytes.buffer);
 }
 
+type VoicePreviewPhase = "connecting" | "playing";
+
+async function playGeminiVoicePreview(
+  voiceName: VoiceName,
+  onPhase: (phase: VoicePreviewPhase) => void,
+  signal: AbortSignal,
+) {
+  const audioContext = new AudioContext();
+  const socketHolder = { current: null as WebSocket | null };
+  const playbackSources = new Set<AudioBufferSourceNode>();
+  const stopPlayback = () => {
+    for (const source of playbackSources) {
+      try { source.stop(); } catch { /* Source may already be stopped. */ }
+    }
+    playbackSources.clear();
+  };
+
+  try {
+    if (signal.aborted) throw new DOMException("Voice preview stopped.", "AbortError");
+    await audioContext.resume();
+    const liveAuth = await getLiveAuth();
+    if (signal.aborted) throw new DOMException("Voice preview stopped.", "AbortError");
+    const websocketUrl = liveAuth.kind === "apiKey"
+      ? `${DIRECT_WS_ENDPOINT}?key=${encodeURIComponent(liveAuth.credential)}`
+      : `${WS_ENDPOINT}?access_token=${encodeURIComponent(liveAuth.credential)}`;
+    let nextPlaybackTime = audioContext.currentTime;
+    let receivedAudio = false;
+    let turnComplete = false;
+
+    onPhase("connecting");
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timeoutId = window.setTimeout(() => {
+        finish(new Error("Voice preview timed out. Please try again."));
+      }, 18000);
+
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        signal.removeEventListener("abort", abortPreview);
+        if (error) reject(error);
+        else resolve();
+      };
+
+      const abortPreview = () => {
+        stopPlayback();
+        socketHolder.current?.close();
+        finish(new DOMException("Voice preview stopped.", "AbortError"));
+      };
+      signal.addEventListener("abort", abortPreview, { once: true });
+
+      const websocket = new WebSocket(websocketUrl);
+      socketHolder.current = websocket;
+      websocket.onopen = () => {
+        websocket.send(JSON.stringify({
+          setup: {
+            model: `models/${MODEL}`,
+            generationConfig: {
+              responseModalities: ["AUDIO"],
+              speechConfig: {
+                voiceConfig: { prebuiltVoiceConfig: { voiceName } },
+              },
+            },
+            systemInstruction: {
+              parts: [{
+                text: "You are a voice preview. Read the requested English sentence naturally and do not add any other words.",
+              }],
+            },
+          },
+        }));
+      };
+
+      websocket.onmessage = async (event) => {
+        try {
+          const raw = typeof event.data === "string" ? event.data : await event.data.text();
+          const response = JSON.parse(raw);
+          if (response.setupComplete) {
+            websocket.send(JSON.stringify({
+              realtimeInput: {
+                text: "Have a wonderful day!",
+              },
+            }));
+          }
+
+          const parts = response.serverContent?.modelTurn?.parts ?? [];
+          for (const part of parts) {
+            if (!part.inlineData?.data) continue;
+            receivedAudio = true;
+            onPhase("playing");
+            const pcm = base64ToInt16(part.inlineData.data);
+            const floats = new Float32Array(pcm.length);
+            for (let index = 0; index < pcm.length; index += 1) floats[index] = pcm[index] / 32768;
+            const buffer = audioContext.createBuffer(1, floats.length, 24000);
+            buffer.copyToChannel(floats, 0);
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+            playbackSources.add(source);
+            source.addEventListener("ended", () => playbackSources.delete(source), { once: true });
+            const startAt = Math.max(audioContext.currentTime + 0.025, nextPlaybackTime);
+            nextPlaybackTime = startAt + buffer.duration;
+            source.start(startAt);
+          }
+
+          if (response.serverContent?.turnComplete) {
+            turnComplete = true;
+            websocket.close(1000, "Preview complete");
+            const remainingMs = Math.max(0, (nextPlaybackTime - audioContext.currentTime) * 1000);
+            window.setTimeout(() => {
+              finish(receivedAudio ? undefined : new Error("Gemini returned no preview audio."));
+            }, remainingMs + 80);
+          }
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error("Could not read the voice preview."));
+        }
+      };
+      websocket.onerror = () => finish(new Error("Could not connect to Gemini Live for the preview."));
+      websocket.onclose = () => {
+        if (!turnComplete) finish(new Error("Gemini Live ended before the preview was ready."));
+      };
+    });
+  } finally {
+    stopPlayback();
+    const websocket = socketHolder.current;
+    if (websocket && (websocket.readyState === WebSocket.OPEN || websocket.readyState === WebSocket.CONNECTING)) {
+      websocket.close();
+    }
+    await audioContext.close().catch(() => {});
+  }
+}
+
 function resampleTo16k(input: Float32Array, inputRate: number) {
   if (inputRate === 16000) return input;
   const ratio = inputRate / 16000;
@@ -280,7 +434,6 @@ export default function Home() {
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [videoMode, setVideoMode] = useState<VideoMode>(DEFAULT_VIDEO_MODE);
-  const [activeVideoMode, setActiveVideoMode] = useState<VideoMode>("none");
   const [pageAgentStatus, setPageAgentStatus] =
     useState<PageAgentExtensionState>("checking");
   const [pageAgentActivity, setPageAgentActivity] =
@@ -290,6 +443,9 @@ export default function Home() {
     url?: string;
   }>({});
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
+  const [voiceName, setVoiceName] = useState<VoiceName>("Zephyr");
+  const [voicePreviewPhase, setVoicePreviewPhase] = useState<VoicePreviewPhase | "idle">("idle");
+  const [petalsEnabled, setPetalsEnabled] = useState(true);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -327,6 +483,7 @@ export default function Home() {
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const pageAgentRunningRef = useRef(false);
   const pendingBridgeRequestsRef = useRef<Map<string, PendingBridgeRequest>>(new Map());
+  const voicePreviewAbortRef = useRef<AbortController | null>(null);
 
   const requestBrowserBridge = useCallback((
     tool: string,
@@ -416,6 +573,22 @@ export default function Home() {
     const savedTheme = localStorage.getItem("lumi-theme");
     if (savedTheme === "light" || savedTheme === "dark" || savedTheme === "system") {
       const timer = window.setTimeout(() => setThemePreference(savedTheme), 0);
+      return () => window.clearTimeout(timer);
+    }
+  }, []);
+
+  useEffect(() => {
+    const savedVoice = localStorage.getItem("lumi-voice");
+    if (voices.some(([name]) => name === savedVoice)) {
+      const timer = window.setTimeout(() => setVoiceName(savedVoice as VoiceName), 0);
+      return () => window.clearTimeout(timer);
+    }
+  }, []);
+
+  useEffect(() => {
+    const savedPetals = localStorage.getItem("lumi-petals");
+    if (savedPetals === "off") {
+      const timer = window.setTimeout(() => setPetalsEnabled(false), 0);
       return () => window.clearTimeout(timer);
     }
   }, []);
@@ -640,7 +813,6 @@ export default function Home() {
       video.srcObject = null;
     }
     activeVideoModeRef.current = "none";
-    setActiveVideoMode("none");
   };
 
   const sendVideoFrame = () => {
@@ -691,7 +863,6 @@ export default function Home() {
 
     videoStreamRef.current = stream;
     activeVideoModeRef.current = mode;
-    setActiveVideoMode(mode);
     video.srcObject = stream;
     await video.play();
 
@@ -1034,7 +1205,7 @@ export default function Home() {
                 responseModalities: ["AUDIO"],
                 mediaResolution: "MEDIA_RESOLUTION_MEDIUM",
                 speechConfig: {
-                  voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
+                  voiceConfig: { prebuiltVoiceConfig: { voiceName } },
                 },
               },
               realtimeInputConfig: {
@@ -1110,6 +1281,54 @@ export default function Home() {
     setThemePreference(theme);
   };
 
+  const choosePetals = (enabled: boolean) => {
+    localStorage.setItem("lumi-petals", enabled ? "on" : "off");
+    setPetalsEnabled(enabled);
+  };
+
+  const stopVoicePreview = () => {
+    const activePreview = voicePreviewAbortRef.current;
+    if (!activePreview) return;
+    voicePreviewAbortRef.current = null;
+    activePreview.abort();
+    setVoicePreviewPhase("idle");
+  };
+
+  const chooseVoice = (voice: VoiceName) => {
+    stopVoicePreview();
+    localStorage.setItem("lumi-voice", voice);
+    setVoiceName(voice);
+    const profile = voices.find(([name]) => name === voice) ?? voices[0];
+    setStatusMessage(`${voice} selected · ${profile[1]} · ${profile[2]}`);
+  };
+
+  const previewSelectedVoice = async () => {
+    if (voicePreviewPhase !== "idle" || status === "ready" || status === "connecting") return;
+    const previewController = new AbortController();
+    voicePreviewAbortRef.current = previewController;
+    setVoicePreviewPhase("connecting");
+    setStatusMessage(`Preparing a short ${voiceName} preview…`);
+    try {
+      await playGeminiVoicePreview(voiceName, setVoicePreviewPhase, previewController.signal);
+      setStatusMessage(`${voiceName} preview finished — start a new session when this voice feels right`);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setStatusMessage(error instanceof Error ? error.message : "Could not play the voice preview");
+      }
+    } finally {
+      if (voicePreviewAbortRef.current === previewController) {
+        voicePreviewAbortRef.current = null;
+        setVoicePreviewPhase("idle");
+      }
+    }
+  };
+
+  const selectedVoiceProfile = voices.find(([name]) => name === voiceName) ?? voices[0];
+
+  useEffect(() => () => {
+    voicePreviewAbortRef.current?.abort();
+  }, []);
+
   useEffect(() => {
     if (
       pageAgentStatus !== "ready" ||
@@ -1119,8 +1338,6 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [pageAgentActivity?.type, pageAgentStatus]);
 
-  const micBars = Math.min(5, Math.max(0, Math.ceil(micLevel * 5)));
-  const micIsHearingVoice = micLevel >= 0.08;
   const pageAgentCopy = pageAgentStatus === "running"
     ? pageAgentActivity?.label || "PageAgent is controlling Chrome"
     : pageAgentStatus === "ready"
@@ -1141,6 +1358,68 @@ export default function Home() {
           <span>Lumi <strong>Live</strong></span>
         </div>
         <div className="top-actions">
+          <label className="top-setting top-voice" htmlFor="lumi-voice">
+            <span>VOICE</span>
+            <select
+              id="lumi-voice"
+              value={voiceName}
+              onChange={(event) => chooseVoice(event.target.value as VoiceName)}
+              disabled={status === "ready" || status === "connecting"}
+            >
+              {voices.map(([name, gender, style]) => (
+                <option key={name} value={name}>{name} · {gender} · {style}</option>
+              ))}
+            </select>
+            <span className="voice-profile-tags" aria-label={`${selectedVoiceProfile[1]} voice, ${selectedVoiceProfile[2]} style`}>
+              <b className={`voice-gender voice-gender-${selectedVoiceProfile[1].toLowerCase()}`}>
+                {selectedVoiceProfile[1] === "Female" ? "♀" : "♂"} {selectedVoiceProfile[1]}
+              </b>
+              <b>{selectedVoiceProfile[2]}</b>
+            </span>
+          </label>
+          <button
+            className={`voice-preview-button voice-preview-${voicePreviewPhase}`}
+            type="button"
+            onClick={() => {
+              if (voicePreviewPhase === "idle") void previewSelectedVoice();
+              else {
+                stopVoicePreview();
+                setStatusMessage("Voice preview stopped");
+              }
+            }}
+            disabled={status === "ready" || status === "connecting"}
+            title={voicePreviewPhase === "idle" ? "Hear this Gemini Live voice in English" : "Stop voice preview"}
+          >
+            <span aria-hidden="true">{voicePreviewPhase === "idle" ? "▶" : "■"}</span>
+            {voicePreviewPhase === "idle" ? "Test" : "Stop"}
+          </button>
+          <label className="top-setting top-microphone" htmlFor="microphone-device">
+            <span>MIC <i className={`top-mic-level ${micLevel >= 0.08 ? "hearing" : ""}`} aria-hidden="true" /></span>
+            <select
+              id="microphone-device"
+              value={selectedDeviceId}
+              onChange={(event) => setSelectedDeviceId(event.target.value)}
+              disabled={status === "ready" || status === "connecting"}
+            >
+              <option value="">System default</option>
+              {audioInputs.map((device, index) => (
+                <option key={device.deviceId} value={device.deviceId}>
+                  {device.label || `Microphone ${index + 1}`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="top-setting top-vision" htmlFor="vision-source">
+            <span>VISION</span>
+            <select
+              id="vision-source"
+              value={videoMode}
+              onChange={(event) => setVideoMode(event.target.value as VideoMode)}
+              disabled={status === "ready" || status === "connecting"}
+            >
+              {videoModes.map((mode) => <option key={mode.id} value={mode.id}>{mode.label}</option>)}
+            </select>
+          </label>
           <div className="theme-switcher" role="group" aria-label="Color theme">
             {([
               ["system", "◐", "System"],
@@ -1160,6 +1439,10 @@ export default function Home() {
               </button>
             ))}
           </div>
+          <div className={`page-agent-pill page-agent-pill-${pageAgentStatus}`} title={pageAgentCopy}>
+            <span aria-hidden="true" />
+            PageAgent
+          </div>
           <div className="model-pill">
             <span className={`status-dot status-${status}`} />
             <span className="model-label">Gemini 3.1 Flash Live</span>
@@ -1169,8 +1452,17 @@ export default function Home() {
       </header>
 
       <section className="experience-grid">
-        <section className={`stage scene-${scene}`} aria-label={`${scenes.find((item) => item.id === scene)?.name} character stage`}>
+        <section className={`stage scene-${scene} ${petalsEnabled ? "petals-enabled" : "petals-disabled"}`} aria-label={`${scenes.find((item) => item.id === scene)?.name} character stage`}>
           <div className="scene-glow" />
+          <div className="scene-motion" aria-hidden="true">
+            <span className="scene-haze" />
+            <span className="ambient-mote ambient-mote-one" />
+            <span className="ambient-mote ambient-mote-two" />
+            <span className="ambient-mote ambient-mote-three" />
+            <span className="ambient-mote ambient-mote-four" />
+          </div>
+          <PetalLayer className="stage-petal-field" />
+          <video ref={videoElementRef} className="capture-video" autoPlay muted playsInline aria-hidden="true" />
           {pageAgentActivity && (
             pageAgentStatus === "running" ||
             pageAgentActivity.type === "completed"
@@ -1190,15 +1482,40 @@ export default function Home() {
               </span>
             </div>
           )}
-          <div className="sparkle sparkle-one">✦</div>
-          <div className="sparkle sparkle-two">✧</div>
-          <div className="sparkle sparkle-three">·</div>
-
           <div className="stage-toolbar">
             <span className="stage-kicker">NOW TOGETHER</span>
-            <button className="icon-button" type="button" onClick={() => setScene(scene === "bedroom" ? "observatory" : scene === "observatory" ? "garden" : "bedroom")} aria-label="Change background">
-              ✦
-            </button>
+            <div className="stage-customize" aria-label="Character scene and outfit">
+              <div className="customize-group">
+                <span className="customize-label">SCENE</span>
+                <div className="scene-options">
+                  {scenes.map((item) => (
+                    <button key={item.id} type="button" className={`scene-option scene-chip-${item.id} ${scene === item.id ? "selected" : ""}`} onClick={() => setScene(item.id)} aria-label={item.name} aria-pressed={scene === item.id} title={item.name}>
+                      <span>{item.symbol}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="customize-group outfit-group">
+                <span className="customize-label">OUTFIT</span>
+                <div className="outfit-options">
+                  <button type="button" className={outfit === "casual" ? "selected" : ""} onClick={() => setOutfit("casual")} aria-pressed={outfit === "casual"}>Cozy</button>
+                  <button type="button" className={outfit === "moonlit" ? "selected" : ""} onClick={() => setOutfit("moonlit")} aria-pressed={outfit === "moonlit"}>Moonlit</button>
+                </div>
+              </div>
+              <div className="customize-group petal-group">
+                <span className="customize-label">PETALS</span>
+                <button
+                  className="petal-toggle stage-petal-toggle"
+                  type="button"
+                  aria-pressed={petalsEnabled}
+                  aria-label={petalsEnabled ? "Turn off falling petals" : "Turn on falling petals"}
+                  title={petalsEnabled ? "Turn off falling petals" : "Turn on falling petals"}
+                  onClick={() => choosePetals(!petalsEnabled)}
+                >
+                  <span className="petal-toggle-icon" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
           </div>
 
           <div className={`avatar avatar-${outfit}`} aria-label={`Lumi wearing the ${outfit} outfit`}>
@@ -1228,138 +1545,31 @@ export default function Home() {
           </div>
         </section>
 
-        <aside className="side-panel">
+        <aside className={`side-panel ${petalsEnabled ? "petals-enabled" : "petals-disabled"}`}>
+          <PetalLayer className="conversation-petal-field" />
           <div className="conversation-head">
             <div>
-              <span className="eyebrow">YOUR STORY</span>
-              <h1>Talk with Lumi</h1>
+              <span className="eyebrow">HISTORY</span>
+              <h1>Conversation</h1>
             </div>
-            <span className={`connection-badge badge-${status}`}>{status === "ready" ? "Live" : status === "connecting" ? "Joining" : status === "error" ? "Retry" : "Offline"}</span>
+            <div className="conversation-actions">
+              <button
+                className="petal-toggle conversation-petal-toggle"
+                type="button"
+                aria-pressed={petalsEnabled}
+                aria-label={petalsEnabled ? "Turn off falling petals" : "Turn on falling petals"}
+                title={petalsEnabled ? "Turn off falling petals" : "Turn on falling petals"}
+                onClick={() => choosePetals(!petalsEnabled)}
+              >
+                <span className="petal-toggle-icon" aria-hidden="true" />
+              </button>
+              <span className={`connection-badge badge-${status}`}>{status === "ready" ? "Live" : status === "connecting" ? "Joining" : status === "error" ? "Retry" : "Offline"}</span>
+            </div>
           </div>
 
           <div className={`status-note note-${status}`} role="status">
             <span>{status === "error" ? "!" : status === "ready" ? "●" : "✦"}</span>
             <p>{statusMessage}</p>
-          </div>
-
-          <div className={`microphone-panel microphone-panel-${status}`}>
-            <div className="microphone-main">
-              <button
-                className="microphone-action"
-                type="button"
-                onClick={status === "ready" ? toggleMute : startSession}
-                disabled={status === "connecting"}
-              >
-                <span className="microphone-orb" aria-hidden="true"><span className={status === "ready" && isMuted ? "mic-icon mic-icon-muted" : "mic-icon"} /></span>
-                <span className="microphone-copy">
-                  <strong>
-                    {status === "ready"
-                      ? isMuted ? "Unmute microphone" : micIsHearingVoice ? "Voice detected" : "Microphone is listening"
-                      : status === "connecting" ? "Requesting microphone…" : status === "error" ? "Reconnect microphone" : "Enable microphone"}
-                  </strong>
-                  {status === "ready" && !isMuted ? (
-                    <span className={`mic-signal mic-signal-${micBars}`} aria-label={micIsHearingVoice ? "Microphone is detecting your voice" : "Microphone is waiting for your voice"}>
-                      <i /><i /><i /><i /><i />
-                      <small>{micIsHearingVoice ? "I can hear you — pause when you finish" : "Speak normally to test the input"}</small>
-                    </span>
-                  ) : (
-                    <small>{status === "ready" ? "Tap here to unmute" : "Your browser will ask for microphone access"}</small>
-                  )}
-                </span>
-              </button>
-              {status === "ready" && <button className="microphone-end" type="button" onClick={() => stopSession()}>End</button>}
-            </div>
-            {audioInputs.length > 0 && (
-              <label className="microphone-device" htmlFor="microphone-device">
-                <span>INPUT</span>
-                <select
-                  id="microphone-device"
-                  value={selectedDeviceId}
-                  onChange={(event) => setSelectedDeviceId(event.target.value)}
-                  disabled={status === "ready" || status === "connecting"}
-                >
-                  <option value="">System default</option>
-                  {audioInputs.map((device, index) => (
-                    <option key={device.deviceId} value={device.deviceId}>
-                      {device.label || `Microphone ${index + 1}`}
-                    </option>
-                  ))}
-                </select>
-                {status === "ready" && <small>End the call to change input</small>}
-              </label>
-            )}
-            <div className="video-source">
-              <div className="video-source-head">
-                <span>VISION</span>
-                <small>{status === "ready" ? "End the call to change source" : "Screen is the default"}</small>
-              </div>
-              <div className="video-options" role="group" aria-label="What Lumi can see">
-                {videoModes.map((mode) => (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    className={videoMode === mode.id ? "selected" : ""}
-                    onClick={() => setVideoMode(mode.id)}
-                    disabled={status === "ready" || status === "connecting"}
-                    aria-pressed={videoMode === mode.id}
-                  >
-                    {mode.label}
-                  </button>
-                ))}
-              </div>
-              <div className={`video-preview ${activeVideoMode !== "none" ? "video-preview-active" : ""}`}>
-                <video ref={videoElementRef} autoPlay muted playsInline aria-label={`${activeVideoMode} preview`} />
-                <span>{activeVideoMode === "screen" ? "Sharing screen at 1 FPS" : "Camera frames at 1 FPS"}</span>
-              </div>
-              <div
-                className={`page-agent-bridge page-agent-${pageAgentStatus}`}
-                aria-live="polite"
-                title={pageAgentTarget.url}
-              >
-                <div className="page-agent-summary">
-                  <span className="page-agent-dot" aria-hidden="true" />
-                  <span className="page-agent-copy">
-                    <strong>PageAgent browser control</strong>
-                    <small>{pageAgentCopy}</small>
-                  </span>
-                  {(pageAgentStatus === "ready" || pageAgentStatus === "running") && (
-                    <span className="page-agent-badge">
-                      {pageAgentStatus === "running" ? "ACTING" : "READY"}
-                    </span>
-                  )}
-                </div>
-
-                {pageAgentStatus === "missing" && (
-                  <div className="page-agent-setup">
-                    <strong>Local extension required</strong>
-                    <small>
-                      Open chrome://extensions, load the project&apos;s extension folder, then refresh this page.
-                    </small>
-                  </div>
-                )}
-
-                {pageAgentStatus === "ready" && (
-                  <small className="page-agent-hint">
-                    Direct Gemini Live tools · PageAgent DOM and pointer UI
-                  </small>
-                )}
-
-                {pageAgentStatus === "disconnected" && (
-                  <small className="page-agent-hint">
-                    Open the target tab and click the Lumi controller icon once. Its badge will show ON.
-                  </small>
-                )}
-
-                {pageAgentStatus === "error" && (
-                  <div className="page-agent-recovery">
-                    <button type="button" onClick={() => window.location.reload()}>
-                      Reconnect
-                    </button>
-                    <small>Open the target tab and click the Lumi controller icon again.</small>
-                  </div>
-                )}
-              </div>
-            </div>
           </div>
 
           <div className="transcript" aria-live="polite">
@@ -1384,27 +1594,6 @@ export default function Home() {
             <button type="submit" disabled={status !== "ready" || !input.trim()} aria-label="Send message">↑</button>
           </form>
 
-          <div className="customize-panel">
-            <div className="customize-group">
-              <span className="customize-label">SCENE</span>
-              <div className="scene-options">
-                {scenes.map((item) => (
-                  <button key={item.id} type="button" className={`scene-option scene-chip-${item.id} ${scene === item.id ? "selected" : ""}`} onClick={() => setScene(item.id)} aria-label={item.name} aria-pressed={scene === item.id}>
-                    <span>{item.symbol}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="customize-group outfit-group">
-              <span className="customize-label">OUTFIT</span>
-              <div className="outfit-options">
-                <button type="button" className={outfit === "casual" ? "selected" : ""} onClick={() => setOutfit("casual")} aria-pressed={outfit === "casual"}>Cozy</button>
-                <button type="button" className={outfit === "moonlit" ? "selected" : ""} onClick={() => setOutfit("moonlit")} aria-pressed={outfit === "moonlit"}>Moonlit</button>
-              </div>
-            </div>
-          </div>
-
-          <p className="privacy-note"><span>◇</span> Your API key stays on the server. Voice and the selected visual source stream to Gemini using a short-lived token.</p>
         </aside>
       </section>
     </main>

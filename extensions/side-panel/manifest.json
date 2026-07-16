@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Lumi Live",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "minimum_chrome_version": "120",
   "description": "A standalone Gemini Live voice agent with Lumi VTuber and PageAgent browser controls.",
   "permissions": ["activeTab", "scripting", "sidePanel", "storage", "tabs"],
@@ -31,6 +31,7 @@
   "side_panel": {
     "default_path": "sidepanel.html"
   },
+  "options_page": "settings.html",
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src https://generativelanguage.googleapis.com wss://generativelanguage.googleapis.com"
   }
