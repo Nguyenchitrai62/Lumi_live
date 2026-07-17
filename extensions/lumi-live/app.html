@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lumi Live</title>
+    <link rel="stylesheet" href="assets/lumi-rig.css" />
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <div id="backgroundScene" class="background-scene" aria-hidden="true">
+      <span class="background-wash background-wash-one"></span>
+      <span class="background-wash background-wash-two"></span>
+      <div class="petal-field"></div>
+    </div>
+    <main class="app">
+      <header class="topbar">
+        <div class="brand">
+          <img src="icons/lumi-live.png" alt="" />
+          <span>Lumi <strong>Live</strong></span>
+        </div>
+        <div class="top-actions">
+          <span id="liveBadge" class="badge badge-offline">Offline</span>
+          <button id="avatarModeButton" class="icon-button avatar-mode-button" type="button" aria-pressed="true" aria-label="Switch to Lumi VTuber" title="Switch to Lumi VTuber">
+            <span class="avatar-mode-icon" aria-hidden="true"></span>
+          </button>
+          <button id="petalsButton" class="icon-button background-effect-button" type="button" aria-pressed="true" aria-label="Turn off falling petals" title="Turn off falling petals">
+            <span class="petal-icon" aria-hidden="true"></span>
+          </button>
+          <button id="settingsButton" class="icon-button" type="button" aria-label="Open Lumi settings in a new tab" title="Open settings">⚙</button>
+        </div>
+      </header>
+
+      <section class="target-card" aria-live="polite">
+        <span id="targetDot" class="target-dot"></span>
+        <div class="target-copy">
+          <small>PAGEAGENT TARGET</small>
+          <strong id="targetTitle">No tab connected</strong>
+          <span id="targetHint">Switch to a web page and Lumi will follow it.</span>
+        </div>
+        <button id="connectTabButton" class="connect-button" type="button" disabled>Auto</button>
+      </section>
+
+      <section class="chat-stage" aria-label="Conversation with Lumi">
+        <section id="mcpToolNotice" class="mcp-tool-notice" role="alert" aria-live="assertive" hidden>
+          <span class="mcp-tool-notice-icon" aria-hidden="true">!</span>
+          <div class="mcp-tool-notice-copy">
+            <strong id="mcpToolNoticeTitle">MCP tool warning</strong>
+            <p id="mcpToolNoticeMessage"></p>
+          </div>
+          <div class="mcp-tool-notice-actions">
+            <button id="mcpToolNoticeSecondary" class="mcp-tool-notice-secondary" type="button" hidden>Keep enabled</button>
+            <button id="mcpToolNoticeTertiary" class="mcp-tool-notice-tertiary" type="button" hidden>Always allow</button>
+            <button id="mcpToolNoticePrimary" class="mcp-tool-notice-primary" type="button">OK</button>
+          </div>
+        </section>
+        <section id="transcript" class="transcript" aria-live="polite">
+          <article class="message message-lumi">
+            <span>Lumi</span>
+            <p>Hi! Save your Gemini key, open any web page, then talk to me. I follow your active tab automatically. ✦</p>
+          </article>
+        </section>
+
+        <aside id="vtuberCard" class="vtuber" aria-label="Lumi avatar status">
+          <button id="vtuberToggle" class="vtuber-toggle" type="button" aria-expanded="false" aria-label="Expand Lumi over the conversation">
+            <span class="sr-only">Toggle Lumi size</span>
+          </button>
+          <div class="lumi-rig">
+            <div class="lumi-rig-canvas">
+              <img class="lumi-rig-layer lumi-rig-hair-back" src="assets/avatars/vtuber/hair-back-casual.png" alt="" aria-hidden="true" draggable="false" />
+              <img class="lumi-rig-layer lumi-rig-base" src="assets/avatars/vtuber/base-casual.png" alt="Lumi, a blue-haired anime VTuber" draggable="false" />
+              <img id="eyesOpen" class="lumi-rig-layer lumi-rig-eye-sprite is-active" src="assets/avatars/vtuber/eyes-open.png" alt="" aria-hidden="true" draggable="false" />
+              <img id="eyesHalf" class="lumi-rig-layer lumi-rig-eye-sprite" src="assets/avatars/vtuber/eyes-half.png" alt="" aria-hidden="true" draggable="false" />
+              <img id="eyesClosed" class="lumi-rig-layer lumi-rig-eye-sprite" src="assets/avatars/vtuber/eyes-closed.png" alt="" aria-hidden="true" draggable="false" />
+              <img id="mouthNeutral" class="lumi-rig-layer lumi-rig-mouth-sprite is-active" src="assets/avatars/vtuber/mouth-neutral.png" alt="" aria-hidden="true" draggable="false" />
+              <img id="mouthSmall" class="lumi-rig-layer lumi-rig-mouth-sprite" src="assets/avatars/vtuber/mouth-small.png" alt="" aria-hidden="true" draggable="false" />
+              <img id="mouthWide" class="lumi-rig-layer lumi-rig-mouth-sprite" src="assets/avatars/vtuber/mouth-wide.png" alt="" aria-hidden="true" draggable="false" />
+              <img class="lumi-rig-layer lumi-rig-hair-front" src="assets/avatars/vtuber/hair-front-casual.png" alt="" aria-hidden="true" draggable="false" />
+            </div>
+          </div>
+          <div id="pixelAvatar" class="pixel-avatar" hidden aria-hidden="true">
+            <div id="pixelAvatarSprite" class="pixel-avatar-sprite" role="img" aria-label="Lumi Pixel Companion"></div>
+          </div>
+          <span id="vtuberMood">Ready</span>
+          <span class="vtuber-toggle-hint" aria-hidden="true">⛶</span>
+        </aside>
+      </section>
+
+      <footer class="composer-area">
+        <div class="voice-controls">
+          <button id="startButton" class="primary" type="button"><span class="mic-mark"></span><span>Start voice</span></button>
+          <button id="muteButton" class="secondary" type="button" disabled>Mute</button>
+        </div>
+        <form id="messageForm" class="message-form">
+          <label class="sr-only" for="messageInput">Message Lumi</label>
+          <input id="messageInput" type="text" placeholder="Start voice to type a message…" disabled />
+          <button type="submit" aria-label="Send message" disabled>↑</button>
+        </form>
+        <div class="status-row">
+          <p id="statusLine" class="status-line">Open settings and save your Gemini API key.</p>
+          <button id="microphoneHelpButton" class="status-help" type="button" hidden>Enable microphone</button>
+        </div>
+      </footer>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

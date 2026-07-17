@@ -7,9 +7,9 @@
   },
   "scripts": {
     "dev": "next dev",
-    "build": "npm run build:extensions && next build",
-    "build:extension": "npm run build:extensions",
-    "build:extensions": "node extensions/build.mjs",
+    "build": "npm run build:extension && next build",
+    "build:extension": "node extensions/build.mjs",
+    "build:extensions": "npm run build:extension",
     "start": "next start",
     "lint": "eslint app"
   },

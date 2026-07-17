@@ -1,25 +1,21 @@
-# Lumi Chrome extensions
+# Lumi Live Chrome extension
 
-Lumi contains two isolated Manifest V3 extensions:
+Lumi contains one standalone Manifest V3 extension:
 
 ```text
 extensions/
-├── build.mjs          Shared build and asset-copy pipeline
-├── side-panel/        Standalone Gemini Live agent
-└── web-controller/    Browser bridge for the Next.js app
+├── build.mjs          Build and asset-copy pipeline
+└── lumi-live/         Standalone Gemini Live agent
 ```
 
-| Extension | Purpose |
-| --- | --- |
-| [`side-panel`](./side-panel) | Voice/chat agent with AgentPet, automatic active-tab targeting, PageAgent tools, and MCP connections |
-| [`web-controller`](./web-controller) | Explicit opt-in browser control for the full-page Lumi web app |
+[`lumi-live`](./lumi-live) includes voice and chat, Pixel Companion and VTuber avatars, automatic active-tab targeting, PageAgent tools, and MCP connections.
 
-Build both variants from the project root:
+Build it from the project root:
 
 ```powershell
 npm run build:extension
 ```
 
-Load the required variant directory in `chrome://extensions`; do not load the outer `extensions` directory.
+Load `extensions/lumi-live` in `chrome://extensions`; do not load the outer `extensions` directory.
 
-`web-controller/src/controller.js` is the single PageAgent controller source. The build bundles it once and copies the same output into both extensions so browser actions cannot drift between variants.
+`lumi-live/page-controller.js` is the PageAgent controller source bundled into `lumi-live/dist/controller.js`. Pixel-avatar state and rendering live in `lumi-live/pixel-avatar-controller.js`, keeping the main runtime focused on Gemini, audio, browser, and MCP orchestration.

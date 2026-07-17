@@ -5,15 +5,12 @@ import path from "node:path";
 
 const extensionsRoot = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(extensionsRoot, "..");
-const webControllerRoot = path.join(extensionsRoot, "web-controller");
-const sidePanelRoot = path.join(extensionsRoot, "side-panel");
-const outputDirectory = path.join(webControllerRoot, "dist");
-const iconDirectory = path.join(webControllerRoot, "icons");
-const sidePanelOutputDirectory = path.join(sidePanelRoot, "dist");
-const sidePanelIconDirectory = path.join(sidePanelRoot, "icons");
-const sidePanelAvatarDirectory = path.join(sidePanelRoot, "assets", "avatars");
-const sidePanelRigDirectory = path.join(sidePanelAvatarDirectory, "rig", "lumi-face-v2");
-const sidePanelPetDirectory = path.join(sidePanelAvatarDirectory, "pets", "lumi");
+const extensionRoot = path.join(extensionsRoot, "lumi-live");
+const outputDirectory = path.join(extensionRoot, "dist");
+const iconDirectory = path.join(extensionRoot, "icons");
+const avatarDirectory = path.join(extensionRoot, "assets", "avatars");
+const vtuberDirectory = path.join(avatarDirectory, "vtuber");
+const pixelAvatarDirectory = path.join(avatarDirectory, "pixel");
 
 const pageControllerSameOriginIframePlugin = {
   name: "page-controller-same-origin-iframes",
@@ -36,45 +33,43 @@ const pageControllerSameOriginIframePlugin = {
   },
 };
 
-await rm(sidePanelAvatarDirectory, { recursive: true, force: true });
+await rm(avatarDirectory, { recursive: true, force: true });
 
 await Promise.all([
   mkdir(outputDirectory, { recursive: true }),
   mkdir(iconDirectory, { recursive: true }),
-  mkdir(sidePanelOutputDirectory, { recursive: true }),
-  mkdir(sidePanelIconDirectory, { recursive: true }),
-  mkdir(sidePanelAvatarDirectory, { recursive: true }),
-  mkdir(sidePanelPetDirectory, { recursive: true }),
+  mkdir(avatarDirectory, { recursive: true }),
+  mkdir(pixelAvatarDirectory, { recursive: true }),
 ]);
 await Promise.all([
   copyFile(
-    path.join(projectRoot, "public", "branding", "logo.png"),
-    path.join(iconDirectory, "logo.png"),
-  ),
-  copyFile(
-    path.join(projectRoot, "public", "branding", "lumi-sidepanel-icon.png"),
-    path.join(sidePanelIconDirectory, "lumi-sidepanel.png"),
+    path.join(projectRoot, "public", "branding", "lumi-live-icon.png"),
+    path.join(iconDirectory, "lumi-live.png"),
   ),
   copyFile(
     path.join(extensionsRoot, "shared", "lumi-rig.css"),
-    path.join(sidePanelRoot, "assets", "lumi-rig.css"),
+    path.join(extensionRoot, "assets", "lumi-rig.css"),
   ),
   cp(
-    path.join(projectRoot, "public", "avatars", "rig", "lumi-face-v2"),
-    sidePanelRigDirectory,
-    { recursive: true, force: true },
+    path.join(projectRoot, "public", "avatars", "vtuber"),
+    vtuberDirectory,
+    {
+      recursive: true,
+      force: true,
+      filter: (source) => path.basename(source) !== "references",
+    },
   ),
   copyFile(
-    path.join(projectRoot, "public", "avatars", "pets", "lumi", "pet.json"),
-    path.join(sidePanelPetDirectory, "pet.json"),
+    path.join(projectRoot, "public", "avatars", "pixel", "avatar.json"),
+    path.join(pixelAvatarDirectory, "avatar.json"),
   ),
   copyFile(
-    path.join(projectRoot, "public", "avatars", "pets", "lumi", "spritesheet.png"),
-    path.join(sidePanelPetDirectory, "spritesheet.png"),
+    path.join(projectRoot, "public", "avatars", "pixel", "spritesheet.png"),
+    path.join(pixelAvatarDirectory, "spritesheet.png"),
   ),
 ]);
 await build({
-  entryPoints: [path.join(webControllerRoot, "src", "controller.js")],
+  entryPoints: [path.join(extensionRoot, "page-controller.js")],
   outfile: path.join(outputDirectory, "controller.js"),
   bundle: true,
   format: "iife",
@@ -89,9 +84,4 @@ await build({
   },
 });
 
-await copyFile(
-  path.join(outputDirectory, "controller.js"),
-  path.join(sidePanelOutputDirectory, "controller.js"),
-);
-
-console.log("Built Lumi web controller and standalone Side Panel extensions");
+console.log("Built the Lumi Live extension");
