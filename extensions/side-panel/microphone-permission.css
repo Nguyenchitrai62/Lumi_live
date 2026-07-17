@@ -34,7 +34,10 @@ h1 { margin: 7px 0 12px; font-size: clamp(28px, 6vw, 42px); letter-spacing: -.04
 .message.success { color: #24765d; }
 .message.error { color: #ad4059; }
 .actions { display: grid; gap: 10px; margin-top: 24px; }
-button { min-height: 46px; border-radius: 14px; padding: 0 18px; cursor: pointer; font: inherit; font-weight: 800; }
+button { min-height: 46px; border-radius: 14px; padding: 0 18px; cursor: pointer; font: inherit; font-weight: 800; transition: translate .16s ease, filter .16s ease, box-shadow .16s ease; }
+button:not(:disabled):hover { translate: 0 -2px; filter: brightness(1.05) saturate(1.06); box-shadow: 0 12px 26px rgba(104, 80, 181, .2); }
+button:not(:disabled):active { translate: 0 1px; filter: brightness(.96); }
+button:focus-visible { outline: 3px solid rgba(115, 91, 195, .25); outline-offset: 2px; }
 button:disabled { opacity: .55; cursor: wait; }
 .primary { border: 0; color: #fff; background: linear-gradient(135deg, #8c77d4, #6951b7); box-shadow: 0 10px 24px rgba(104, 80, 181, .22); }
 .secondary { border: 1px solid rgba(105, 84, 160, .19); color: var(--lavender); background: #f5f1ff; }

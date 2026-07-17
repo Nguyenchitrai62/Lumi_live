@@ -1,4 +1,9 @@
 import { McpHttpClient, normalizeMcpUrl } from "./mcp-client.js";
+import { prepareGeminiMcpTool } from "./gemini-tool-schema.js";
+import {
+  extractActiveContextIdentifiers,
+  sanitizeActiveContextUrl,
+} from "./active-tab-context.js";
 
 const MESSAGE_TYPE = "lumi_sidepanel_request";
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
@@ -8,6 +13,9 @@ const PANEL_LIFECYCLE_MESSAGE = "lumi_sidepanel_lifecycle";
 const ELEMENT_HIGHLIGHTS_STORAGE_KEY = "lumiShowElementHighlights";
 const MCP_URL_STORAGE_KEY = "lumiMcpServerUrl";
 const MCP_SERVERS_STORAGE_KEY = "lumiMcpServers";
+const MCP_DISABLED_TOOLS_STORAGE_KEY = "lumiDisabledMcpTools";
+const MCP_TOOL_POLICIES_STORAGE_KEY = "lumiMcpToolPolicies";
+const DEFAULT_MCP_TOOL_POLICY = "allow";
 
 let connectedTabId = null;
 let listedTabIds = new Set();
@@ -189,6 +197,28 @@ function serializeTab(tab) {
   };
 }
 
+async function getActivePageContext() {
+  const status = await getStatus();
+  if (!status.connected) {
+    return {
+      connected: false,
+      reason: status.reason || "No controllable http/https tab is active.",
+      identifiers: [],
+      pathSegments: [],
+    };
+  }
+  const url = sanitizeActiveContextUrl(status.url);
+  const derived = extractActiveContextIdentifiers(url);
+  return {
+    connected: true,
+    tabId: status.tabId,
+    title: status.title,
+    url,
+    ...derived,
+    guidance: "Use an identifier only when it semantically matches a parameter declared by the MCP tool. Do not add undeclared arguments.",
+  };
+}
+
 async function listBrowserTabs() {
   const focusedWindow = await chrome.windows.getLastFocused();
   const tabs = await chrome.tabs.query({ windowId: focusedWindow.id });
@@ -333,7 +363,160 @@ function recordFromMcpConnection(connection) {
   };
 }
 
-function serializeMcpConnection(connection, includeTools = false) {
+function disabledMcpToolKey(serverId, toolName) {
+  return `${serverId}\u0000${toolName}`;
+}
+
+async function loadMcpToolPolicies() {
+  const stored = await chrome.storage.local.get(MCP_TOOL_POLICIES_STORAGE_KEY);
+  const records = Array.isArray(stored[MCP_TOOL_POLICIES_STORAGE_KEY])
+    ? stored[MCP_TOOL_POLICIES_STORAGE_KEY]
+    : [];
+  return new Map(records
+    .filter((record) => record
+      && typeof record.serverId === "string"
+      && typeof record.toolName === "string"
+      && ["block", "allow", "ask"].includes(record.mode))
+    .map((record) => [disabledMcpToolKey(record.serverId, record.toolName), record]));
+}
+
+async function saveMcpToolPolicies(policies) {
+  await chrome.storage.local.set({
+    [MCP_TOOL_POLICIES_STORAGE_KEY]: [...policies.values()],
+  });
+}
+
+async function setMcpToolPolicy(serverId, toolName, mode) {
+  if (typeof serverId !== "string" || !serverId || typeof toolName !== "string" || !toolName) {
+    throw new Error("A valid MCP server and tool are required.");
+  }
+  if (!["block", "allow", "ask"].includes(mode)) {
+    throw new Error("MCP tool permission must be block, allow, or ask.");
+  }
+  const policies = await loadMcpToolPolicies();
+  policies.set(disabledMcpToolKey(serverId, toolName), { serverId, toolName, mode });
+  await saveMcpToolPolicies(policies);
+  return { serverId, toolName, mode };
+}
+
+async function setMcpServerToolPolicy(serverId, mode) {
+  if (typeof serverId !== "string" || !serverId) {
+    throw new Error("A valid MCP server is required.");
+  }
+  if (!["block", "allow", "ask"].includes(mode)) {
+    throw new Error("MCP tool permission must be block, allow, or ask.");
+  }
+  const records = await loadMcpServerRecords();
+  const record = records.find((item) => item.id === serverId);
+  if (!record) throw new Error("That MCP server is no longer in your list.");
+  const connection = await connectMcpRecord(record);
+  const policies = await loadMcpToolPolicies();
+  let updatedCount = 0;
+  for (const tool of connection.tools) {
+    const toolName = typeof tool?.name === "string" ? tool.name : "";
+    if (!toolName) continue;
+    policies.set(disabledMcpToolKey(serverId, toolName), { serverId, toolName, mode });
+    updatedCount += 1;
+  }
+  await saveMcpToolPolicies(policies);
+  return { serverId, mode, updatedCount };
+}
+
+async function clearMcpToolPolicies(serverId) {
+  const policies = await loadMcpToolPolicies();
+  let changed = false;
+  for (const [key, record] of policies) {
+    if (record.serverId !== serverId) continue;
+    policies.delete(key);
+    changed = true;
+  }
+  if (changed) await saveMcpToolPolicies(policies);
+}
+
+async function loadDisabledMcpTools() {
+  const stored = await chrome.storage.session.get(MCP_DISABLED_TOOLS_STORAGE_KEY);
+  const records = Array.isArray(stored[MCP_DISABLED_TOOLS_STORAGE_KEY])
+    ? stored[MCP_DISABLED_TOOLS_STORAGE_KEY]
+    : [];
+  return new Map(records
+    .filter((record) => record && typeof record.serverId === "string" && typeof record.toolName === "string")
+    .map((record) => [disabledMcpToolKey(record.serverId, record.toolName), record]));
+}
+
+async function saveDisabledMcpTools(disabledTools) {
+  await chrome.storage.session.set({
+    [MCP_DISABLED_TOOLS_STORAGE_KEY]: [...disabledTools.values()],
+  });
+}
+
+async function disableMcpTool(serverId, toolName, reason, source = "manual") {
+  if (typeof serverId !== "string" || !serverId || typeof toolName !== "string" || !toolName) {
+    throw new Error("A valid MCP server and tool are required.");
+  }
+  const disabledSource = ["gemini_setup", "runtime_user", "settings"].includes(source)
+    ? source
+    : "manual";
+  const disabledTools = await loadDisabledMcpTools();
+  disabledTools.set(disabledMcpToolKey(serverId, toolName), {
+    serverId,
+    toolName,
+    reason: String(reason || "Gemini Live rejected this tool declaration.").slice(0, 1200),
+    source: disabledSource,
+    disabledAt: Date.now(),
+  });
+  await saveDisabledMcpTools(disabledTools);
+  return { disabled: true, serverId, toolName, source: disabledSource };
+}
+
+async function enableMcpTool(serverId, toolName) {
+  if (typeof serverId !== "string" || !serverId || typeof toolName !== "string" || !toolName) {
+    throw new Error("A valid MCP server and tool are required.");
+  }
+  const disabledTools = await loadDisabledMcpTools();
+  disabledTools.delete(disabledMcpToolKey(serverId, toolName));
+  await saveDisabledMcpTools(disabledTools);
+  return { disabled: false, serverId, toolName };
+}
+
+async function clearDisabledMcpTools(serverId) {
+  const disabledTools = await loadDisabledMcpTools();
+  let changed = false;
+  for (const [key, record] of disabledTools) {
+    if (record.serverId !== serverId) continue;
+    disabledTools.delete(key);
+    changed = true;
+  }
+  if (changed) await saveDisabledMcpTools(disabledTools);
+}
+
+function serializeMcpTool(serverId, tool, disabledTools, policies) {
+  const compatibility = prepareGeminiMcpTool(tool);
+  const toolKey = disabledMcpToolKey(serverId, String(tool?.name || ""));
+  const temporaryBlock = disabledTools.get(toolKey);
+  const permission = policies.get(toolKey)?.mode || DEFAULT_MCP_TOOL_POLICY;
+  return {
+    name: typeof tool?.name === "string" ? tool.name : "",
+    description: typeof tool?.description === "string" ? tool.description : "",
+    permission,
+    gemini: {
+      ...compatibility,
+      schemaCompatible: compatibility.enabled,
+      enabled: compatibility.enabled && !temporaryBlock,
+      temporary: Boolean(temporaryBlock),
+      disabledSource: temporaryBlock?.source || (compatibility.enabled ? "" : "schema"),
+      errors: temporaryBlock ? [temporaryBlock.reason] : compatibility.errors,
+    },
+  };
+}
+
+function serializeMcpConnection(
+  connection,
+  includeTools = false,
+  disabledTools = new Map(),
+  policies = new Map(),
+) {
+  const tools = connection.tools.map((tool) =>
+    serializeMcpTool(connection.id, tool, disabledTools, policies));
   const result = {
     id: connection.id,
     url: connection.url,
@@ -342,8 +525,10 @@ function serializeMcpConnection(connection, includeTools = false) {
     protocolVersion: connection.client.protocolVersion || "",
     instructions: connection.client.instructions || "",
     toolCount: connection.tools.length,
+    enabledToolCount: tools.filter((tool) => tool.gemini.enabled).length,
+    disabledToolCount: tools.filter((tool) => !tool.gemini.enabled).length,
   };
-  if (includeTools) result.tools = connection.tools;
+  if (includeTools) result.tools = tools;
   return result;
 }
 
@@ -369,7 +554,7 @@ async function addMcpServer(rawUrl) {
   const connection = await connectMcpRecord(draft, true);
   records.push(recordFromMcpConnection(connection));
   await saveMcpServerRecords(records);
-  return serializeMcpConnection(connection);
+  return serializeMcpConnection(connection, true);
 }
 
 async function listMcpServers() {
@@ -382,9 +567,10 @@ async function reconnectMcpServer(serverId) {
   const index = records.findIndex((record) => record.id === serverId);
   if (index < 0) throw new Error("That MCP server is no longer in your list.");
   const connection = await connectMcpRecord(records[index], true);
+  await clearDisabledMcpTools(serverId);
   records[index] = recordFromMcpConnection(connection);
   await saveMcpServerRecords(records);
-  return serializeMcpConnection(connection);
+  return serializeMcpConnection(connection, true, new Map(), await loadMcpToolPolicies());
 }
 
 async function removeMcpServer(serverId) {
@@ -392,17 +578,19 @@ async function removeMcpServer(serverId) {
   const nextRecords = records.filter((record) => record.id !== serverId);
   if (nextRecords.length === records.length) throw new Error("That MCP server is no longer in your list.");
   mcpConnections.delete(serverId);
+  await clearDisabledMcpTools(serverId);
+  await clearMcpToolPolicies(serverId);
   await saveMcpServerRecords(nextRecords);
   return { servers: nextRecords, count: nextRecords.length };
 }
 
-async function getConfiguredMcps(includeTools = false) {
+async function getConfiguredMcps(includeTools = false, force = true) {
   const records = await loadMcpServerRecords();
   if (!records.length) return { configured: false, serverCount: 0, connectedCount: 0, servers: [] };
 
   const states = await Promise.all(records.map(async (record) => {
     try {
-      const connection = await connectMcpRecord(record, true);
+      const connection = await connectMcpRecord(record, force);
       return { record: recordFromMcpConnection(connection), connection, error: "" };
     } catch (error) {
       mcpConnections.delete(record.id);
@@ -418,24 +606,38 @@ async function getConfiguredMcps(includeTools = false) {
   if (JSON.stringify(refreshedRecords) !== JSON.stringify(records)) {
     await saveMcpServerRecords(refreshedRecords);
   }
+  const disabledTools = await loadDisabledMcpTools();
+  const policies = await loadMcpToolPolicies();
   return {
     configured: true,
     serverCount: records.length,
     connectedCount: states.filter((state) => state.connection).length,
     servers: states.map((state) => state.connection
-      ? serializeMcpConnection(state.connection, includeTools)
-      : { ...state.record, tools: [], error: state.error }),
+      ? serializeMcpConnection(state.connection, includeTools, disabledTools, policies)
+      : { ...state.record, enabledToolCount: 0, disabledToolCount: 0, tools: [], error: state.error }),
   };
 }
 
-async function callMcpTool(serverId, tool, args) {
+async function callMcpTool(serverId, tool, args, permissionGranted = false) {
   const records = await loadMcpServerRecords();
   const record = records.find((candidate) => candidate.id === serverId);
   if (!record) throw new Error("The MCP server for this tool is no longer configured.");
   const connection = await connectMcpRecord(record);
-  if (!connection.tools.some((candidate) => candidate.name === tool)) {
+  const candidate = connection.tools.find((item) => item.name === tool);
+  if (!candidate) {
     throw new Error(`${record.serverName} does not expose tool: ${tool}`);
   }
+  const policies = await loadMcpToolPolicies();
+  const permission = policies.get(disabledMcpToolKey(serverId, tool))?.mode || DEFAULT_MCP_TOOL_POLICY;
+  if (permission === "block") throw new Error("This MCP tool is blocked in Lumi Settings.");
+  if (permission === "ask" && permissionGranted !== true) {
+    throw new Error("This MCP tool requires user approval before every call.");
+  }
+  const disabledTools = await loadDisabledMcpTools();
+  const temporaryBlock = disabledTools.get(disabledMcpToolKey(serverId, tool));
+  if (temporaryBlock) throw new Error(`This MCP tool is temporarily disabled: ${temporaryBlock.reason}`);
+  const compatibility = prepareGeminiMcpTool(candidate);
+  if (!compatibility.enabled) throw new Error(`This MCP tool has an incompatible schema: ${compatibility.errors.join(" ")}`);
   return connection.client.callTool(tool, args || {});
 }
 
@@ -456,6 +658,7 @@ async function handleMessage(message) {
     return visualPreferences;
   }
   if (message.command === "browser_tool") {
+    if (message.tool === "browser_get_active_context") return getActivePageContext();
     if (message.tool === "browser_list_tabs") return listBrowserTabs();
     if (message.tool === "browser_open_tab") return openBrowserTab(message.args || {});
     if (message.tool === "browser_switch_tab") return switchBrowserTab(message.args || {});
@@ -466,8 +669,24 @@ async function handleMessage(message) {
   if (message.command === "mcp_reconnect_server") return reconnectMcpServer(message.serverId);
   if (message.command === "mcp_remove_server") return removeMcpServer(message.serverId);
   if (message.command === "mcp_get_tools") return getConfiguredMcps(true);
+  if (message.command === "mcp_inspect_tools") return getConfiguredMcps(true, false);
+  if (message.command === "mcp_disable_tool") {
+    return disableMcpTool(message.serverId, message.tool, message.reason, message.source);
+  }
+  if (message.command === "mcp_enable_tool") return enableMcpTool(message.serverId, message.tool);
+  if (message.command === "mcp_set_tool_policy") {
+    return setMcpToolPolicy(message.serverId, message.tool, message.mode);
+  }
+  if (message.command === "mcp_set_server_tool_policy") {
+    return setMcpServerToolPolicy(message.serverId, message.mode);
+  }
   if (message.command === "mcp_call_tool") {
-    return callMcpTool(message.serverId, message.tool, message.args || {});
+    return callMcpTool(
+      message.serverId,
+      message.tool,
+      message.args || {},
+      message.permissionGranted === true,
+    );
   }
   throw new Error(`Unsupported side panel command: ${message.command}`);
 }

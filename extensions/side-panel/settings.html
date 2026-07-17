@@ -19,7 +19,7 @@
             <h1>Settings</h1>
           </div>
         </div>
-        <p>Connection, voice, microphone, and PageAgent preferences.</p>
+        <p>Set up the essentials for Lumi.</p>
       </header>
 
       <section class="settings-grid">
@@ -27,7 +27,10 @@
           <span class="eyebrow">GEMINI CONNECTION</span>
           <h2>API and voice</h2>
 
-          <label for="apiKeyInput">Gemini API key</label>
+          <div class="field-label-row">
+            <label for="apiKeyInput">Gemini API key</label>
+            <a class="api-key-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Create or get an API key ↗</a>
+          </div>
           <div class="key-row">
             <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste a Google AI Studio key" />
             <button id="toggleKeyButton" class="secondary" type="button">Show</button>
@@ -69,14 +72,8 @@
           </select>
           <button id="previewVoiceButton" class="secondary preview-voice" type="button">▶ Test voice</button>
           </div>
-          <div id="voiceProfile" class="voice-profile" aria-live="polite">
-            <span id="voiceGender" class="voice-tag voice-tag-female">♀ Female</span>
-            <span id="voiceStyle" class="voice-tag">Bright</span>
-            <small>English preview</small>
-          </div>
-          <p class="field-help">Listen before saving. Changing the voice stops the current preview immediately.</p>
-          <button id="saveSettingsButton" class="primary" type="button">Save connection settings</button>
-          <p id="saveNote" class="note" role="status">Your key stays in Chrome extension storage on this device.</p>
+          <button id="saveSettingsButton" class="primary" type="button">Save</button>
+          <p id="saveNote" class="note" role="status">Saved only on this device.</p>
         </article>
 
         <div class="settings-column">
@@ -96,7 +93,7 @@
             <div class="setting-row">
               <div>
                 <h2>Page element guides</h2>
-                <p>Show DOM boxes and index numbers while Lumi acts.</p>
+                <p>Show page labels while Lumi controls the web.</p>
               </div>
               <label class="toggle-switch" for="showElementHighlightsInput">
                 <input id="showElementHighlightsInput" type="checkbox" />
@@ -106,13 +103,10 @@
             </div>
           </article>
 
-          <article class="privacy-card">
-            <strong>Local extension note</strong>
-            <p>The unpacked extension sends the stored key directly to Google Gemini. A published build should use backend-issued ephemeral tokens.</p>
-          </article>
         </div>
 
-        <article class="settings-card mcp-card">
+        <article id="mcpCard" class="settings-card mcp-card">
+          <div id="mcpOverviewView" class="mcp-overview-view">
           <div class="mcp-card-heading">
             <div>
               <span class="eyebrow">MCP TOOL SERVERS</span>
@@ -120,18 +114,26 @@
                 <h2>Connected tools</h2>
                 <span id="mcpServerCount" class="count-pill">0 servers</span>
               </div>
-              <p class="mcp-intro">Connect multiple MCP endpoints. Lumi combines their tools at the start of the next voice session and routes every call back to the correct server.</p>
+              <p class="mcp-intro">Connect external tools and choose when Lumi may use them.</p>
             </div>
             <button id="showAddMcpButton" class="secondary add-mcp-button" type="button" aria-expanded="false" aria-controls="mcpAddForm">
               <span aria-hidden="true">+</span> Add server
             </button>
           </div>
 
+          <div id="mcpToolAlert" class="mcp-tool-alert" role="status" hidden>
+            <div>
+              <strong>MCP tool warning</strong>
+              <p id="mcpToolAlertMessage"></p>
+            </div>
+            <button id="dismissMcpToolAlertButton" type="button">OK</button>
+          </div>
+
           <form id="mcpAddForm" class="mcp-add-form" hidden>
             <div class="mcp-add-heading">
               <div>
                 <strong>New MCP server</strong>
-                <p>Enter a Streamable HTTP endpoint. Lumi tests the connection before saving it.</p>
+                <p>Paste the server URL. Lumi checks it before saving.</p>
               </div>
               <button id="cancelAddMcpButton" class="text-button" type="button">Cancel</button>
             </div>
@@ -140,26 +142,45 @@
               <input id="mcpUrlInput" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/mcp" />
               <button id="connectMcpButton" class="primary" type="submit">Connect server</button>
             </div>
-            <p class="field-help">Remote HTTP links are upgraded to HTTPS. Localhost may use HTTP for development.</p>
             <p id="mcpStatus" class="note" role="status"></p>
           </form>
 
           <div id="mcpEmptyState" class="mcp-empty-state">
             <span class="mcp-empty-icon" aria-hidden="true">M</span>
             <div>
-              <strong>No MCP servers yet</strong>
-              <p>Add a server only when you want Lumi to use its tools.</p>
+              <strong>No tools connected</strong>
+              <p>Add a server when you want Lumi to use external tools.</p>
             </div>
           </div>
           <div id="mcpServerList" class="mcp-server-list" role="list" aria-live="polite"></div>
+          </div>
 
-          <details class="mcp-diagnostics">
-            <summary>Connection policy</summary>
-            <code id="mcpNetworkPolicy"></code>
-          </details>
         </article>
       </section>
     </main>
+
+    <section id="mcpToolsView" class="mcp-tools-view" aria-hidden="true" inert>
+      <div class="mcp-tools-page-shell">
+        <header class="mcp-tools-view-header">
+          <button id="backToMcpServersButton" class="mcp-back-button" type="button" aria-label="Back to MCP servers">← <span>Back</span></button>
+          <div>
+            <span class="eyebrow">MCP TOOL PERMISSIONS</span>
+            <h2 id="mcpToolsViewTitle">Tool permissions</h2>
+            <p id="mcpToolsViewSubtitle"></p>
+          </div>
+        </header>
+
+        <section class="mcp-bulk-permission" aria-labelledby="mcpBulkPermissionTitle">
+          <div>
+            <strong id="mcpBulkPermissionTitle">All tools</strong>
+            <p>Apply one choice to every tool.</p>
+          </div>
+          <div id="mcpBulkPermissionOptions" class="mcp-bulk-options" role="group" aria-label="Permission for all tools"></div>
+        </section>
+
+        <div id="mcpToolPermissionList" class="mcp-tool-permission-list" role="list"></div>
+      </div>
+    </section>
     <script src="settings.js"></script>
   </body>
 </html>

@@ -13,6 +13,7 @@ const sidePanelOutputDirectory = path.join(sidePanelRoot, "dist");
 const sidePanelIconDirectory = path.join(sidePanelRoot, "icons");
 const sidePanelAvatarDirectory = path.join(sidePanelRoot, "assets", "avatars");
 const sidePanelRigDirectory = path.join(sidePanelAvatarDirectory, "rig", "lumi-face-v2");
+const sidePanelPetDirectory = path.join(sidePanelAvatarDirectory, "pets", "lumi");
 
 const pageControllerSameOriginIframePlugin = {
   name: "page-controller-same-origin-iframes",
@@ -43,6 +44,7 @@ await Promise.all([
   mkdir(sidePanelOutputDirectory, { recursive: true }),
   mkdir(sidePanelIconDirectory, { recursive: true }),
   mkdir(sidePanelAvatarDirectory, { recursive: true }),
+  mkdir(sidePanelPetDirectory, { recursive: true }),
 ]);
 await Promise.all([
   copyFile(
@@ -61,6 +63,14 @@ await Promise.all([
     path.join(projectRoot, "public", "avatars", "rig", "lumi-face-v2"),
     sidePanelRigDirectory,
     { recursive: true, force: true },
+  ),
+  copyFile(
+    path.join(projectRoot, "public", "avatars", "pets", "lumi", "pet.json"),
+    path.join(sidePanelPetDirectory, "pet.json"),
+  ),
+  copyFile(
+    path.join(projectRoot, "public", "avatars", "pets", "lumi", "spritesheet.png"),
+    path.join(sidePanelPetDirectory, "spritesheet.png"),
   ),
 ]);
 await build({

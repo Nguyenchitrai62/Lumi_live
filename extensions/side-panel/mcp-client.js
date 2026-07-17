@@ -151,7 +151,7 @@ export class McpHttpClient {
     const result = await this.request("initialize", {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: "Lumi Live Side Panel", version: "0.0.7" },
+      clientInfo: { name: "Lumi Live Side Panel", version: "0.0.14" },
     });
     this.protocolVersion = result?.protocolVersion || MCP_PROTOCOL_VERSION;
     this.serverInfo = result?.serverInfo || null;

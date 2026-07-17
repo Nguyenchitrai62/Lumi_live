@@ -1,35 +1,54 @@
 # Lumi Live Side Panel
 
-This is the standalone Lumi extension. It does not load or iframe the Lumi website and does not require the Next.js server.
+The standalone Chrome extension runs Gemini Live, Lumi AgentPet, PageAgent browser controls, and user-configured MCP tools without requiring the Next.js app.
 
-## Install locally
+## Install
 
-1. Run `npm run build:extension` from the project root.
-2. Open `chrome://extensions` and enable **Developer mode**.
-3. Choose **Load unpacked** and select `extensions/side-panel`.
-4. Pin the generated Lumi portrait icon and click it to open the Side Panel.
-5. Click the gear button. A dedicated Settings tab opens; paste a Gemini API key, choose a Gemini voice, and save it locally.
-6. To enable MCP tools, open **Connected tools**, press **Add server**, enter a remote MCP endpoint, and connect it. Repeat to add more servers; leaving the list empty keeps MCP disabled.
-7. Open or switch to any normal http/https page. **PAGEAGENT TARGET** follows the active Chrome tab automatically; no Connect step is required.
-8. Press **Start voice**. The first time, Lumi opens a separate permission tab so Chrome can show its native microphone **Allow / Block** prompt.
-9. Choose **Allow**, return to the Side Panel, and press **Start voice** again.
+```powershell
+npm run build:extension
+```
 
-After pulling or rebuilding the extension, press **Reload** on `chrome://extensions`, close any old Lumi Settings/side-panel pages, and open them again. The Settings header shows the running manifest version and the MCP card shows the active runtime network policy so stale extension instances are easy to identify.
+1. Open `chrome://extensions` and enable **Developer mode**.
+2. Select **Load unpacked** and choose `extensions/side-panel`.
+3. Open Settings from the gear button.
+4. Save a Gemini API key, choose a voice, and allow microphone access.
+5. Open a normal HTTP/HTTPS tab and press **Start voice**.
 
-If microphone access was denied earlier, open Lumi settings and press **Fix access**. The permission tab contains a button that opens Chrome's site settings for this exact extension ID, so you do not need to search through Chrome settings manually.
+After rebuilding, press **Reload** on `chrome://extensions` and reopen old Settings or Side Panel pages.
 
-The settings panel also contains **Page element guides**. It is off by default, hiding PageAgent's colored element boxes and index numbers while preserving the animated pointer, click ripple, interaction mask, typing, selection, and scrolling feedback. Turn it on only when you want to inspect PageAgent's DOM indexing visually.
+## AgentPet
 
-Lumi uses a true facial-layer rig: original hair pixels are split into static back/front layers, the body and locally cleaned face sit between them, and three independent eye plus three independent mouth sprites sit below the front bangs. Randomized blinking swaps only the eyes; Gemini audio energy swaps only the mouth. The hair layers are not animated, and no replacement body is generated.
+AgentPet is enabled by default and starts animating in `idle` before voice starts. The pixel-face button in the topbar switches between AgentPet and the fallback VTuber.
 
-The Side Panel uses Gemini 3.1 Flash Live Preview as the only LLM. Gemini calls the low-level PageAgent DOM tools directly; Alibaba PageAgent's LLM core is not included. The PageAgent target automatically changes whenever the user activates another normal web tab. Gemini can also list controllable tabs, open an HTTP/HTTPS tab, or switch to a tab selected from the latest short-lived tab list before continuing DOM work.
+The metadata-driven atlas contains nine states:
 
-Voice selection is saved in `chrome.storage.local` and sent as `speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName` when the next Gemini Live session starts. End the current voice session before changing voices.
+| State | Trigger |
+| --- | --- |
+| `idle` | Available before or between sessions |
+| `connecting` | Preparing microphone or Gemini Live |
+| `listening` | Waiting for user speech |
+| `thinking` | Preparing a response or next action |
+| `speaking` | Playing Gemini audio |
+| `ui_control` | Interacting with browser UI |
+| `tool_call` | Running an MCP tool |
+| `success` | An action completed |
+| `error` | A connection, browser action, or tool failed |
 
-The API key is stored in `chrome.storage.local` and sent directly to Google Gemini. For a published extension, replace this local-key flow with a backend that issues short-lived ephemeral Live API tokens.
+The build copies the source atlas from `public/avatars/pets/lumi`. If it cannot load, Lumi automatically uses the VTuber.
 
-The MCP server list is stored in `chrome.storage.local`, but an endpoint is added only after it completes initialization plus `tools/list`. Version 0.0.7 automatically migrates the previous single `lumiMcpServerUrl` value into the new list. At the start of a voice session, Lumi reconnects to every saved endpoint, converts their tool schemas to unique Gemini function declarations, and routes each matching call back through the correct server's MCP `tools/call`. A server that fails to connect does not prevent the other configured servers from loading.
+## Browser and MCP tools
 
-Every MCP call appears in the conversation as a collapsed activity card showing the tool name and live status. Expand the card to inspect the connected server, arguments, duration, result, error, or cancellation reason. Tool results shown in the card are the same normalized payload returned to Gemini Live, including any safety truncation marker.
+- **PAGEAGENT TARGET** follows the active normal web tab automatically.
+- Page element guides are optional and disabled by default.
+- MCP servers are added from **Settings → Connected tools**.
+- Every MCP tool can be set to **Always allow**, **Ask every time**, or **Block**.
+- Invalid or rejected tools are isolated so voice, chat, and other tools remain available.
+- Tool activity cards expose arguments, status, duration, result, failure, or cancellation.
 
-The generated Lumi portrait icon is intentionally different from the original logo used by `web-controller`, so both unpacked extensions can be installed and recognized side by side.
+## Local data and permissions
+
+The Gemini key, selected voice, avatar preference, MCP servers, and tool policies are stored in `chrome.storage.local`.
+
+The first voice session opens a dedicated microphone permission page. If access was previously denied, use **Fix access** in Settings.
+
+For a published extension, replace the local API-key flow with backend-issued ephemeral tokens.

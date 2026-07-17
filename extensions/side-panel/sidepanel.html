@@ -21,6 +21,9 @@
         </div>
         <div class="top-actions">
           <span id="liveBadge" class="badge badge-offline">Offline</span>
+          <button id="avatarModeButton" class="icon-button avatar-mode-button" type="button" aria-pressed="true" aria-label="Switch to Lumi VTuber" title="Switch to Lumi VTuber">
+            <span class="avatar-mode-icon" aria-hidden="true"></span>
+          </button>
           <button id="petalsButton" class="icon-button background-effect-button" type="button" aria-pressed="true" aria-label="Turn off falling petals" title="Turn off falling petals">
             <span class="petal-icon" aria-hidden="true"></span>
           </button>
@@ -39,6 +42,18 @@
       </section>
 
       <section class="chat-stage" aria-label="Conversation with Lumi">
+        <section id="mcpToolNotice" class="mcp-tool-notice" role="alert" aria-live="assertive" hidden>
+          <span class="mcp-tool-notice-icon" aria-hidden="true">!</span>
+          <div class="mcp-tool-notice-copy">
+            <strong id="mcpToolNoticeTitle">MCP tool warning</strong>
+            <p id="mcpToolNoticeMessage"></p>
+          </div>
+          <div class="mcp-tool-notice-actions">
+            <button id="mcpToolNoticeSecondary" class="mcp-tool-notice-secondary" type="button" hidden>Keep enabled</button>
+            <button id="mcpToolNoticeTertiary" class="mcp-tool-notice-tertiary" type="button" hidden>Always allow</button>
+            <button id="mcpToolNoticePrimary" class="mcp-tool-notice-primary" type="button">OK</button>
+          </div>
+        </section>
         <section id="transcript" class="transcript" aria-live="polite">
           <article class="message message-lumi">
             <span>Lumi</span>
@@ -46,7 +61,7 @@
           </article>
         </section>
 
-        <aside id="vtuberCard" class="vtuber" aria-label="Lumi VTuber status">
+        <aside id="vtuberCard" class="vtuber" aria-label="Lumi avatar status">
           <button id="vtuberToggle" class="vtuber-toggle" type="button" aria-expanded="false" aria-label="Expand Lumi over the conversation">
             <span class="sr-only">Toggle Lumi size</span>
           </button>
@@ -62,6 +77,9 @@
               <img id="mouthWide" class="lumi-rig-layer lumi-rig-mouth-sprite" src="assets/avatars/rig/lumi-face-v2/mouth-wide.png" alt="" aria-hidden="true" draggable="false" />
               <img class="lumi-rig-layer lumi-rig-hair-front" src="assets/avatars/rig/lumi-face-v2/hair-front-casual.png" alt="" aria-hidden="true" draggable="false" />
             </div>
+          </div>
+          <div id="agentPet" class="agent-pet" hidden aria-hidden="true">
+            <div id="agentPetSprite" class="agent-pet-sprite" role="img" aria-label="Lumi pixel companion"></div>
           </div>
           <span id="vtuberMood">Ready</span>
           <span class="vtuber-toggle-hint" aria-hidden="true">⛶</span>
