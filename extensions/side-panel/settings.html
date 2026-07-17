@@ -12,7 +12,10 @@
         <div class="brand">
           <img src="icons/lumi-sidepanel.png" alt="" />
           <div>
-            <span>LUMI LIVE</span>
+            <div class="brand-meta">
+              <span>LUMI LIVE</span>
+              <span id="extensionVersion" class="version-chip" aria-label="Extension version"></span>
+            </div>
             <h1>Settings</h1>
           </div>
         </div>
@@ -108,6 +111,53 @@
             <p>The unpacked extension sends the stored key directly to Google Gemini. A published build should use backend-issued ephemeral tokens.</p>
           </article>
         </div>
+
+        <article class="settings-card mcp-card">
+          <div class="mcp-card-heading">
+            <div>
+              <span class="eyebrow">MCP TOOL SERVERS</span>
+              <div class="mcp-title-row">
+                <h2>Connected tools</h2>
+                <span id="mcpServerCount" class="count-pill">0 servers</span>
+              </div>
+              <p class="mcp-intro">Connect multiple MCP endpoints. Lumi combines their tools at the start of the next voice session and routes every call back to the correct server.</p>
+            </div>
+            <button id="showAddMcpButton" class="secondary add-mcp-button" type="button" aria-expanded="false" aria-controls="mcpAddForm">
+              <span aria-hidden="true">+</span> Add server
+            </button>
+          </div>
+
+          <form id="mcpAddForm" class="mcp-add-form" hidden>
+            <div class="mcp-add-heading">
+              <div>
+                <strong>New MCP server</strong>
+                <p>Enter a Streamable HTTP endpoint. Lumi tests the connection before saving it.</p>
+              </div>
+              <button id="cancelAddMcpButton" class="text-button" type="button">Cancel</button>
+            </div>
+            <label for="mcpUrlInput">MCP server URL</label>
+            <div class="mcp-input-row">
+              <input id="mcpUrlInput" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/mcp" />
+              <button id="connectMcpButton" class="primary" type="submit">Connect server</button>
+            </div>
+            <p class="field-help">Remote HTTP links are upgraded to HTTPS. Localhost may use HTTP for development.</p>
+            <p id="mcpStatus" class="note" role="status"></p>
+          </form>
+
+          <div id="mcpEmptyState" class="mcp-empty-state">
+            <span class="mcp-empty-icon" aria-hidden="true">M</span>
+            <div>
+              <strong>No MCP servers yet</strong>
+              <p>Add a server only when you want Lumi to use its tools.</p>
+            </div>
+          </div>
+          <div id="mcpServerList" class="mcp-server-list" role="list" aria-live="polite"></div>
+
+          <details class="mcp-diagnostics">
+            <summary>Connection policy</summary>
+            <code id="mcpNetworkPolicy"></code>
+          </details>
+        </article>
       </section>
     </main>
     <script src="settings.js"></script>

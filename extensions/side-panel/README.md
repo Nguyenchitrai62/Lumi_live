@@ -9,9 +9,12 @@ This is the standalone Lumi extension. It does not load or iframe the Lumi websi
 3. Choose **Load unpacked** and select `extensions/side-panel`.
 4. Pin the generated Lumi portrait icon and click it to open the Side Panel.
 5. Click the gear button. A dedicated Settings tab opens; paste a Gemini API key, choose a Gemini voice, and save it locally.
-6. Open or switch to any normal http/https page. **PAGEAGENT TARGET** follows the active Chrome tab automatically; no Connect step is required.
-7. Press **Start voice**. The first time, Lumi opens a separate permission tab so Chrome can show its native microphone **Allow / Block** prompt.
-8. Choose **Allow**, return to the Side Panel, and press **Start voice** again.
+6. To enable MCP tools, open **Connected tools**, press **Add server**, enter a remote MCP endpoint, and connect it. Repeat to add more servers; leaving the list empty keeps MCP disabled.
+7. Open or switch to any normal http/https page. **PAGEAGENT TARGET** follows the active Chrome tab automatically; no Connect step is required.
+8. Press **Start voice**. The first time, Lumi opens a separate permission tab so Chrome can show its native microphone **Allow / Block** prompt.
+9. Choose **Allow**, return to the Side Panel, and press **Start voice** again.
+
+After pulling or rebuilding the extension, press **Reload** on `chrome://extensions`, close any old Lumi Settings/side-panel pages, and open them again. The Settings header shows the running manifest version and the MCP card shows the active runtime network policy so stale extension instances are easy to identify.
 
 If microphone access was denied earlier, open Lumi settings and press **Fix access**. The permission tab contains a button that opens Chrome's site settings for this exact extension ID, so you do not need to search through Chrome settings manually.
 
@@ -24,5 +27,9 @@ The Side Panel uses Gemini 3.1 Flash Live Preview as the only LLM. Gemini calls 
 Voice selection is saved in `chrome.storage.local` and sent as `speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName` when the next Gemini Live session starts. End the current voice session before changing voices.
 
 The API key is stored in `chrome.storage.local` and sent directly to Google Gemini. For a published extension, replace this local-key flow with a backend that issues short-lived ephemeral Live API tokens.
+
+The MCP server list is stored in `chrome.storage.local`, but an endpoint is added only after it completes initialization plus `tools/list`. Version 0.0.7 automatically migrates the previous single `lumiMcpServerUrl` value into the new list. At the start of a voice session, Lumi reconnects to every saved endpoint, converts their tool schemas to unique Gemini function declarations, and routes each matching call back through the correct server's MCP `tools/call`. A server that fails to connect does not prevent the other configured servers from loading.
+
+Every MCP call appears in the conversation as a collapsed activity card showing the tool name and live status. Expand the card to inspect the connected server, arguments, duration, result, error, or cancellation reason. Tool results shown in the card are the same normalized payload returned to Gemini Live, including any safety truncation marker.
 
 The generated Lumi portrait icon is intentionally different from the original logo used by `web-controller`, so both unpacked extensions can be installed and recognized side by side.

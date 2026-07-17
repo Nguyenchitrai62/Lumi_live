@@ -1,13 +1,18 @@
+import { McpHttpClient, normalizeMcpUrl } from "./mcp-client.js";
+
 const MESSAGE_TYPE = "lumi_sidepanel_request";
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
 const TARGET_STORAGE_KEY = "lumiSidePanelTargetTabId";
 const TARGET_CHANGED_MESSAGE = "lumi_sidepanel_target_changed";
 const PANEL_LIFECYCLE_MESSAGE = "lumi_sidepanel_lifecycle";
 const ELEMENT_HIGHLIGHTS_STORAGE_KEY = "lumiShowElementHighlights";
+const MCP_URL_STORAGE_KEY = "lumiMcpServerUrl";
+const MCP_SERVERS_STORAGE_KEY = "lumiMcpServers";
 
 let connectedTabId = null;
 let listedTabIds = new Set();
 let listedTabsExpireAt = 0;
+const mcpConnections = new Map();
 
 async function loadTarget() {
   const stored = await chrome.storage.session.get(TARGET_STORAGE_KEY);
@@ -254,6 +259,186 @@ async function switchBrowserTab(args = {}) {
   };
 }
 
+function fallbackMcpServerName(url) {
+  try {
+    return new URL(url).hostname || "MCP server";
+  } catch {
+    return "MCP server";
+  }
+}
+
+function normalizeMcpServerRecord(value) {
+  if (!value || typeof value !== "object") return null;
+  let url;
+  try {
+    url = normalizeMcpUrl(value.url);
+  } catch {
+    return null;
+  }
+  return {
+    id: typeof value.id === "string" && value.id ? value.id : crypto.randomUUID(),
+    url,
+    serverName: typeof value.serverName === "string" && value.serverName
+      ? value.serverName.slice(0, 160)
+      : fallbackMcpServerName(url),
+    serverVersion: typeof value.serverVersion === "string" ? value.serverVersion.slice(0, 80) : "",
+    protocolVersion: typeof value.protocolVersion === "string" ? value.protocolVersion.slice(0, 40) : "",
+    toolCount: Number.isInteger(value.toolCount) && value.toolCount >= 0 ? value.toolCount : 0,
+  };
+}
+
+async function loadMcpServerRecords() {
+  const stored = await chrome.storage.local.get([MCP_SERVERS_STORAGE_KEY, MCP_URL_STORAGE_KEY]);
+  const storedList = stored[MCP_SERVERS_STORAGE_KEY];
+  const source = Array.isArray(storedList) ? storedList : [];
+  if (!Array.isArray(storedList) && stored[MCP_URL_STORAGE_KEY]) {
+    source.push({ url: stored[MCP_URL_STORAGE_KEY] });
+  }
+
+  const records = [];
+  const urls = new Set();
+  const ids = new Set();
+  for (const candidate of source) {
+    const record = normalizeMcpServerRecord(candidate);
+    if (!record || urls.has(record.url)) continue;
+    while (ids.has(record.id)) record.id = crypto.randomUUID();
+    urls.add(record.url);
+    ids.add(record.id);
+    records.push(record);
+  }
+
+  const needsMigration = !Array.isArray(storedList)
+    || JSON.stringify(storedList) !== JSON.stringify(records)
+    || Object.hasOwn(stored, MCP_URL_STORAGE_KEY);
+  if (needsMigration) {
+    await chrome.storage.local.set({ [MCP_SERVERS_STORAGE_KEY]: records });
+    await chrome.storage.local.remove(MCP_URL_STORAGE_KEY);
+  }
+  return records;
+}
+
+async function saveMcpServerRecords(records) {
+  await chrome.storage.local.set({ [MCP_SERVERS_STORAGE_KEY]: records });
+  await chrome.storage.local.remove(MCP_URL_STORAGE_KEY);
+}
+
+function recordFromMcpConnection(connection) {
+  return {
+    id: connection.id,
+    url: connection.url,
+    serverName: connection.client.serverInfo?.name || fallbackMcpServerName(connection.url),
+    serverVersion: connection.client.serverInfo?.version || "",
+    protocolVersion: connection.client.protocolVersion || "",
+    toolCount: connection.tools.length,
+  };
+}
+
+function serializeMcpConnection(connection, includeTools = false) {
+  const result = {
+    id: connection.id,
+    url: connection.url,
+    serverName: connection.client.serverInfo?.name || "MCP server",
+    serverVersion: connection.client.serverInfo?.version || "",
+    protocolVersion: connection.client.protocolVersion || "",
+    instructions: connection.client.instructions || "",
+    toolCount: connection.tools.length,
+  };
+  if (includeTools) result.tools = connection.tools;
+  return result;
+}
+
+async function connectMcpRecord(record, force = false) {
+  const existing = mcpConnections.get(record.id);
+  if (!force && existing?.url === record.url) return existing;
+
+  const client = new McpHttpClient(record.url);
+  await client.connect();
+  const tools = await client.listTools();
+  const connection = { id: record.id, url: record.url, client, tools };
+  mcpConnections.set(record.id, connection);
+  return connection;
+}
+
+async function addMcpServer(rawUrl) {
+  const url = normalizeMcpUrl(rawUrl);
+  const records = await loadMcpServerRecords();
+  if (records.some((record) => record.url === url)) {
+    throw new Error("This MCP server is already in your list.");
+  }
+  const draft = { id: crypto.randomUUID(), url };
+  const connection = await connectMcpRecord(draft, true);
+  records.push(recordFromMcpConnection(connection));
+  await saveMcpServerRecords(records);
+  return serializeMcpConnection(connection);
+}
+
+async function listMcpServers() {
+  const servers = await loadMcpServerRecords();
+  return { servers, count: servers.length };
+}
+
+async function reconnectMcpServer(serverId) {
+  const records = await loadMcpServerRecords();
+  const index = records.findIndex((record) => record.id === serverId);
+  if (index < 0) throw new Error("That MCP server is no longer in your list.");
+  const connection = await connectMcpRecord(records[index], true);
+  records[index] = recordFromMcpConnection(connection);
+  await saveMcpServerRecords(records);
+  return serializeMcpConnection(connection);
+}
+
+async function removeMcpServer(serverId) {
+  const records = await loadMcpServerRecords();
+  const nextRecords = records.filter((record) => record.id !== serverId);
+  if (nextRecords.length === records.length) throw new Error("That MCP server is no longer in your list.");
+  mcpConnections.delete(serverId);
+  await saveMcpServerRecords(nextRecords);
+  return { servers: nextRecords, count: nextRecords.length };
+}
+
+async function getConfiguredMcps(includeTools = false) {
+  const records = await loadMcpServerRecords();
+  if (!records.length) return { configured: false, serverCount: 0, connectedCount: 0, servers: [] };
+
+  const states = await Promise.all(records.map(async (record) => {
+    try {
+      const connection = await connectMcpRecord(record, true);
+      return { record: recordFromMcpConnection(connection), connection, error: "" };
+    } catch (error) {
+      mcpConnections.delete(record.id);
+      return {
+        record,
+        connection: null,
+        error: error instanceof Error ? error.message : "Could not connect to this MCP server.",
+      };
+    }
+  }));
+
+  const refreshedRecords = states.map((state) => state.record);
+  if (JSON.stringify(refreshedRecords) !== JSON.stringify(records)) {
+    await saveMcpServerRecords(refreshedRecords);
+  }
+  return {
+    configured: true,
+    serverCount: records.length,
+    connectedCount: states.filter((state) => state.connection).length,
+    servers: states.map((state) => state.connection
+      ? serializeMcpConnection(state.connection, includeTools)
+      : { ...state.record, tools: [], error: state.error }),
+  };
+}
+
+async function callMcpTool(serverId, tool, args) {
+  const records = await loadMcpServerRecords();
+  const record = records.find((candidate) => candidate.id === serverId);
+  if (!record) throw new Error("The MCP server for this tool is no longer configured.");
+  const connection = await connectMcpRecord(record);
+  if (!connection.tools.some((candidate) => candidate.name === tool)) {
+    throw new Error(`${record.serverName} does not expose tool: ${tool}`);
+  }
+  return connection.client.callTool(tool, args || {});
+}
+
 async function handleMessage(message) {
   if (message.command === "connect_active_tab") return getStatus();
   if (message.command === "disconnect_tab") return getStatus();
@@ -275,6 +460,14 @@ async function handleMessage(message) {
     if (message.tool === "browser_open_tab") return openBrowserTab(message.args || {});
     if (message.tool === "browser_switch_tab") return switchBrowserTab(message.args || {});
     return sendBrowserTool(message.tool, message.args || {});
+  }
+  if (message.command === "mcp_list_servers") return listMcpServers();
+  if (message.command === "mcp_add_server") return addMcpServer(message.url);
+  if (message.command === "mcp_reconnect_server") return reconnectMcpServer(message.serverId);
+  if (message.command === "mcp_remove_server") return removeMcpServer(message.serverId);
+  if (message.command === "mcp_get_tools") return getConfiguredMcps(true);
+  if (message.command === "mcp_call_tool") {
+    return callMcpTool(message.serverId, message.tool, message.args || {});
   }
   throw new Error(`Unsupported side panel command: ${message.command}`);
 }

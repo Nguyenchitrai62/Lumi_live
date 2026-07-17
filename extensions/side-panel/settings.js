@@ -19,6 +19,7 @@ const VOICE_PROFILES = [
 ];
 
 const elements = {
+  extensionVersion: document.querySelector("#extensionVersion"),
   apiKeyInput: document.querySelector("#apiKeyInput"),
   voiceInput: document.querySelector("#voiceInput"),
   toggleKeyButton: document.querySelector("#toggleKeyButton"),
@@ -30,9 +31,20 @@ const elements = {
   microphonePermissionStatus: document.querySelector("#microphonePermissionStatus"),
   enableMicrophoneButton: document.querySelector("#enableMicrophoneButton"),
   showElementHighlightsInput: document.querySelector("#showElementHighlightsInput"),
+  showAddMcpButton: document.querySelector("#showAddMcpButton"),
+  cancelAddMcpButton: document.querySelector("#cancelAddMcpButton"),
+  mcpAddForm: document.querySelector("#mcpAddForm"),
+  mcpUrlInput: document.querySelector("#mcpUrlInput"),
+  connectMcpButton: document.querySelector("#connectMcpButton"),
+  mcpStatus: document.querySelector("#mcpStatus"),
+  mcpServerCount: document.querySelector("#mcpServerCount"),
+  mcpEmptyState: document.querySelector("#mcpEmptyState"),
+  mcpServerList: document.querySelector("#mcpServerList"),
+  mcpNetworkPolicy: document.querySelector("#mcpNetworkPolicy"),
 };
 
 let activeVoicePreview = null;
+let mcpServers = [];
 
 function updateVoiceProfile() {
   const profile = VOICE_PROFILES.find(([name]) => name === elements.voiceInput.value) || VOICE_PROFILES[0];
@@ -207,6 +219,172 @@ function sendRuntime(command, payload = {}) {
   });
 }
 
+function setMcpStatus(state, message) {
+  elements.mcpStatus.dataset.state = state;
+  elements.mcpStatus.textContent = message;
+}
+
+function toggleMcpAddForm(shouldOpen) {
+  elements.mcpAddForm.hidden = !shouldOpen;
+  elements.showAddMcpButton.setAttribute("aria-expanded", String(shouldOpen));
+  if (shouldOpen) {
+    requestAnimationFrame(() => elements.mcpUrlInput.focus());
+    return;
+  }
+  elements.mcpUrlInput.value = "";
+  elements.connectMcpButton.disabled = true;
+  elements.connectMcpButton.dataset.busy = "";
+  elements.connectMcpButton.textContent = "Connect server";
+  setMcpStatus("", "");
+}
+
+function createMcpMeta(text) {
+  const item = document.createElement("span");
+  item.textContent = text;
+  return item;
+}
+
+function renderMcpServers() {
+  const count = mcpServers.length;
+  elements.mcpServerCount.textContent = `${count} ${count === 1 ? "server" : "servers"}`;
+  elements.mcpEmptyState.hidden = count > 0;
+  elements.mcpServerList.replaceChildren();
+
+  for (const server of mcpServers) {
+    const item = document.createElement("article");
+    const state = server.uiState || "saved";
+    item.className = "mcp-server";
+    item.dataset.serverId = server.id;
+    item.dataset.state = state;
+    item.setAttribute("role", "listitem");
+
+    const icon = document.createElement("span");
+    icon.className = "mcp-server-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "MCP";
+
+    const main = document.createElement("div");
+    main.className = "mcp-server-main";
+    const title = document.createElement("div");
+    title.className = "mcp-server-title";
+    const name = document.createElement("strong");
+    name.textContent = server.serverName || "MCP server";
+    const status = document.createElement("span");
+    status.className = "mcp-server-status";
+    status.textContent = state === "connected" ? "Connected" : state === "error" ? "Error" : "Saved";
+    title.append(name, status);
+
+    const url = document.createElement("code");
+    url.className = "mcp-server-url";
+    url.title = server.url;
+    url.textContent = server.url;
+
+    const metadata = document.createElement("div");
+    metadata.className = "mcp-server-meta";
+    metadata.append(createMcpMeta(`${Number(server.toolCount) || 0} tools`));
+    if (server.serverVersion) metadata.append(createMcpMeta(`Server v${server.serverVersion}`));
+    if (server.protocolVersion) metadata.append(createMcpMeta(`MCP ${server.protocolVersion}`));
+
+    const error = document.createElement("p");
+    error.className = "mcp-server-error";
+    error.hidden = !server.uiError;
+    error.textContent = server.uiError || "";
+    main.append(title, url, metadata, error);
+
+    const actions = document.createElement("div");
+    actions.className = "mcp-server-actions";
+    const reconnect = document.createElement("button");
+    reconnect.type = "button";
+    reconnect.dataset.action = "reconnect";
+    reconnect.dataset.serverId = server.id;
+    reconnect.textContent = "Reconnect";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger-button";
+    remove.dataset.action = "remove";
+    remove.dataset.serverId = server.id;
+    remove.textContent = "Remove";
+    actions.append(reconnect, remove);
+    item.append(icon, main, actions);
+    elements.mcpServerList.append(item);
+  }
+}
+
+function setMcpServerUiState(serverId, state, error = "") {
+  const server = mcpServers.find((candidate) => candidate.id === serverId);
+  if (!server) return;
+  server.uiState = state;
+  server.uiError = error;
+  renderMcpServers();
+  const row = elements.mcpServerList.querySelector(`[data-server-id="${CSS.escape(serverId)}"]`);
+  for (const button of row?.querySelectorAll("button") || []) button.disabled = state === "connecting";
+  if (state === "connecting") row.querySelector(".mcp-server-status").textContent = "Connecting";
+}
+
+async function connectMcp(event) {
+  event.preventDefault();
+  const url = elements.mcpUrlInput.value.trim();
+  if (!url) {
+    setMcpStatus("error", "Enter an MCP server URL before connecting.");
+    elements.mcpUrlInput.focus();
+    return;
+  }
+
+  elements.connectMcpButton.disabled = true;
+  elements.connectMcpButton.dataset.busy = "true";
+  elements.connectMcpButton.textContent = "Connecting...";
+  setMcpStatus("", "Running the MCP handshake and loading tools...");
+  try {
+    const result = await sendRuntime("mcp_add_server", { url });
+    mcpServers.push({ ...result, uiState: "connected", uiError: "" });
+    renderMcpServers();
+    toggleMcpAddForm(false);
+  } catch (error) {
+    setMcpStatus("error", error instanceof Error ? error.message : "Could not connect to the MCP server.");
+  } finally {
+    elements.connectMcpButton.dataset.busy = "";
+    elements.connectMcpButton.textContent = "Connect server";
+    elements.connectMcpButton.disabled = !elements.mcpUrlInput.value.trim();
+  }
+}
+
+async function reconnectMcp(serverId) {
+  setMcpServerUiState(serverId, "connecting");
+  try {
+    const result = await sendRuntime("mcp_reconnect_server", { serverId });
+    const index = mcpServers.findIndex((server) => server.id === serverId);
+    if (index >= 0) mcpServers[index] = { ...result, uiState: "connected", uiError: "" };
+    renderMcpServers();
+  } catch (error) {
+    setMcpServerUiState(
+      serverId,
+      "error",
+      error instanceof Error ? error.message : "Could not reconnect to this MCP server.",
+    );
+  }
+}
+
+async function removeMcp(serverId) {
+  setMcpServerUiState(serverId, "connecting");
+  try {
+    await sendRuntime("mcp_remove_server", { serverId });
+    mcpServers = mcpServers.filter((server) => server.id !== serverId);
+    renderMcpServers();
+  } catch (error) {
+    setMcpServerUiState(
+      serverId,
+      "error",
+      error instanceof Error ? error.message : "Could not remove this MCP server.",
+    );
+  }
+}
+
+async function loadMcpServers() {
+  const result = await sendRuntime("mcp_list_servers");
+  mcpServers = (result.servers || []).map((server) => ({ ...server, uiState: "saved", uiError: "" }));
+  renderMcpServers();
+}
+
 async function queryMicrophonePermission() {
   try {
     const permission = await navigator.permissions.query({ name: "microphone" });
@@ -284,6 +462,22 @@ elements.showElementHighlightsInput.addEventListener("change", () => {
     elements.saveNote.textContent = error instanceof Error ? error.message : "Could not update PageAgent guides.";
   });
 });
+elements.showAddMcpButton.addEventListener("click", () => {
+  toggleMcpAddForm(elements.mcpAddForm.hidden);
+});
+elements.cancelAddMcpButton.addEventListener("click", () => toggleMcpAddForm(false));
+elements.mcpUrlInput.addEventListener("input", () => {
+  elements.connectMcpButton.disabled = !elements.mcpUrlInput.value.trim()
+    || elements.connectMcpButton.dataset.busy === "true";
+  if (elements.mcpStatus.dataset.state === "error") setMcpStatus("", "");
+});
+elements.mcpAddForm.addEventListener("submit", (event) => void connectMcp(event));
+elements.mcpServerList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button || button.disabled) return;
+  if (button.dataset.action === "reconnect") void reconnectMcp(button.dataset.serverId);
+  if (button.dataset.action === "remove") void removeMcp(button.dataset.serverId);
+});
 window.addEventListener("focus", () => void refreshMicrophonePermission());
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void refreshMicrophonePermission();
@@ -291,6 +485,10 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("unload", () => stopVoicePreview());
 
 async function initialize() {
+  const manifest = chrome.runtime.getManifest();
+  const extensionCsp = manifest.content_security_policy?.extension_pages || "Chrome default";
+  elements.extensionVersion.textContent = `v${manifest.version}`;
+  elements.mcpNetworkPolicy.textContent = extensionCsp;
   const stored = await chrome.storage.local.get([
     API_KEY_STORAGE_KEY,
     VOICE_STORAGE_KEY,
@@ -300,7 +498,14 @@ async function initialize() {
   elements.voiceInput.value = String(stored[VOICE_STORAGE_KEY] || "Zephyr");
   updateVoiceProfile();
   elements.showElementHighlightsInput.checked = stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true;
-  await refreshMicrophonePermission();
+  elements.connectMcpButton.disabled = true;
+  await Promise.all([
+    refreshMicrophonePermission(),
+    loadMcpServers().catch((error) => {
+      toggleMcpAddForm(true);
+      setMcpStatus("error", error instanceof Error ? error.message : "Could not load MCP servers.");
+    }),
+  ]);
 }
 
 void initialize();
