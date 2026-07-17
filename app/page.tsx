@@ -11,6 +11,7 @@ const DIRECT_WS_ENDPOINT =
 const EXTENSION_API_KEY_STORAGE_KEY = "lumi-gemini-api-key";
 const BRIDGE_WEB_SOURCE = "lumi-live-web";
 const BRIDGE_EXTENSION_SOURCE = "lumi-page-agent-extension";
+const MIC_CAPTURE_PROCESSOR = "lumi-pcm-capture";
 
 const BROWSER_TOOL_DECLARATIONS = [
   {
@@ -131,12 +132,76 @@ const videoModes: ReadonlyArray<{ id: VideoMode; label: string }> = [
   { id: "none", label: "None" },
 ];
 
-function PetalLayer({ className = "" }: { className?: string }) {
-  return (
-    <div className={`web-petal-field ${className}`} aria-hidden="true">
-      {Array.from({ length: 14 }, (_, index) => <i key={index} />)}
-    </div>
-  );
+function PetalLayer({ className = "", enabled }: { className?: string; enabled: boolean }) {
+  const layerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const layer = layerRef.current;
+    if (!layer) return;
+
+    layer.replaceChildren();
+    if (!enabled) return;
+
+    layer.classList.remove("petal-field-entering");
+    void layer.offsetWidth;
+    layer.classList.add("petal-field-entering");
+
+    const randomBetween = (min: number, max: number) => min + Math.random() * (max - min);
+    let spawnTimer: number | null = null;
+
+    const spawnPetal = (initialProgress = 0) => {
+      if (layer.childElementCount >= 28) return;
+
+      const petal = document.createElement("i");
+      const direction = Math.random() > .5 ? 1 : -1;
+      const width = randomBetween(6, 11);
+      const opacity = randomBetween(.34, .68);
+      const fallDistance = Math.max(layer.clientHeight, 320) + 36;
+      const duration = randomBetween(16, 26);
+
+      petal.style.left = `${randomBetween(1, 97).toFixed(2)}%`;
+      petal.style.width = `${width.toFixed(1)}px`;
+      petal.style.height = `${(width * randomBetween(.58, .76)).toFixed(1)}px`;
+      petal.style.setProperty("--petal-fall-a", `${(fallDistance * .32).toFixed(1)}px`);
+      petal.style.setProperty("--petal-fall-b", `${(fallDistance * .67).toFixed(1)}px`);
+      petal.style.setProperty("--petal-fall-c", `${fallDistance.toFixed(1)}px`);
+      petal.style.setProperty("--petal-drift-a", `${(direction * randomBetween(12, 48)).toFixed(1)}px`);
+      petal.style.setProperty("--petal-drift-b", `${(-direction * randomBetween(8, 42)).toFixed(1)}px`);
+      petal.style.setProperty("--petal-drift-c", `${(direction * randomBetween(22, 68)).toFixed(1)}px`);
+      petal.style.setProperty("--petal-turn-a", `${(direction * randomBetween(65, 145)).toFixed(0)}deg`);
+      petal.style.setProperty("--petal-turn-b", `${(direction * randomBetween(170, 285)).toFixed(0)}deg`);
+      petal.style.setProperty("--petal-turn-c", `${(direction * randomBetween(300, 520)).toFixed(0)}deg`);
+      petal.style.setProperty("--petal-opacity", opacity.toFixed(2));
+      petal.style.setProperty("--petal-fade-opacity", (opacity * .36).toFixed(2));
+      petal.style.setProperty("--petal-scale", randomBetween(.72, 1.18).toFixed(2));
+      petal.style.animationDuration = `${duration.toFixed(2)}s`;
+      if (initialProgress > 0) {
+        petal.style.animationDelay = `${-(duration * initialProgress).toFixed(2)}s`;
+      }
+      petal.addEventListener("animationend", () => petal.remove(), { once: true });
+      layer.append(petal);
+    };
+
+    const scheduleNext = () => {
+      spawnTimer = window.setTimeout(() => {
+        spawnPetal();
+        scheduleNext();
+      }, randomBetween(420, 1100));
+    };
+
+    for (let index = 0; index < 16; index += 1) {
+      spawnPetal(randomBetween(.08, .88));
+    }
+    scheduleNext();
+
+    return () => {
+      if (spawnTimer !== null) window.clearTimeout(spawnTimer);
+      layer.classList.remove("petal-field-entering");
+      layer.replaceChildren();
+    };
+  }, [enabled]);
+
+  return <div ref={layerRef} className={`web-petal-field ${className}`} aria-hidden="true" />;
 }
 
 async function requestVideoStream(mode: VideoMode) {
@@ -460,8 +525,7 @@ export default function Home() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const micProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const silentGainRef = useRef<GainNode | null>(null);
+  const micProcessorRef = useRef<AudioWorkletNode | null>(null);
   const videoStreamRef = useRef<MediaStream | null>(null);
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const videoCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -889,14 +953,18 @@ export default function Home() {
     }
   };
 
-  const setupMicrophone = (context: AudioContext, stream: MediaStream) => {
+  const setupMicrophone = async (context: AudioContext, stream: MediaStream) => {
+    await context.audioWorklet.addModule("/audio/lumi-pcm-capture-worklet.js");
     const source = context.createMediaStreamSource(stream);
-    const processor = context.createScriptProcessor(4096, 1, 1);
-    const silentGain = context.createGain();
-    silentGain.gain.value = 0;
+    const processor = new AudioWorkletNode(context, MIC_CAPTURE_PROCESSOR, {
+      numberOfInputs: 1,
+      numberOfOutputs: 0,
+      channelCount: 1,
+      channelCountMode: "explicit",
+    });
 
-    processor.onaudioprocess = (event) => {
-      const mono = event.inputBuffer.getChannelData(0);
+    processor.port.onmessage = (event: MessageEvent<Float32Array>) => {
+      const mono = event.data;
       let energy = 0;
       for (const sample of mono) energy += sample * sample;
       const rms = Math.sqrt(energy / mono.length);
@@ -933,11 +1001,8 @@ export default function Home() {
     };
 
     source.connect(processor);
-    processor.connect(silentGain);
-    silentGain.connect(context.destination);
     micSourceRef.current = source;
     micProcessorRef.current = processor;
-    silentGainRef.current = silentGain;
   };
 
   const runBrowserTool = useCallback(async (
@@ -1101,9 +1166,9 @@ export default function Home() {
     websocketRef.current?.close();
     websocketRef.current = null;
     stopVideoCapture();
+    if (micProcessorRef.current) micProcessorRef.current.port.onmessage = null;
     micProcessorRef.current?.disconnect();
     micSourceRef.current?.disconnect();
-    silentGainRef.current?.disconnect();
     micStreamRef.current?.getTracks().forEach((track) => track.stop());
     micStreamRef.current = null;
     audioContextRef.current?.close();
@@ -1189,7 +1254,7 @@ export default function Home() {
       } catch {
         // The active stream can still be used if device labels are unavailable.
       }
-      setupMicrophone(context, stream);
+      await setupMicrophone(context, stream);
 
       const websocketUrl = liveAuth.kind === "apiKey"
         ? `${DIRECT_WS_ENDPOINT}?key=${encodeURIComponent(liveAuth.credential)}`
@@ -1461,7 +1526,7 @@ export default function Home() {
             <span className="ambient-mote ambient-mote-three" />
             <span className="ambient-mote ambient-mote-four" />
           </div>
-          <PetalLayer className="stage-petal-field" />
+          <PetalLayer className="stage-petal-field" enabled={petalsEnabled} />
           <video ref={videoElementRef} className="capture-video" autoPlay muted playsInline aria-hidden="true" />
           {pageAgentActivity && (
             pageAgentStatus === "running" ||
@@ -1546,7 +1611,7 @@ export default function Home() {
         </section>
 
         <aside className={`side-panel ${petalsEnabled ? "petals-enabled" : "petals-disabled"}`}>
-          <PetalLayer className="conversation-petal-field" />
+          <PetalLayer className="conversation-petal-field" enabled={petalsEnabled} />
           <div className="conversation-head">
             <div>
               <span className="eyebrow">HISTORY</span>

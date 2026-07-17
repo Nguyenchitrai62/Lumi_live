@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { cp, copyFile, mkdir, rm } from "node:fs/promises";
+import { cp, copyFile, mkdir, readFile, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -13,6 +13,27 @@ const sidePanelOutputDirectory = path.join(sidePanelRoot, "dist");
 const sidePanelIconDirectory = path.join(sidePanelRoot, "icons");
 const sidePanelAvatarDirectory = path.join(sidePanelRoot, "assets", "avatars");
 const sidePanelRigDirectory = path.join(sidePanelAvatarDirectory, "rig", "lumi-face-v2");
+
+const pageControllerSameOriginIframePlugin = {
+  name: "page-controller-same-origin-iframes",
+  setup(buildContext) {
+    buildContext.onLoad({ filter: /page-controller\.js$/ }, async (args) => {
+      const dependencyPath = `${path.sep}@page-agent${path.sep}page-controller${path.sep}`;
+      if (!args.path.includes(dependencyPath)) return null;
+
+      const source = await readFile(args.path, "utf8");
+      const crossOriginAccess = "const iframeDoc = node.contentDocument || node.contentWindow?.document;";
+      if (!source.includes(crossOriginAccess)) {
+        throw new Error("The PageController iframe compatibility patch no longer matches its source.");
+      }
+
+      return {
+        contents: source.replace(crossOriginAccess, "const iframeDoc = node.contentDocument;"),
+        loader: "js",
+      };
+    });
+  },
+};
 
 await rm(sidePanelAvatarDirectory, { recursive: true, force: true });
 
@@ -49,6 +70,7 @@ await build({
   format: "iife",
   platform: "browser",
   target: ["chrome120"],
+  plugins: [pageControllerSameOriginIframePlugin],
   sourcemap: false,
   minify: false,
   legalComments: "inline",

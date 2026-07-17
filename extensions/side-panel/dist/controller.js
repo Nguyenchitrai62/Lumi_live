@@ -2198,7 +2198,7 @@ gl_Position = vec4(aPosition, 0.0, 1.0);
       if (node.tagName) {
         const tagName = node.tagName.toLowerCase();
         if (tagName === "iframe") try {
-          const iframeDoc = node.contentDocument || node.contentWindow?.document;
+          const iframeDoc = node.contentDocument;
           if (iframeDoc) for (const child of iframeDoc.childNodes) {
             const domElement = buildDomTree(child, node, false);
             if (domElement) nodeData.children.push(domElement);

@@ -6,6 +6,10 @@ const API_KEY_STORAGE_KEY = "lumiGeminiApiKey";
 const VOICE_STORAGE_KEY = "lumiGeminiVoice";
 const MICROPHONE_GRANTED_STORAGE_KEY = "lumiMicrophoneGrantedAt";
 const PETALS_STORAGE_KEY = "lumiFallingPetals";
+const PANEL_LIFECYCLE_MESSAGE = "lumi_sidepanel_lifecycle";
+const MIC_CAPTURE_PROCESSOR = "lumi-pcm-capture";
+const MIN_ACTIVE_PETALS = 16;
+const MAX_ACTIVE_PETALS = 28;
 
 const BROWSER_TOOLS = [
   {
@@ -135,7 +139,9 @@ let analyser = null;
 let micStream = null;
 let micSource = null;
 let micProcessor = null;
-let silentGain = null;
+let petalSpawnTimer = null;
+let petalStartFrame = null;
+let petalsEnabled = true;
 let nextPlaybackTime = 0;
 let setupTimeoutId = null;
 let mouthAnimationId = null;
@@ -337,14 +343,18 @@ function sendJson(payload) {
   if (websocket?.readyState === WebSocket.OPEN) websocket.send(JSON.stringify(payload));
 }
 
-function setupMicrophone(stream) {
+async function setupMicrophone(stream) {
+  await audioContext.audioWorklet.addModule(chrome.runtime.getURL("pcm-capture-worklet.js"));
   micSource = audioContext.createMediaStreamSource(stream);
-  micProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-  silentGain = audioContext.createGain();
-  silentGain.gain.value = 0;
-  micProcessor.onaudioprocess = (event) => {
+  micProcessor = new AudioWorkletNode(audioContext, MIC_CAPTURE_PROCESSOR, {
+    numberOfInputs: 1,
+    numberOfOutputs: 0,
+    channelCount: 1,
+    channelCountMode: "explicit",
+  });
+  micProcessor.port.onmessage = (event) => {
     if (sessionStatus !== "ready" || isMuted || websocket?.readyState !== WebSocket.OPEN) return;
-    const mono = event.inputBuffer.getChannelData(0);
+    const mono = event.data;
     const pcm = floatToPcm16(resampleTo16k(mono, audioContext.sampleRate));
     sendJson({
       realtimeInput: {
@@ -353,8 +363,6 @@ function setupMicrophone(stream) {
     });
   };
   micSource.connect(micProcessor);
-  micProcessor.connect(silentGain);
-  silentGain.connect(audioContext.destination);
 }
 
 function stopPlayback() {
@@ -534,7 +542,7 @@ async function startSession() {
     });
     setSessionStatus("connecting", "Microphone is ready. Checking the Gemini API key…");
     await validateGeminiApiKey(apiKey);
-    setupMicrophone(micStream);
+    await setupMicrophone(micStream);
 
     setSessionStatus("connecting", "Microphone is ready. Opening Gemini Live…");
     websocket = new WebSocket(`${WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`);
@@ -614,14 +622,13 @@ function cleanupMedia() {
   clearSetupTimeout();
   stopPlayback();
   websocket = null;
+  if (micProcessor) micProcessor.port.onmessage = null;
   micProcessor?.disconnect();
   micSource?.disconnect();
-  silentGain?.disconnect();
   micStream?.getTracks().forEach((track) => track.stop());
   micStream = null;
   micProcessor = null;
   micSource = null;
-  silentGain = null;
   audioContext?.close().catch(() => {});
   audioContext = null;
   analyser = null;
@@ -674,9 +681,15 @@ function randomBetween(min, max) {
   return min + Math.random() * (max - min);
 }
 
-function randomizePetal(petal, initial = false) {
+function spawnPetal(initialProgress = 0) {
+  if (elements.petalField.childElementCount >= MAX_ACTIVE_PETALS) return;
+
+  const petal = document.createElement("i");
   const direction = Math.random() > .5 ? 1 : -1;
   const width = randomBetween(6, 11);
+  const opacity = randomBetween(.34, .68);
+  const duration = randomBetween(16, 26);
+
   petal.style.left = `${randomBetween(1, 97).toFixed(2)}%`;
   petal.style.width = `${width.toFixed(1)}px`;
   petal.style.height = `${(width * randomBetween(.58, .76)).toFixed(1)}px`;
@@ -686,21 +699,72 @@ function randomizePetal(petal, initial = false) {
   petal.style.setProperty("--turn-a", `${(direction * randomBetween(65, 145)).toFixed(0)}deg`);
   petal.style.setProperty("--turn-b", `${(direction * randomBetween(170, 285)).toFixed(0)}deg`);
   petal.style.setProperty("--turn-c", `${(direction * randomBetween(300, 520)).toFixed(0)}deg`);
-  petal.style.setProperty("--petal-opacity", randomBetween(.34, .68).toFixed(2));
+  petal.style.setProperty("--petal-opacity", opacity.toFixed(2));
+  petal.style.setProperty("--petal-fade-opacity", (opacity * .36).toFixed(2));
   petal.style.setProperty("--petal-scale", randomBetween(.72, 1.18).toFixed(2));
-  petal.style.animationDuration = `${randomBetween(12.5, 22).toFixed(2)}s`;
-  if (initial) petal.style.animationDelay = `${-randomBetween(0, 22).toFixed(2)}s`;
+  petal.style.animationDuration = `${duration.toFixed(2)}s`;
+  if (initialProgress > 0) {
+    petal.style.animationDelay = `${-(duration * initialProgress).toFixed(2)}s`;
+  }
+  petal.addEventListener("animationend", () => {
+    petal.remove();
+    if (petalsEnabled) ensurePetalDensity();
+  }, { once: true });
+  elements.petalField.append(petal);
 }
 
-function initializePetals() {
-  elements.petalField.querySelectorAll("i").forEach((petal) => {
-    randomizePetal(petal, true);
-    petal.addEventListener("animationiteration", () => randomizePetal(petal));
+function ensurePetalDensity() {
+  while (elements.petalField.childElementCount < MIN_ACTIVE_PETALS) {
+    spawnPetal(randomBetween(.08, .88));
+  }
+}
+
+function scheduleNextPetal() {
+  petalSpawnTimer = setTimeout(() => {
+    petalSpawnTimer = null;
+    if (document.body.classList.contains("petals-off")) return;
+    ensurePetalDensity();
+    spawnPetal();
+    scheduleNextPetal();
+  }, randomBetween(420, 1100));
+}
+
+function startPetalEmitter() {
+  if (petalSpawnTimer !== null || petalStartFrame !== null) return;
+
+  petalStartFrame = requestAnimationFrame(() => {
+    petalStartFrame = requestAnimationFrame(() => {
+      petalStartFrame = null;
+      if (!petalsEnabled) return;
+
+      elements.petalField.classList.remove("petal-field-entering");
+      void elements.petalField.offsetWidth;
+      elements.petalField.classList.add("petal-field-entering");
+      ensurePetalDensity();
+      scheduleNextPetal();
+    });
   });
 }
 
+function stopPetalEmitter() {
+  if (petalStartFrame !== null) cancelAnimationFrame(petalStartFrame);
+  if (petalSpawnTimer !== null) clearTimeout(petalSpawnTimer);
+  petalStartFrame = null;
+  petalSpawnTimer = null;
+  elements.petalField.classList.remove("petal-field-entering");
+  elements.petalField.replaceChildren();
+}
+
+function restartPetalEmitter() {
+  stopPetalEmitter();
+  if (petalsEnabled) startPetalEmitter();
+}
+
 function applyPetals(enabled) {
+  petalsEnabled = enabled;
   document.body.classList.toggle("petals-off", !enabled);
+  if (enabled) startPetalEmitter();
+  else stopPetalEmitter();
   elements.petalsButton.setAttribute("aria-pressed", String(enabled));
   elements.petalsButton.setAttribute(
     "aria-label",
@@ -730,6 +794,7 @@ elements.messageForm.addEventListener("submit", (event) => {
 });
 window.addEventListener("unload", () => {
   intentionalClose = true;
+  stopPetalEmitter();
   websocket?.close();
   cleanupMedia();
   if (mouthAnimationId) cancelAnimationFrame(mouthAnimationId);
@@ -754,13 +819,17 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === PANEL_LIFECYCLE_MESSAGE) {
+    if (message.state === "opened") restartPetalEmitter();
+    else if (message.state === "closed") stopPetalEmitter();
+    return;
+  }
   if (message?.type === "lumi_sidepanel_target_changed") void refreshTarget();
 });
 
 async function initialize() {
   const stored = await chrome.storage.local.get([API_KEY_STORAGE_KEY, PETALS_STORAGE_KEY]);
   const savedKey = String(stored[API_KEY_STORAGE_KEY] || "");
-  initializePetals();
   applyPetals(stored[PETALS_STORAGE_KEY] !== false);
   if (!savedKey) setSessionStatus("idle", "Open settings and save a Gemini API key before starting voice.");
   else setSessionStatus("idle", "Ready. PageAgent will follow whichever web tab you open.");

@@ -187,24 +187,11 @@ button { -webkit-tap-highlight-color: transparent; }
 .ambient-mote-two { left: 34%; bottom: 12%; width: 3px; height: 3px; animation: ambient-mote-two 12s -4s ease-in-out infinite; }
 .ambient-mote-three { right: 17%; bottom: 25%; width: 5px; height: 5px; animation: ambient-mote-three 11s -7s ease-in-out infinite; }
 .ambient-mote-four { right: 34%; bottom: 10%; width: 3px; height: 3px; animation: ambient-mote-two 14s -9s ease-in-out infinite reverse; }
-.web-petal-field { position: absolute; inset: 0; overflow: hidden; pointer-events: none; opacity: 1; transition: opacity .3s ease; }
-.web-petal-field i { --petal-drift: 34px; --petal-sway: -18px; position: absolute; top: -11%; width: 10px; height: 7px; border-radius: 78% 22% 70% 30%; background: linear-gradient(145deg, rgba(255,238,247,.88), rgba(229,170,211,.72)); box-shadow: 0 3px 9px rgba(94,54,118,.14); opacity: 0; transform-origin: 60% 45%; animation: web-petal-fall 16s cubic-bezier(.42,.08,.72,.94) infinite; will-change: transform, opacity; }
-.web-petal-field i:nth-child(1) { left: 3%; --petal-drift: 42px; --petal-sway: -19px; animation-duration: 14.8s; animation-delay: -4.2s; }
-.web-petal-field i:nth-child(2) { left: 11%; width: 7px; height: 5px; --petal-drift: -31px; --petal-sway: 22px; animation-duration: 19.3s; animation-delay: -13.6s; }
-.web-petal-field i:nth-child(3) { left: 19%; --petal-drift: 25px; --petal-sway: -34px; animation-duration: 17.2s; animation-delay: -8.1s; }
-.web-petal-field i:nth-child(4) { left: 29%; width: 8px; height: 5px; --petal-drift: -44px; --petal-sway: 16px; animation-duration: 21.1s; animation-delay: -18.7s; }
-.web-petal-field i:nth-child(5) { left: 38%; width: 11px; height: 8px; --petal-drift: 52px; --petal-sway: -27px; animation-duration: 15.7s; animation-delay: -1.8s; }
-.web-petal-field i:nth-child(6) { left: 47%; width: 6px; height: 5px; --petal-drift: -22px; --petal-sway: 38px; animation-duration: 22.4s; animation-delay: -11.3s; }
-.web-petal-field i:nth-child(7) { left: 56%; --petal-drift: 35px; --petal-sway: -15px; animation-duration: 18.6s; animation-delay: -16.4s; }
-.web-petal-field i:nth-child(8) { left: 64%; width: 8px; height: 6px; --petal-drift: -48px; --petal-sway: 29px; animation-duration: 16.4s; animation-delay: -6.7s; }
-.web-petal-field i:nth-child(9) { left: 72%; width: 11px; height: 7px; --petal-drift: 29px; --petal-sway: -41px; animation-duration: 20.6s; animation-delay: -2.9s; }
-.web-petal-field i:nth-child(10) { left: 81%; width: 7px; height: 5px; --petal-drift: -36px; --petal-sway: 18px; animation-duration: 17.8s; animation-delay: -14.1s; }
-.web-petal-field i:nth-child(11) { left: 90%; --petal-drift: 46px; --petal-sway: -25px; animation-duration: 23.2s; animation-delay: -9.5s; }
-.web-petal-field i:nth-child(12) { left: 96%; width: 8px; height: 6px; --petal-drift: -28px; --petal-sway: 33px; animation-duration: 18.1s; animation-delay: -5.4s; }
-.web-petal-field i:nth-child(13) { left: 24%; width: 6px; height: 4px; --petal-drift: 39px; --petal-sway: -12px; animation-duration: 24.3s; animation-delay: -21.2s; }
-.web-petal-field i:nth-child(14) { left: 68%; width: 9px; height: 6px; --petal-drift: -41px; --petal-sway: 26px; animation-duration: 21.7s; animation-delay: -19.4s; }
+.web-petal-field { --petal-field-opacity: 1; position: absolute; inset: 0; overflow: hidden; pointer-events: none; opacity: var(--petal-field-opacity); transition: opacity .3s ease; }
+.web-petal-field.petal-field-entering { animation: web-petal-field-enter 1.2s ease-out; }
+.web-petal-field i { position: absolute; top: 0; width: 10px; height: 7px; border-radius: 78% 22% 70% 30%; background: linear-gradient(145deg, rgba(255,238,247,.88), rgba(229,170,211,.72)); box-shadow: 0 3px 9px rgba(94,54,118,.14); opacity: 0; transform-origin: 60% 45%; animation-name: web-petal-fall; animation-timing-function: linear; animation-fill-mode: forwards; will-change: transform, opacity; }
 .stage-petal-field { z-index: 5; }
-.conversation-petal-field { z-index: 0; opacity: .6; }
+.conversation-petal-field { --petal-field-opacity: .6; z-index: 0; }
 .petals-disabled .web-petal-field { opacity: 0; }
 .scene-garden.petals-disabled::after { opacity: 0; }
 .agent-operation { position: absolute; z-index: 12; top: 72px; left: 50%; width: min(390px, calc(100% - 36px)); display: flex; align-items: center; gap: 12px; padding: 11px 14px; color: #fff; border: 1px solid rgba(255,255,255,.3); border-radius: 18px; background: linear-gradient(115deg, rgba(58,48,98,.88), rgba(110,88,170,.76)); box-shadow: 0 18px 45px rgba(53,43,91,.25); backdrop-filter: blur(18px); transform: translateX(-50%); animation: agent-enter .35s ease-out; }
@@ -444,7 +431,8 @@ h1 { margin: 0; font-size: clamp(23px, 2vw, 29px); letter-spacing: -.05em; line-
 @keyframes horizon-breathe { 0%, 100% { opacity: .64; transform: scaleY(.92); transform-origin: bottom; } 50% { opacity: .84; transform: scaleY(1.04); transform-origin: bottom; } }
 @keyframes foliage-sway { 0%, 100% { transform: translateX(-1%) skewX(-1deg); } 50% { transform: translateX(1.5%) skewX(1.5deg); } }
 @keyframes garden-petal-drift { 0% { transform: translate(-8px, -18px) rotate(5deg); opacity: 0; } 18% { opacity: .62; } 52% { transform: translate(68px, 42vh) rotate(105deg); opacity: .7; } 100% { transform: translate(18px, 88vh) rotate(220deg); opacity: 0; } }
-@keyframes web-petal-fall { 0% { transform: translate3d(0, -11vh, 0) rotate(0deg) scale(.76); opacity: 0; } 9% { opacity: .62; } 32% { transform: translate3d(var(--petal-drift), 31vh, 0) rotate(104deg) scale(.94); } 66% { transform: translate3d(var(--petal-sway), 70vh, 0) rotate(226deg) scale(1); } 91% { opacity: .48; } 100% { transform: translate3d(var(--petal-drift), 113vh, 0) rotate(385deg) scale(.82); opacity: 0; } }
+@keyframes web-petal-field-enter { from { opacity: 0; } to { opacity: var(--petal-field-opacity); } }
+@keyframes web-petal-fall { 0% { transform: translate3d(0, -18px, 0) rotate(0deg) scale(var(--petal-scale)); opacity: 0; } 6% { opacity: var(--petal-opacity); } 32% { transform: translate3d(var(--petal-drift-a), var(--petal-fall-a), 0) rotate(var(--petal-turn-a)) scale(var(--petal-scale)); } 67% { transform: translate3d(var(--petal-drift-b), var(--petal-fall-b), 0) rotate(var(--petal-turn-b)) scale(var(--petal-scale)); } 84% { opacity: var(--petal-opacity); } 95% { opacity: var(--petal-fade-opacity); } 100% { transform: translate3d(var(--petal-drift-c), var(--petal-fall-c), 0) rotate(var(--petal-turn-c)) scale(var(--petal-scale)); opacity: 0; } }
 @keyframes ambient-haze-drift { 0%, 100% { transform: translate(-3%, 1%) scale(.96); opacity: .34; } 50% { transform: translate(5%, -3%) scale(1.06); opacity: .54; } }
 @keyframes ambient-mote-one { 0%, 100% { transform: translate(0, 10px) scale(.8); opacity: 0; } 20% { opacity: .3; } 55% { transform: translate(26px, -72px) scale(1.08); opacity: .66; } 82% { opacity: .18; } }
 @keyframes ambient-mote-two { 0%, 100% { transform: translate(0, 6px); opacity: 0; } 28% { opacity: .42; } 62% { transform: translate(-20px, -86px); opacity: .58; } 86% { opacity: .12; } }

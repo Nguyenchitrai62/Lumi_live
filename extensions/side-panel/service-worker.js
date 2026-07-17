@@ -2,6 +2,7 @@ const MESSAGE_TYPE = "lumi_sidepanel_request";
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
 const TARGET_STORAGE_KEY = "lumiSidePanelTargetTabId";
 const TARGET_CHANGED_MESSAGE = "lumi_sidepanel_target_changed";
+const PANEL_LIFECYCLE_MESSAGE = "lumi_sidepanel_lifecycle";
 const ELEMENT_HIGHLIGHTS_STORAGE_KEY = "lumiShowElementHighlights";
 
 let connectedTabId = null;
@@ -20,6 +21,14 @@ const ready = loadTarget();
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+});
+
+chrome.sidePanel.onOpened?.addListener(() => {
+  void chrome.runtime.sendMessage({ type: PANEL_LIFECYCLE_MESSAGE, state: "opened" }).catch(() => {});
+});
+
+chrome.sidePanel.onClosed?.addListener(() => {
+  void chrome.runtime.sendMessage({ type: PANEL_LIFECYCLE_MESSAGE, state: "closed" }).catch(() => {});
 });
 
 function isWebPage(url = "") {
