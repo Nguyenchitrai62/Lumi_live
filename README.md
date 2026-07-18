@@ -47,17 +47,59 @@ public/avatars/
 
 The Pixel Companion metadata is [`public/avatars/pixel/avatar.json`](./public/avatars/pixel/avatar.json). Its adjacent spritesheet contains nine animation rows:
 
-| State | Trigger |
-| --- | --- |
-| `idle` | Available before and between sessions |
-| `connecting` | Preparing microphone or Gemini Live |
-| `listening` | Waiting for user speech |
-| `thinking` | Preparing a response or next action |
-| `speaking` | Playing Gemini audio |
-| `ui_control` | Interacting with browser UI |
-| `tool_call` | Running an MCP tool |
-| `success` | An action completed |
-| `error` | A connection, browser action, or tool failed |
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <strong><code>idle</code></strong><br />
+      <sub>Available before and between sessions</sub><br />
+      <img src="./public/avatars/pixel/previews/idle.webp" alt="Lumi Pixel Companion idle animation" width="180" />
+    </td>
+    <td align="center" width="33%">
+      <strong><code>connecting</code></strong><br />
+      <sub>Preparing microphone and Gemini Live</sub><br />
+      <img src="./public/avatars/pixel/previews/connecting.webp" alt="Lumi Pixel Companion connecting animation" width="180" />
+    </td>
+    <td align="center" width="33%">
+      <strong><code>listening</code></strong><br />
+      <sub>Waiting for user speech</sub><br />
+      <img src="./public/avatars/pixel/previews/listening.webp" alt="Lumi Pixel Companion listening animation" width="180" />
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <strong><code>thinking</code></strong><br />
+      <sub>Preparing a response or next action</sub><br />
+      <img src="./public/avatars/pixel/previews/thinking.webp" alt="Lumi Pixel Companion thinking animation" width="180" />
+    </td>
+    <td align="center" width="33%">
+      <strong><code>speaking</code></strong><br />
+      <sub>Playing Gemini audio</sub><br />
+      <img src="./public/avatars/pixel/previews/speaking.webp" alt="Lumi Pixel Companion speaking animation" width="180" />
+    </td>
+    <td align="center" width="33%">
+      <strong><code>ui_control</code></strong><br />
+      <sub>Interacting with browser UI</sub><br />
+      <img src="./public/avatars/pixel/previews/ui_control.webp" alt="Lumi Pixel Companion browser UI control animation" width="180" />
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <strong><code>tool_call</code></strong><br />
+      <sub>Running an MCP tool</sub><br />
+      <img src="./public/avatars/pixel/previews/tool_call.webp" alt="Lumi Pixel Companion MCP tool call animation" width="180" />
+    </td>
+    <td align="center" width="33%">
+      <strong><code>success</code></strong><br />
+      <sub>An action completed</sub><br />
+      <img src="./public/avatars/pixel/previews/success.webp" alt="Lumi Pixel Companion success animation" width="180" />
+    </td>
+    <td align="center" width="33%">
+      <strong><code>error</code></strong><br />
+      <sub>A connection, browser action, or tool failed</sub><br />
+      <img src="./public/avatars/pixel/previews/error.webp" alt="Lumi Pixel Companion error animation" width="180" />
+    </td>
+  </tr>
+</table>
 
 Every state uses eight `256 × 256` cells with a shared baseline and transition pose. The extension build copies runtime avatar assets into its unpacked package.
 
