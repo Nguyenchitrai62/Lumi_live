@@ -1,4 +1,17 @@
 import { PageController } from "@page-agent/page-controller";
+import {
+  showTabDeparture,
+  typeTextGradually,
+} from "./page-visual-effects.js";
+import {
+  DEFAULT_VISUAL_PREFERENCES,
+  normalizeVisualPreferences,
+} from "./visual-preferences.js";
+import { RESPONSE_AUDIO_DIRECTIVE_KEY } from "./response-audio-policy.js";
+import {
+  captureYouTubeVideoClick,
+  didClickOpenYouTubeVideo,
+} from "./youtube-video-action.js";
 
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
 const MAX_STATE_CHARACTERS = 16000;
@@ -9,9 +22,7 @@ if (!globalThis[GLOBAL_KEY]) {
   const runtime = {
     controller: null,
     stateIndexed: false,
-    visualPreferences: {
-      showElementHighlights: true,
-    },
+    visualPreferences: { ...DEFAULT_VISUAL_PREFERENCES },
   };
   globalThis[GLOBAL_KEY] = runtime;
 
@@ -71,7 +82,7 @@ if (!globalThis[GLOBAL_KEY]) {
 
   function assertSafeInput(index) {
     const element = indexedElement(index);
-    if (!(element instanceof HTMLElement)) return;
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
     const descriptor = [
       element.getAttribute("type"),
       element.getAttribute("name"),
@@ -88,7 +99,7 @@ if (!globalThis[GLOBAL_KEY]) {
 
   function assertConfirmedHighImpactClick(index, confirmed) {
     const element = indexedElement(index);
-    if (!(element instanceof HTMLElement)) return;
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
     const label = [
       element.innerText,
       element.textContent,
@@ -124,12 +135,17 @@ if (!globalThis[GLOBAL_KEY]) {
     }
 
     if (tool === "bridge_set_visual_preferences") {
-      runtime.visualPreferences.showElementHighlights = args.showElementHighlights !== false;
+      runtime.visualPreferences = normalizeVisualPreferences(args);
       applyVisualPreferences();
       if (!runtime.visualPreferences.showElementHighlights) {
         await pageController.cleanUpHighlights();
       }
       return { success: true, visualPreferences: runtime.visualPreferences };
+    }
+
+    if (tool === "bridge_show_tab_departure") {
+      await showTabDeparture(String(args.searchText || "new tab"));
+      return { success: true };
     }
 
     if (tool === "browser_get_page_state") {
@@ -148,14 +164,37 @@ if (!globalThis[GLOBAL_KEY]) {
     if (tool === "browser_click") {
       const index = requireIndex(args);
       assertConfirmedHighImpactClick(index, args.confirmed);
-      return withVisualAction((activeController) => activeController.clickElement(index));
+      const videoClick = captureYouTubeVideoClick(indexedElement(index));
+      return withVisualAction(async (activeController) => {
+        const result = await activeController.clickElement(index);
+        if (result?.success === false || !didClickOpenYouTubeVideo(videoClick)) return result;
+        return {
+          ...result,
+          [RESPONSE_AUDIO_DIRECTIVE_KEY]: {
+            suppressForTurn: true,
+            reason: "youtube_video_opened",
+          },
+        };
+      });
     }
 
     if (tool === "browser_input_text") {
       const index = requireIndex(args);
       const text = String(args.text ?? "");
       assertSafeInput(index);
-      return withVisualAction((activeController) => activeController.inputText(index, text));
+      return withVisualAction(async (activeController) => {
+        const element = indexedElement(index);
+        if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+          throw new Error(`Element at index ${index} is no longer available.`);
+        }
+        const clickResult = await activeController.clickElement(index);
+        if (clickResult?.success === false) throw new Error(clickResult.message);
+        await typeTextGradually(element, text, runtime.visualPreferences.typingDurationMs);
+        return {
+          success: true,
+          message: `Input text gradually over ${runtime.visualPreferences.typingDurationMs} ms.`,
+        };
+      });
     }
 
     if (tool === "browser_select_option") {

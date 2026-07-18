@@ -2816,6 +2816,261 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     }
   };
 
+  // extensions/lumi-live/page-visual-effects.js
+  var TAB_TRANSITION_HOST_ID = "lumi-page-agent-tab-transition";
+  function wait(milliseconds) {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
+  function setNativeControlValue(element, value) {
+    const elementWindow = element.ownerDocument.defaultView || window;
+    const prototype = element.tagName === "TEXTAREA" ? elementWindow.HTMLTextAreaElement.prototype : elementWindow.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+    if (!setter) throw new Error("The input does not expose a native value setter.");
+    setter.call(element, value);
+    try {
+      element.setSelectionRange(value.length, value.length);
+    } catch {
+    }
+  }
+  function replaceTextAndDispatchInput(element, value, inputType, data = null) {
+    const elementWindow = element.ownerDocument.defaultView || window;
+    const InputEventConstructor = elementWindow.InputEvent || InputEvent;
+    element.dispatchEvent(new InputEventConstructor("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      inputType,
+      data
+    }));
+    replaceVisibleText(element, value);
+    element.dispatchEvent(new InputEventConstructor("input", {
+      bubbles: true,
+      inputType,
+      data
+    }));
+  }
+  function replaceVisibleText(element, value) {
+    if (element.isContentEditable) {
+      element.innerText = value;
+      return;
+    }
+    setNativeControlValue(element, value);
+  }
+  async function typeTextGradually(element, text, durationMs) {
+    const isTextControl = element?.tagName === "INPUT" || element?.tagName === "TEXTAREA" || element?.isContentEditable;
+    if (!isTextControl) {
+      throw new Error("Element is not an input, textarea, or contenteditable.");
+    }
+    const elementWindow = element.ownerDocument.defaultView || window;
+    const rawText = String(text);
+    const segmenter = elementWindow.Intl?.Segmenter ? new elementWindow.Intl.Segmenter(void 0, { granularity: "grapheme" }) : null;
+    const characters = segmenter ? [...segmenter.segment(rawText)].map(({ segment }) => segment) : Array.from(rawText);
+    const duration = Math.max(0, Number(durationMs) || 0);
+    element.focus({ preventScroll: true });
+    replaceTextAndDispatchInput(element, "", "deleteContentBackward");
+    if (characters.length && duration > 0) {
+      const startedAt = elementWindow.performance.now();
+      let renderedCount = 0;
+      while (renderedCount < characters.length) {
+        const elapsed = elementWindow.performance.now() - startedAt;
+        const nextCount = Math.min(
+          characters.length,
+          Math.max(1, Math.ceil(elapsed / duration * characters.length))
+        );
+        if (nextCount > renderedCount) {
+          const insertedText = characters.slice(renderedCount, nextCount).join("");
+          replaceTextAndDispatchInput(
+            element,
+            characters.slice(0, nextCount).join(""),
+            "insertText",
+            insertedText
+          );
+          renderedCount = nextCount;
+        }
+        if (renderedCount < characters.length) {
+          await new Promise((resolve) => elementWindow.requestAnimationFrame(resolve));
+        }
+      }
+      const remaining = duration - (elementWindow.performance.now() - startedAt);
+      if (remaining > 0) await wait(remaining);
+    } else if (characters.length) {
+      replaceTextAndDispatchInput(element, characters.join(""), "insertText", characters.join(""));
+    }
+    const EventConstructor = elementWindow.Event || Event;
+    element.dispatchEvent(new EventConstructor("change", { bubbles: true }));
+    element.blur();
+  }
+  function createTabTransitionHost() {
+    document.getElementById(TAB_TRANSITION_HOST_ID)?.remove();
+    const host = document.createElement("div");
+    host.id = TAB_TRANSITION_HOST_ID;
+    host.style.cssText = "all:initial;position:fixed;z-index:2147483647;inset:0;pointer-events:none;";
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+    <style>
+      :host { color-scheme: light dark; }
+      .veil { position:absolute; inset:0; overflow:hidden; background:rgba(19,15,34,.56); backdrop-filter:blur(14px); transition:background .34s ease,backdrop-filter .34s ease; }
+      .stage { position:absolute; left:50%; top:50%; width:min(620px,calc(100vw - 36px)); transform:translate(-50%,-50%) translateY(14px) scale(.96); opacity:0; animation:lumi-search-in 1s cubic-bezier(.2,.8,.2,1) forwards; }
+      .brand { display:flex; justify-content:center; margin:0 0 22px; font:600 clamp(36px,7vw,62px)/1 Arial,sans-serif; letter-spacing:-.08em; filter:drop-shadow(0 10px 25px rgba(0,0,0,.2)); }
+      .brand span:nth-child(1),.brand span:nth-child(4) { color:#4285f4; }
+      .brand span:nth-child(2),.brand span:nth-child(6) { color:#ea4335; }
+      .brand span:nth-child(3) { color:#fbbc05; }
+      .brand span:nth-child(5) { color:#34a853; }
+      .search { display:flex; align-items:center; gap:14px; min-height:58px; padding:0 20px; border:1px solid #dfe1e5; border-radius:999px; background:#fff; box-shadow:0 8px 24px rgba(32,33,36,.24); transition:transform .2s ease,box-shadow .2s ease; }
+      .magnifier { width:17px; height:17px; flex:0 0 auto; border:2px solid #9aa0a6; border-radius:50%; position:relative; }
+      .magnifier::after { content:""; position:absolute; width:7px; height:2px; right:-6px; bottom:-3px; border-radius:2px; background:#9aa0a6; transform:rotate(45deg); }
+      .query { min-width:0; overflow:hidden; color:#202124; font:400 18px/1.4 Arial,sans-serif; white-space:nowrap; text-overflow:ellipsis; }
+      .caret { width:2px; height:24px; flex:0 0 auto; border-radius:2px; background:#4285f4; animation:lumi-caret .7s step-end infinite; }
+      .actions { display:flex; justify-content:center; margin-top:20px; }
+      .search-button { position:relative; min-width:132px; padding:10px 18px; border:1px solid #f8f9fa; border-radius:4px; color:#3c4043; background:#f8f9fa; box-shadow:0 1px 1px rgba(0,0,0,.08); font:500 14px/1 Arial,sans-serif; text-align:center; transition:background .1s ease,border-color .1s ease,box-shadow .1s ease,transform .1s ease; }
+      .pointer { position:absolute; z-index:2; left:50%; top:50%; width:30px; height:34px; opacity:0; transform:translate(150px,78px); filter:drop-shadow(0 3px 4px rgba(0,0,0,.35)); }
+      .pointer svg { display:block; width:100%; height:100%; overflow:visible; }
+      .click-ring { position:absolute; left:7px; top:7px; width:12px; height:12px; border:2px solid rgba(66,133,244,.9); border-radius:50%; opacity:0; transform:scale(.25); }
+      .status { margin:14px 0 0; color:rgba(255,255,255,.88); font:700 12px/1.35 "Segoe UI",sans-serif; letter-spacing:.04em; text-align:center; text-shadow:0 2px 8px rgba(0,0,0,.32); }
+      :host([data-state="aim"]) .caret,:host([data-state="click"]) .caret { opacity:0; animation:none; }
+      :host([data-state="aim"]) .pointer { animation:lumi-pointer-aim .36s cubic-bezier(.2,.75,.2,1) forwards; }
+      :host([data-state="click"]) .pointer { opacity:1; transform:translate(10px,5px) scale(.92); }
+      :host([data-state="click"]) .click-ring { animation:lumi-click-ring .24s ease-out forwards; }
+      :host([data-state="click"]) .search-button { border-color:#dadce0; background:#eef3fe; box-shadow:inset 0 1px 3px rgba(60,64,67,.2); transform:translateY(2px); }
+      @keyframes lumi-search-in { to { transform:translate(-50%,-50%) translateY(0) scale(1); opacity:1; } }
+      @keyframes lumi-caret { 50% { opacity:0; } }
+      @keyframes lumi-pointer-aim { from { opacity:0; transform:translate(150px,78px); } 18% { opacity:1; } to { opacity:1; transform:translate(10px,5px); } }
+      @keyframes lumi-click-ring { 0% { opacity:.9; transform:scale(.25); } 100% { opacity:0; transform:scale(2.4); } }
+      @media (prefers-reduced-motion:reduce) { .stage { animation:none; transform:translate(-50%,-50%); opacity:1; } .caret,.magnifier { animation:none; } :host([data-state="aim"]) .pointer { animation:none; opacity:1; transform:translate(10px,5px); } }
+    </style>
+    <div class="veil">
+      <div class="stage">
+        <div class="brand" aria-hidden="true"><span>G</span><span>o</span><span>o</span><span>g</span><span>l</span><span>e</span></div>
+        <div class="search"><span class="magnifier"></span><span class="query"></span><span class="caret"></span></div>
+        <div class="actions">
+          <div class="search-button">Google Search
+            <span class="pointer" aria-hidden="true">
+              <svg viewBox="0 0 30 34"><path d="M3 2.5 25.5 23l-10.4.6-5.2 8.8z" fill="#fff" stroke="#202124" stroke-width="2" stroke-linejoin="round"/></svg>
+              <span class="click-ring"></span>
+            </span>
+          </div>
+        </div>
+        <div class="status">Lumi is preparing a new tab</div>
+      </div>
+    </div>`;
+    (document.documentElement || document.body).append(host);
+    return {
+      host,
+      query: shadow.querySelector(".query"),
+      status: shadow.querySelector(".status")
+    };
+  }
+  async function revealSearchText(element, text, durationMs = 500) {
+    const elementWindow = element.ownerDocument.defaultView || window;
+    const segmenter = elementWindow.Intl?.Segmenter ? new elementWindow.Intl.Segmenter(void 0, { granularity: "grapheme" }) : null;
+    const characters = segmenter ? [...segmenter.segment(String(text))].map(({ segment }) => segment) : Array.from(String(text));
+    const startedAt = elementWindow.performance.now();
+    let renderedCount = 0;
+    while (renderedCount < characters.length) {
+      const elapsed = elementWindow.performance.now() - startedAt;
+      const nextCount = Math.min(
+        characters.length,
+        Math.max(1, Math.ceil(elapsed / durationMs * characters.length))
+      );
+      if (nextCount > renderedCount) {
+        element.textContent = characters.slice(0, nextCount).join("");
+        renderedCount = nextCount;
+      }
+      if (renderedCount < characters.length) {
+        await new Promise((resolve) => elementWindow.requestAnimationFrame(resolve));
+      }
+    }
+    const remaining = durationMs - (elementWindow.performance.now() - startedAt);
+    if (remaining > 0) await wait(remaining);
+  }
+  async function showTabDeparture(searchText = "new tab") {
+    const { host, query, status } = createTabTransitionHost();
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await wait(1e3);
+    status.textContent = "Lumi is typing the destination";
+    await revealSearchText(query, String(searchText || "new tab"), 500);
+    status.textContent = "Opening a new tab";
+    host.dataset.state = "aim";
+    await wait(360);
+    host.dataset.state = "click";
+    await wait(100);
+    setTimeout(() => host.remove(), 1200);
+  }
+
+  // extensions/lumi-live/visual-preferences.js
+  var DEFAULT_VISUAL_PREFERENCES = Object.freeze({
+    showElementHighlights: false,
+    typingDurationMs: 500
+  });
+  function normalizeVisualPreferences(value = {}) {
+    return {
+      showElementHighlights: value.showElementHighlights === true,
+      typingDurationMs: DEFAULT_VISUAL_PREFERENCES.typingDurationMs
+    };
+  }
+
+  // extensions/lumi-live/response-audio-policy.js
+  var RESPONSE_AUDIO_DIRECTIVE_KEY = "lumiResponseAudio";
+
+  // extensions/lumi-live/youtube-video-action.js
+  function parseUrl(rawUrl, baseUrl) {
+    const value = String(rawUrl || "").trim();
+    if (!value) return null;
+    try {
+      return new URL(value, String(baseUrl || "https://youtube.com/"));
+    } catch {
+      return null;
+    }
+  }
+  function isYouTubeUrl(rawUrl, baseUrl) {
+    const url = parseUrl(rawUrl, baseUrl);
+    if (!url) return false;
+    const hostname = url.hostname.toLowerCase();
+    return hostname === "youtu.be" || hostname === "youtube.com" || hostname.endsWith(".youtube.com");
+  }
+  function isYouTubeVideoUrl(rawUrl, baseUrl) {
+    const url = parseUrl(rawUrl, baseUrl);
+    if (!url || !isYouTubeUrl(url.href)) return false;
+    const hostname = url.hostname.toLowerCase();
+    if (hostname === "youtu.be") return url.pathname.split("/").filter(Boolean).length > 0;
+    return url.pathname === "/watch" ? Boolean(url.searchParams.get("v")) : /^\/(?:shorts|live)\/[^/]+/i.test(url.pathname);
+  }
+  function linkedUrl(element) {
+    const link = element?.closest?.("a[href]") || (element?.matches?.("a[href]") ? element : null);
+    const href = link?.href || link?.getAttribute?.("href");
+    return href ? parseUrl(href, element?.ownerDocument?.location?.href)?.href || "" : "";
+  }
+  function nearbyVideo(element) {
+    let candidate = element;
+    for (let depth = 0; candidate && depth < 8; depth += 1) {
+      if (candidate.matches?.("video")) return candidate;
+      const video = candidate.querySelector?.("video");
+      if (video) return video;
+      candidate = candidate.parentElement;
+    }
+    return null;
+  }
+  function captureYouTubeVideoClick(element) {
+    const documentUrl = element?.ownerDocument?.location?.href || "";
+    const targetUrl = linkedUrl(element);
+    const opensVideoLink = isYouTubeVideoUrl(targetUrl, documentUrl);
+    let video = null;
+    if (isYouTubeUrl(documentUrl)) {
+      video = nearbyVideo(element);
+      if (!video && isYouTubeVideoUrl(documentUrl)) {
+        video = element.ownerDocument.querySelector?.("video") || null;
+      }
+    }
+    return {
+      opensVideoLink,
+      video,
+      videoWasPaused: Boolean(video?.paused)
+    };
+  }
+  function didClickOpenYouTubeVideo(capture) {
+    if (capture?.opensVideoLink) return true;
+    return Boolean(capture?.video && capture.videoWasPaused && !capture.video.paused);
+  }
+
   // extensions/lumi-live/page-controller.js
   var CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
   var MAX_STATE_CHARACTERS = 16e3;
@@ -2870,7 +3125,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       return getController().selectorMap?.get(index)?.ref || null;
     }, assertSafeInput = function(index) {
       const element = indexedElement(index);
-      if (!(element instanceof HTMLElement)) return;
+      if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
       const descriptor = [
         element.getAttribute("type"),
         element.getAttribute("name"),
@@ -2884,7 +3139,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       }
     }, assertConfirmedHighImpactClick = function(index, confirmed) {
       const element = indexedElement(index);
-      if (!(element instanceof HTMLElement)) return;
+      if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
       const label = [
         element.innerText,
         element.textContent,
@@ -2901,9 +3156,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     const runtime = {
       controller: null,
       stateIndexed: false,
-      visualPreferences: {
-        showElementHighlights: true
-      }
+      visualPreferences: { ...DEFAULT_VISUAL_PREFERENCES }
     };
     globalThis[GLOBAL_KEY] = runtime;
     async function withVisualAction(action) {
@@ -2924,12 +3177,16 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
         return { success: true, ready: true, visualPreferences: runtime.visualPreferences };
       }
       if (tool === "bridge_set_visual_preferences") {
-        runtime.visualPreferences.showElementHighlights = args.showElementHighlights !== false;
+        runtime.visualPreferences = normalizeVisualPreferences(args);
         applyVisualPreferences();
         if (!runtime.visualPreferences.showElementHighlights) {
           await pageController.cleanUpHighlights();
         }
         return { success: true, visualPreferences: runtime.visualPreferences };
+      }
+      if (tool === "bridge_show_tab_departure") {
+        await showTabDeparture(String(args.searchText || "new tab"));
+        return { success: true };
       }
       if (tool === "browser_get_page_state") {
         applyVisualPreferences();
@@ -2945,13 +3202,36 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       if (tool === "browser_click") {
         const index = requireIndex(args);
         assertConfirmedHighImpactClick(index, args.confirmed);
-        return withVisualAction((activeController) => activeController.clickElement(index));
+        const videoClick = captureYouTubeVideoClick(indexedElement(index));
+        return withVisualAction(async (activeController) => {
+          const result2 = await activeController.clickElement(index);
+          if (result2?.success === false || !didClickOpenYouTubeVideo(videoClick)) return result2;
+          return {
+            ...result2,
+            [RESPONSE_AUDIO_DIRECTIVE_KEY]: {
+              suppressForTurn: true,
+              reason: "youtube_video_opened"
+            }
+          };
+        });
       }
       if (tool === "browser_input_text") {
         const index = requireIndex(args);
         const text = String(args.text ?? "");
         assertSafeInput(index);
-        return withVisualAction((activeController) => activeController.inputText(index, text));
+        return withVisualAction(async (activeController) => {
+          const element = indexedElement(index);
+          if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+            throw new Error(`Element at index ${index} is no longer available.`);
+          }
+          const clickResult = await activeController.clickElement(index);
+          if (clickResult?.success === false) throw new Error(clickResult.message);
+          await typeTextGradually(element, text, runtime.visualPreferences.typingDurationMs);
+          return {
+            success: true,
+            message: `Input text gradually over ${runtime.visualPreferences.typingDurationMs} ms.`
+          };
+        });
       }
       if (tool === "browser_select_option") {
         const index = requireIndex(args);

@@ -22,6 +22,10 @@ import {
   resampleTo16k,
 } from "./live-audio-utils.js";
 import { createPetalEmitter } from "./petal-emitter.js";
+import {
+  consumeResponseAudioDirective,
+  createTurnAudioGate,
+} from "./response-audio-policy.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
@@ -95,6 +99,7 @@ let mouthAnimationId = null;
 let blinkTimeoutId = null;
 const playbackSources = new Set();
 const partialMessages = { user: null, lumi: null };
+const responseAudioGate = createTurnAudioGate(() => stopPlayback());
 
 const avatarController = createAvatarController({
   elements: {
@@ -766,13 +771,16 @@ async function handleServerMessage(event, sourceSocket) {
 
   const serverContent = response.serverContent;
   for (const part of serverContent?.modelTurn?.parts || []) {
-    if (part.inlineData?.data) playPcmChunk(part.inlineData.data);
+    if (part.inlineData?.data && responseAudioGate.shouldPlay()) {
+      playPcmChunk(part.inlineData.data);
+    }
   }
   if (serverContent?.inputTranscription?.text) updateTranscript("user", serverContent.inputTranscription.text);
   if (serverContent?.outputTranscription?.text) updateTranscript("lumi", serverContent.outputTranscription.text);
   if (serverContent?.interrupted) {
     cancelPendingMcpActivities();
     stopPlayback();
+    responseAudioGate.reset();
     finalizeTranscript("lumi");
   }
   if (serverContent?.turnComplete) {
@@ -794,9 +802,14 @@ async function handleServerMessage(event, sourceSocket) {
         if (!isBrowserTool && !mcpTool) throw new Error(`Unsupported tool: ${functionCall.name}`);
         if (mcpTool?.disabled) throw new Error("This MCP tool is disabled for the rest of this session.");
         if (mcpTool) createMcpActivityCard(callId, mcpTool, functionCall.args || {});
-        const result = isBrowserTool
+        let result = isBrowserTool
           ? await runBrowserTool(functionCall.name, functionCall.args || {})
           : normalizeMcpToolResult(await runMcpTool(mcpTool, functionCall.args || {}, callId));
+        if (isBrowserTool) {
+          const consumed = consumeResponseAudioDirective(result);
+          result = consumed.result;
+          if (consumed.suppressForTurn) responseAudioGate.suppress();
+        }
         if (cancelledToolCallIds.has(callId) || sourceSocket !== websocket) {
           if (mcpTool) finishMcpActivity(callId, "cancelled", "The session ended before Lumi could use this MCP result.");
           continue;
@@ -830,6 +843,7 @@ async function handleServerMessage(event, sourceSocket) {
       sendJson({ toolResponse: { functionResponses } }, sourceSocket);
     }
   }
+  if (serverContent?.turnComplete) responseAudioGate.reset();
 }
 
 function openGeminiSocket({ apiKey, voiceName, mcpInfo, mcpFunctionDeclarations, activeTabContext }) {
@@ -1004,6 +1018,7 @@ function cleanupMedia() {
   cancelPendingMcpActivities("The voice session ended before this MCP tool call completed.");
   pendingToolCallIds.clear();
   stopPlayback();
+  responseAudioGate.reset();
   websocket = null;
   if (micProcessor) micProcessor.port.onmessage = null;
   micProcessor?.disconnect();
@@ -1041,6 +1056,7 @@ function toggleMute() {
 function sendText(text) {
   const clean = text.trim();
   if (!clean || sessionStatus !== "ready") return;
+  responseAudioGate.reset();
   finalizeTranscript("user");
   finalizeTranscript("lumi");
   createMessage("user", clean);

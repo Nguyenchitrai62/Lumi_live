@@ -5,6 +5,7 @@ import {
   sanitizeActiveContextUrl,
 } from "./active-tab-context.js";
 import { EXTENSION_EVENTS, STORAGE_KEYS } from "./extension-config.js";
+import { normalizeVisualPreferences } from "./visual-preferences.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
@@ -80,9 +81,9 @@ async function pingController(tabId) {
 
 async function getVisualPreferences() {
   const stored = await chrome.storage.local.get(ELEMENT_HIGHLIGHTS_STORAGE_KEY);
-  return {
+  return normalizeVisualPreferences({
     showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
-  };
+  });
 }
 
 async function applyControllerVisualPreferences(tabId, preferences) {
@@ -188,6 +189,14 @@ async function sendBrowserTool(tool, args) {
   return result;
 }
 
+async function sendControllerBridge(tabId, tool, args = {}) {
+  return chrome.tabs.sendMessage(tabId, {
+    source: CONTENT_REQUEST_SOURCE,
+    tool,
+    args,
+  });
+}
+
 function serializeTab(tab) {
   return {
     tabId: tab.id,
@@ -245,6 +254,15 @@ function requireWebUrl(rawUrl) {
   return url.href;
 }
 
+function tabTransitionSearchText(url) {
+  const parsed = new URL(url);
+  for (const parameter of ["q", "query", "search_query"]) {
+    const value = parsed.searchParams.get(parameter)?.replace(/\s+/g, " ").trim();
+    if (value) return value.slice(0, 120);
+  }
+  return parsed.hostname.replace(/^www\./i, "").slice(0, 120) || "new tab";
+}
+
 async function waitForTabToSettle(tabId) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const tab = await chrome.tabs.get(tabId);
@@ -256,6 +274,12 @@ async function waitForTabToSettle(tabId) {
 
 async function openBrowserTab(args = {}) {
   const url = requireWebUrl(args.url);
+  const previousTabId = connectedTabId;
+  if (previousTabId) {
+    await sendControllerBridge(previousTabId, "bridge_show_tab_departure", {
+      searchText: tabTransitionSearchText(url),
+    }).catch(() => {});
+  }
   const createdTab = await chrome.tabs.create({ url, active: true });
   if (!createdTab.id) throw new Error("Chrome created the tab without an ID.");
   await setConnectedTab(createdTab.id);
@@ -647,9 +671,9 @@ async function handleMessage(message) {
   if (message.command === "disconnect_tab") return getStatus();
   if (message.command === "get_status") return getStatus();
   if (message.command === "set_visual_preferences") {
-    const visualPreferences = {
+    const visualPreferences = normalizeVisualPreferences({
       showElementHighlights: message.showElementHighlights === true,
-    };
+    });
     await chrome.storage.local.set({
       [ELEMENT_HIGHLIGHTS_STORAGE_KEY]: visualPreferences.showElementHighlights,
     });
@@ -710,7 +734,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 });
 
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  void getActiveTab().then(async (tab) => {
+  void getActiveTab(windowId).then(async (tab) => {
     if (tab?.id !== tabId) return;
     if (!isWebPage(tab.url)) {
       await setConnectedTab(null);
@@ -728,10 +752,9 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local" || !changes[ELEMENT_HIGHLIGHTS_STORAGE_KEY] || !connectedTabId) return;
-  void applyControllerVisualPreferences(connectedTabId, {
-    showElementHighlights: changes[ELEMENT_HIGHLIGHTS_STORAGE_KEY].newValue === true,
-  });
+  const visualPreferenceChanged = areaName === "local" && changes[ELEMENT_HIGHLIGHTS_STORAGE_KEY];
+  if (!visualPreferenceChanged || !connectedTabId) return;
+  void applyControllerVisualPreferences(connectedTabId);
 });
 
 void ready.then(() => followActiveTab()).catch(() => {

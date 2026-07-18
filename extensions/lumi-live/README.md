@@ -40,6 +40,9 @@ The build copies the source atlas from `public/avatars/pixel` and the layered VT
 
 - **PAGEAGENT TARGET** follows the active normal web tab automatically.
 - Page element guides are optional and disabled by default.
+- The always-on new-tab transition shows a centered Google Search for 1 second, types the destination over another 0.5 seconds, then a pointer clicks Search exactly as Chrome creates and activates the new tab. Form text is also always revealed over 0.5 seconds.
+- If a PageAgent click opens a YouTube video link or starts a paused YouTube video, Lumi locally suppresses only its remaining response audio for that turn. Output transcription still appears, and the next turn speaks normally even while the video remains open.
+- Video fullscreen controls use PageAgent's standard click path. Lumi does not request the `debugger` permission or add a synthetic keyboard fallback that cannot provide genuine user activation.
 - MCP servers are added from **Settings → Connected tools**.
 - Every MCP tool can be set to **Always allow**, **Ask every time**, or **Block**.
 - Invalid or rejected tools are isolated so voice, chat, and other tools remain available.

@@ -511,7 +511,6 @@ async function saveSettings() {
 
 async function saveVisualPreference() {
   const showElementHighlights = elements.showElementHighlightsInput.checked;
-  await chrome.storage.local.set({ [ELEMENT_HIGHLIGHTS_STORAGE_KEY]: showElementHighlights });
   await sendRuntime("set_visual_preferences", { showElementHighlights });
 }
 
