@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { PixelAvatar } from "./components/PixelAvatar";
 import { VtuberAvatar } from "./components/VtuberAvatar";
 import { McpSettings } from "./components/McpSettings";
+import { PetalLayer } from "./components/PetalLayer";
 import type { PixelAvatarState } from "./lib/avatar-catalog";
 import {
   formatMcpValue,
@@ -13,77 +14,44 @@ import {
   type McpServerView,
   type McpToolPolicy,
 } from "./lib/mcp";
-
-const MODEL = "gemini-3.1-flash-live-preview";
-const WS_ENDPOINT =
-  "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained";
-const DIRECT_WS_ENDPOINT =
-  "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
-const EXTENSION_API_KEY_STORAGE_KEY = "lumi-gemini-api-key";
-const MIC_CAPTURE_PROCESSOR = "lumi-pcm-capture";
-
-const BASE_SYSTEM_INSTRUCTION = `You are Lumi, a warm, playful anime roleplay companion. Stay in character, use vivid but concise replies, follow the player's chosen scenario, never claim to be human, and keep the conversation friendly and safe. Speak naturally and leave space for the player to respond. When current visual frames are provided, use them to answer questions about the user's shared screen or camera. Never pretend to see anything when vision is off or a current frame is unavailable.`;
-
-const scenes = [
-  { id: "bedroom", name: "Cloud room", symbol: "☁" },
-  { id: "observatory", name: "Observatory", symbol: "✦" },
-  { id: "garden", name: "Moon garden", symbol: "❀" },
-] as const;
-
-const voices = [
-  ["Zephyr", "Female", "Bright"], ["Puck", "Male", "Upbeat"], ["Charon", "Male", "Informative"],
-  ["Kore", "Female", "Firm"], ["Fenrir", "Male", "Excitable"], ["Leda", "Female", "Youthful"],
-  ["Orus", "Male", "Firm"], ["Aoede", "Female", "Breezy"], ["Callirrhoe", "Female", "Easy-going"],
-  ["Autonoe", "Female", "Bright"], ["Enceladus", "Male", "Breathy"], ["Iapetus", "Male", "Clear"],
-  ["Umbriel", "Male", "Easy-going"], ["Algieba", "Male", "Smooth"], ["Despina", "Female", "Smooth"],
-  ["Erinome", "Female", "Clear"], ["Algenib", "Male", "Gravelly"], ["Rasalgethi", "Male", "Informative"],
-  ["Laomedeia", "Female", "Upbeat"], ["Achernar", "Female", "Soft"], ["Alnilam", "Male", "Firm"],
-  ["Schedar", "Male", "Even"], ["Gacrux", "Female", "Mature"], ["Pulcherrima", "Female", "Forward"],
-  ["Achird", "Male", "Friendly"], ["Zubenelgenubi", "Male", "Casual"], ["Vindemiatrix", "Female", "Gentle"],
-  ["Sadachbia", "Male", "Lively"], ["Sadaltager", "Male", "Knowledgeable"], ["Sulafat", "Female", "Warm"],
-] as const;
-
-type Outfit = "casual" | "moonlit";
-type Scene = (typeof scenes)[number]["id"];
-type SessionStatus = "idle" | "connecting" | "ready" | "error";
-type ThemePreference = "system" | "light" | "dark";
-type VoiceName = (typeof voices)[number][0];
-type VideoMode = "screen" | "camera" | "none";
-type Role = "user" | "lumi";
-type ChatMessage = {
-  id: string;
-  role: Role | "tool";
-  text: string;
-  title?: string;
-  serverName?: string;
-  args?: string;
-  startedAt?: number;
-  startedLabel?: string;
-  durationLabel?: string;
-  state?: "running" | "waiting" | "completed" | "failed" | "cancelled";
-};
-type McpApprovalRequest = {
-  id: string;
-  tool: ActiveMcpTool;
-  args: Record<string, unknown>;
-  resolve: (allowed: boolean) => void;
-  timeoutId: number;
-};
-
-const DEFAULT_VIDEO_MODE: VideoMode = "screen";
-const videoModes: ReadonlyArray<{ id: VideoMode; label: string }> = [
-  { id: "screen", label: "Screen" },
-  { id: "camera", label: "Camera" },
-  { id: "none", label: "None" },
-];
-
-const TOOL_ACTIVITY_LABELS = {
-  running: "Running",
-  waiting: "Awaiting approval",
-  completed: "Completed",
-  failed: "Failed",
-  cancelled: "Cancelled",
-} as const;
+import {
+  BASE_SYSTEM_INSTRUCTION,
+  DEFAULT_VIDEO_MODE,
+  DIRECT_WS_ENDPOINT,
+  MIC_CAPTURE_PROCESSOR,
+  MODEL,
+  scenes,
+  TOOL_ACTIVITY_LABELS,
+  videoModes,
+  voices,
+  WS_ENDPOINT,
+  type Scene,
+  type VoiceName,
+} from "./lib/live/config";
+import {
+  base64ToInt16,
+  bytesToBase64,
+  floatToPcm16,
+  mergeTranscriptText,
+  resampleTo16k,
+} from "./lib/live/audio";
+import {
+  describeMicrophoneError,
+  describeVideoError,
+  getLiveAuth,
+  requestVideoStream,
+} from "./lib/live/media";
+import { playGeminiVoicePreview } from "./lib/live/voice-preview";
+import type {
+  ChatMessage,
+  McpApprovalRequest,
+  Outfit,
+  Role,
+  SessionStatus,
+  ThemePreference,
+  VideoMode,
+  VoicePreviewPhase,
+} from "./lib/live/types";
 
 function createMcpActivityTiming() {
   const startedAt = Date.now();
@@ -101,362 +69,6 @@ function formatMcpActivityDuration(startedAt?: number) {
   if (!startedAt) return "—";
   const elapsed = Math.max(0, Date.now() - startedAt);
   return elapsed < 1000 ? `${elapsed} ms` : `${(elapsed / 1000).toFixed(1)} s`;
-}
-
-function PetalLayer({ className = "", enabled }: { className?: string; enabled: boolean }) {
-  const layerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const layer = layerRef.current;
-    if (!layer) return;
-
-    layer.replaceChildren();
-    if (!enabled) return;
-
-    layer.classList.remove("petal-field-entering");
-    void layer.offsetWidth;
-    layer.classList.add("petal-field-entering");
-
-    const randomBetween = (min: number, max: number) => min + Math.random() * (max - min);
-    let spawnTimer: number | null = null;
-
-    const spawnPetal = (initialProgress = 0) => {
-      if (layer.childElementCount >= 28) return;
-
-      const petal = document.createElement("i");
-      const direction = Math.random() > .5 ? 1 : -1;
-      const width = randomBetween(6, 11);
-      const opacity = randomBetween(.34, .68);
-      const fallDistance = Math.max(layer.clientHeight, 320) + 36;
-      const duration = randomBetween(16, 26);
-
-      petal.style.left = `${randomBetween(1, 97).toFixed(2)}%`;
-      petal.style.width = `${width.toFixed(1)}px`;
-      petal.style.height = `${(width * randomBetween(.58, .76)).toFixed(1)}px`;
-      petal.style.setProperty("--petal-fall-a", `${(fallDistance * .32).toFixed(1)}px`);
-      petal.style.setProperty("--petal-fall-b", `${(fallDistance * .67).toFixed(1)}px`);
-      petal.style.setProperty("--petal-fall-c", `${fallDistance.toFixed(1)}px`);
-      petal.style.setProperty("--petal-drift-a", `${(direction * randomBetween(12, 48)).toFixed(1)}px`);
-      petal.style.setProperty("--petal-drift-b", `${(-direction * randomBetween(8, 42)).toFixed(1)}px`);
-      petal.style.setProperty("--petal-drift-c", `${(direction * randomBetween(22, 68)).toFixed(1)}px`);
-      petal.style.setProperty("--petal-turn-a", `${(direction * randomBetween(65, 145)).toFixed(0)}deg`);
-      petal.style.setProperty("--petal-turn-b", `${(direction * randomBetween(170, 285)).toFixed(0)}deg`);
-      petal.style.setProperty("--petal-turn-c", `${(direction * randomBetween(300, 520)).toFixed(0)}deg`);
-      petal.style.setProperty("--petal-opacity", opacity.toFixed(2));
-      petal.style.setProperty("--petal-fade-opacity", (opacity * .36).toFixed(2));
-      petal.style.setProperty("--petal-scale", randomBetween(.72, 1.18).toFixed(2));
-      petal.style.animationDuration = `${duration.toFixed(2)}s`;
-      if (initialProgress > 0) {
-        petal.style.animationDelay = `${-(duration * initialProgress).toFixed(2)}s`;
-      }
-      petal.addEventListener("animationend", () => petal.remove(), { once: true });
-      layer.append(petal);
-    };
-
-    const scheduleNext = () => {
-      spawnTimer = window.setTimeout(() => {
-        spawnPetal();
-        scheduleNext();
-      }, randomBetween(420, 1100));
-    };
-
-    for (let index = 0; index < 16; index += 1) {
-      spawnPetal(randomBetween(.08, .88));
-    }
-    scheduleNext();
-
-    return () => {
-      if (spawnTimer !== null) window.clearTimeout(spawnTimer);
-      layer.classList.remove("petal-field-entering");
-      layer.replaceChildren();
-    };
-  }, [enabled]);
-
-  return <div ref={layerRef} className={`web-petal-field ${className}`} aria-hidden="true" />;
-}
-
-async function requestVideoStream(mode: VideoMode) {
-  if (mode === "none") return Promise.resolve<MediaStream | null>(null);
-
-  if (mode === "screen") {
-    if (!navigator.mediaDevices?.getDisplayMedia) {
-      return Promise.reject(new Error("Screen sharing is not supported by this browser."));
-    }
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        frameRate: { ideal: 1, max: 1 },
-        displaySurface: "browser",
-      },
-      audio: false,
-      preferCurrentTab: false,
-      selfBrowserSurface: "exclude",
-      surfaceSwitching: "exclude",
-      monitorTypeSurfaces: "exclude",
-    } as DisplayMediaStreamOptions);
-    const displaySurface = stream.getVideoTracks()[0]?.getSettings().displaySurface;
-    if (displaySurface && displaySurface !== "browser") {
-      stream.getTracks().forEach((track) => track.stop());
-      throw new Error("Choose a Chrome Tab so Lumi can see and control the same page.");
-    }
-    return stream;
-  }
-
-  if (!navigator.mediaDevices?.getUserMedia) {
-    return Promise.reject(new Error("Camera access is not supported by this browser."));
-  }
-  return navigator.mediaDevices.getUserMedia({
-    video: {
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-      frameRate: { ideal: 5, max: 10 },
-      facingMode: "user",
-    },
-    audio: false,
-  });
-}
-
-type LiveAuth =
-  | { kind: "apiKey"; credential: string }
-  | { kind: "ephemeral"; credential: string };
-
-async function getLiveAuth(): Promise<LiveAuth> {
-  if (window.location.protocol === "chrome-extension:") {
-    const apiKey = localStorage.getItem(EXTENSION_API_KEY_STORAGE_KEY)?.trim();
-    if (!apiKey) {
-      throw new Error("Open Lumi Live settings and save a Gemini API key first.");
-    }
-    return { kind: "apiKey", credential: apiKey };
-  }
-
-  const response = await fetch("/api/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-  });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || "The voice token could not be created.");
-  }
-  const { token } = await response.json();
-  if (!token) throw new Error("The voice token response was empty.");
-  return { kind: "ephemeral", credential: token };
-}
-
-function describeVideoError(error: unknown, mode: VideoMode) {
-  const source = mode === "screen" ? "Screen sharing" : "Camera access";
-  if (error instanceof DOMException && error.name === "NotAllowedError") {
-    return `${source} was skipped; voice chat is still available.`;
-  }
-  if (error instanceof Error && error.message) {
-    return `${source} failed: ${error.message}`;
-  }
-  return `${source} could not be started; voice chat is still available.`;
-}
-
-function describeMicrophoneError(error: unknown) {
-  if (!(error instanceof DOMException)) {
-    return error instanceof Error ? error.message : "Couldn’t start voice chat";
-  }
-
-  if (error.name === "NotAllowedError") {
-    return "Microphone access is blocked for this site. Allow it from the lock icon, then reconnect.";
-  }
-  if (error.name === "NotFoundError") {
-    return "No microphone was found. Connect one, then reconnect.";
-  }
-  if (error.name === "NotReadableError") {
-    return "The microphone is busy or unavailable. Close another app using it, then reconnect.";
-  }
-  if (error.name === "OverconstrainedError") {
-    return "The selected microphone is no longer available. Choose System default, then reconnect.";
-  }
-  return error.message || "Couldn’t start voice chat";
-}
-
-function bytesToBase64(bytes: Uint8Array) {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
-}
-
-function base64ToInt16(base64: string) {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  return new Int16Array(bytes.buffer);
-}
-
-type VoicePreviewPhase = "connecting" | "playing";
-
-async function playGeminiVoicePreview(
-  voiceName: VoiceName,
-  onPhase: (phase: VoicePreviewPhase) => void,
-  signal: AbortSignal,
-) {
-  const audioContext = new AudioContext();
-  const socketHolder = { current: null as WebSocket | null };
-  const playbackSources = new Set<AudioBufferSourceNode>();
-  const stopPlayback = () => {
-    for (const source of playbackSources) {
-      try { source.stop(); } catch { /* Source may already be stopped. */ }
-    }
-    playbackSources.clear();
-  };
-
-  try {
-    if (signal.aborted) throw new DOMException("Voice preview stopped.", "AbortError");
-    await audioContext.resume();
-    const liveAuth = await getLiveAuth();
-    if (signal.aborted) throw new DOMException("Voice preview stopped.", "AbortError");
-    const websocketUrl = liveAuth.kind === "apiKey"
-      ? `${DIRECT_WS_ENDPOINT}?key=${encodeURIComponent(liveAuth.credential)}`
-      : `${WS_ENDPOINT}?access_token=${encodeURIComponent(liveAuth.credential)}`;
-    let nextPlaybackTime = audioContext.currentTime;
-    let receivedAudio = false;
-    let turnComplete = false;
-
-    onPhase("connecting");
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      const timeoutId = window.setTimeout(() => {
-        finish(new Error("Voice preview timed out. Please try again."));
-      }, 18000);
-
-      const finish = (error?: Error) => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(timeoutId);
-        signal.removeEventListener("abort", abortPreview);
-        if (error) reject(error);
-        else resolve();
-      };
-
-      const abortPreview = () => {
-        stopPlayback();
-        socketHolder.current?.close();
-        finish(new DOMException("Voice preview stopped.", "AbortError"));
-      };
-      signal.addEventListener("abort", abortPreview, { once: true });
-
-      const websocket = new WebSocket(websocketUrl);
-      socketHolder.current = websocket;
-      websocket.onopen = () => {
-        websocket.send(JSON.stringify({
-          setup: {
-            model: `models/${MODEL}`,
-            generationConfig: {
-              responseModalities: ["AUDIO"],
-              speechConfig: {
-                voiceConfig: { prebuiltVoiceConfig: { voiceName } },
-              },
-            },
-            systemInstruction: {
-              parts: [{
-                text: "You are a voice preview. Read the requested English sentence naturally and do not add any other words.",
-              }],
-            },
-          },
-        }));
-      };
-
-      websocket.onmessage = async (event) => {
-        try {
-          const raw = typeof event.data === "string" ? event.data : await event.data.text();
-          const response = JSON.parse(raw);
-          if (response.setupComplete) {
-            websocket.send(JSON.stringify({
-              realtimeInput: {
-                text: "Have a wonderful day!",
-              },
-            }));
-          }
-
-          const parts = response.serverContent?.modelTurn?.parts ?? [];
-          for (const part of parts) {
-            if (!part.inlineData?.data) continue;
-            receivedAudio = true;
-            onPhase("playing");
-            const pcm = base64ToInt16(part.inlineData.data);
-            const floats = new Float32Array(pcm.length);
-            for (let index = 0; index < pcm.length; index += 1) floats[index] = pcm[index] / 32768;
-            const buffer = audioContext.createBuffer(1, floats.length, 24000);
-            buffer.copyToChannel(floats, 0);
-            const source = audioContext.createBufferSource();
-            source.buffer = buffer;
-            source.connect(audioContext.destination);
-            playbackSources.add(source);
-            source.addEventListener("ended", () => playbackSources.delete(source), { once: true });
-            const startAt = Math.max(audioContext.currentTime + 0.025, nextPlaybackTime);
-            nextPlaybackTime = startAt + buffer.duration;
-            source.start(startAt);
-          }
-
-          if (response.serverContent?.turnComplete) {
-            turnComplete = true;
-            websocket.close(1000, "Preview complete");
-            const remainingMs = Math.max(0, (nextPlaybackTime - audioContext.currentTime) * 1000);
-            window.setTimeout(() => {
-              finish(receivedAudio ? undefined : new Error("Gemini returned no preview audio."));
-            }, remainingMs + 80);
-          }
-        } catch (error) {
-          finish(error instanceof Error ? error : new Error("Could not read the voice preview."));
-        }
-      };
-      websocket.onerror = () => finish(new Error("Could not connect to Gemini Live for the preview."));
-      websocket.onclose = () => {
-        if (!turnComplete) finish(new Error("Gemini Live ended before the preview was ready."));
-      };
-    });
-  } finally {
-    stopPlayback();
-    const websocket = socketHolder.current;
-    if (websocket && (websocket.readyState === WebSocket.OPEN || websocket.readyState === WebSocket.CONNECTING)) {
-      websocket.close();
-    }
-    await audioContext.close().catch(() => {});
-  }
-}
-
-function resampleTo16k(input: Float32Array, inputRate: number) {
-  if (inputRate === 16000) return input;
-  const ratio = inputRate / 16000;
-  const result = new Float32Array(Math.max(1, Math.floor(input.length / ratio)));
-
-  for (let i = 0; i < result.length; i += 1) {
-    const start = Math.floor(i * ratio);
-    const end = Math.min(input.length, Math.floor((i + 1) * ratio));
-    let total = 0;
-    for (let j = start; j < end; j += 1) total += input[j];
-    result[i] = total / Math.max(1, end - start);
-  }
-
-  return result;
-}
-
-function floatToPcm16(floatData: Float32Array) {
-  const pcm = new Int16Array(floatData.length);
-  for (let i = 0; i < floatData.length; i += 1) {
-    const sample = Math.max(-1, Math.min(1, floatData[i]));
-    pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-  }
-  return new Uint8Array(pcm.buffer);
-}
-
-function mergeTranscriptText(current: string, incoming: string) {
-  if (!current) return incoming;
-  if (!incoming) return current;
-  if (incoming.startsWith(current)) return incoming;
-  if (current.startsWith(incoming) || current.endsWith(incoming)) return current;
-
-  const maxOverlap = Math.min(current.length, incoming.length);
-  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-    if (current.endsWith(incoming.slice(0, overlap))) {
-      return `${current}${incoming.slice(overlap)}`;
-    }
-  }
-
-  const needsSpace = !/\s$/.test(current) && !/^[\s.,!?;:'")\]}]/.test(incoming);
-  return `${current}${needsSpace ? " " : ""}${incoming}`;
 }
 
 export default function Home() {

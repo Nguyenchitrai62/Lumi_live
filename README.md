@@ -111,6 +111,8 @@ Set `GEMINI_API_KEY` in `.env`, then open [http://localhost:3000](http://localho
 | --- | --- |
 | `npm run dev` | Start the Next.js development server |
 | `npm run lint` | Lint the web app |
+| `npm run typecheck` | Type-check the web app without emitting files |
+| `npm test` | Run the extension regression tests |
 | `npm run build:extension` | Build the Lumi Live Chrome extension |
 | `npm run build` | Build the extension and Next.js app |
 | `npm run start` | Start the production server |
@@ -119,11 +121,18 @@ Set `GEMINI_API_KEY` in `.env`, then open [http://localhost:3000](http://localho
 
 ```text
 app/                         Next.js Lumi experience, token endpoint, and MCP proxy
+app/lib/live/                Web Live audio, media, auth, and session configuration
+app/lib/mcp/                 Web MCP transport, schema, state manager, and value helpers
 extensions/lumi-live/        Standalone voice agent extension
 extensions/shared/           Shared generated-avatar styles
 public/avatars/pixel/        Pixel Companion source assets
 public/avatars/vtuber/       VTuber source assets
 ```
+
+The top-level web and extension entry points coordinate feature modules rather than
+reimplementing transport, media codecs, voice preview, MCP schema conversion, or
+visual-effect lifecycles. Keep new behavior in the closest feature module and
+preserve the existing facade imports when extending MCP support.
 
 ## Safety notes
 

@@ -1,4 +1,8 @@
 import { EXTENSION_EVENTS, STORAGE_KEYS } from "./extension-config.js";
+import {
+  createVoicePreviewController,
+  VOICE_PROFILES,
+} from "./voice-preview-controller.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
@@ -6,22 +10,6 @@ const VOICE_STORAGE_KEY = STORAGE_KEYS.voice;
 const ELEMENT_HIGHLIGHTS_STORAGE_KEY = STORAGE_KEYS.elementHighlights;
 const MCP_DISABLED_TOOLS_STORAGE_KEY = STORAGE_KEYS.mcpDisabledTools;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
-const MODEL = "gemini-3.1-flash-live-preview";
-const DIRECT_WS_ENDPOINT =
-  "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
-const VOICE_PROFILES = [
-  ["Zephyr", "Female", "Bright"], ["Puck", "Male", "Upbeat"], ["Charon", "Male", "Informative"],
-  ["Kore", "Female", "Firm"], ["Fenrir", "Male", "Excitable"], ["Leda", "Female", "Youthful"],
-  ["Orus", "Male", "Firm"], ["Aoede", "Female", "Breezy"], ["Callirrhoe", "Female", "Easy-going"],
-  ["Autonoe", "Female", "Bright"], ["Enceladus", "Male", "Breathy"], ["Iapetus", "Male", "Clear"],
-  ["Umbriel", "Male", "Easy-going"], ["Algieba", "Male", "Smooth"], ["Despina", "Female", "Smooth"],
-  ["Erinome", "Female", "Clear"], ["Algenib", "Male", "Gravelly"], ["Rasalgethi", "Male", "Informative"],
-  ["Laomedeia", "Female", "Upbeat"], ["Achernar", "Female", "Soft"], ["Alnilam", "Male", "Firm"],
-  ["Schedar", "Male", "Even"], ["Gacrux", "Female", "Mature"], ["Pulcherrima", "Female", "Forward"],
-  ["Achird", "Male", "Friendly"], ["Zubenelgenubi", "Male", "Casual"], ["Vindemiatrix", "Female", "Gentle"],
-  ["Sadachbia", "Male", "Lively"], ["Sadaltager", "Male", "Knowledgeable"], ["Sulafat", "Female", "Warm"],
-];
-
 const elements = {
   extensionVersion: document.querySelector("#extensionVersion"),
   apiKeyInput: document.querySelector("#apiKeyInput"),
@@ -54,7 +42,6 @@ const elements = {
   mcpServerList: document.querySelector("#mcpServerList"),
 };
 
-let activeVoicePreview = null;
 let mcpServers = [];
 let selectedMcpServerId = null;
 let currentMcpToolAlertSignature = "";
@@ -66,165 +53,12 @@ const MCP_PERMISSION_OPTIONS = [
   { mode: "block", label: "Block", icon: "\u00d7" },
 ];
 
-function updateVoiceProfile() {
-  for (const option of elements.voiceInput.options) {
-    const optionProfile = VOICE_PROFILES.find(([name]) => name === option.value);
-    if (optionProfile) option.textContent = `${optionProfile[0]} · ${optionProfile[1]} · ${optionProfile[2]}`;
-  }
-}
-
-function base64ToInt16(base64) {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  return new Int16Array(bytes.buffer);
-}
-
-function stopVoicePreview(message = "Voice preview stopped.") {
-  const preview = activeVoicePreview;
-  if (!preview) return false;
-  activeVoicePreview = null;
-  preview.cancelled = true;
-  preview.finish?.(new DOMException("Voice preview stopped.", "AbortError"));
-  for (const source of preview.sources) {
-    try { source.stop(); } catch { /* Source may already be stopped. */ }
-  }
-  preview.sources.clear();
-  preview.websocket?.close();
-  void preview.audioContext.close().catch(() => {});
-  elements.previewVoiceButton.dataset.state = "";
-  elements.previewVoiceButton.textContent = "▶ Test voice";
-  elements.saveNote.dataset.state = "";
-  elements.saveNote.textContent = message;
-  return true;
-}
-
-async function previewVoice() {
-  if (stopVoicePreview()) return;
-
-  const apiKey = elements.apiKeyInput.value.trim();
-  if (!apiKey) {
-    elements.saveNote.dataset.state = "error";
-    elements.saveNote.textContent = "Enter a Gemini API key to test this voice.";
-    elements.apiKeyInput.focus();
-    return;
-  }
-
-  const voiceName = elements.voiceInput.value || "Zephyr";
-  const audioContext = new AudioContext();
-  const preview = {
-    audioContext,
-    websocket: null,
-    sources: new Set(),
-    finish: null,
-    cancelled: false,
-  };
-  activeVoicePreview = preview;
-  await audioContext.resume();
-  if (preview.cancelled) return;
-
-  let nextPlaybackTime = audioContext.currentTime;
-  let receivedAudio = false;
-  let turnComplete = false;
-
-  elements.previewVoiceButton.dataset.state = "playing";
-  elements.previewVoiceButton.textContent = "■ Stop preview";
-  elements.saveNote.dataset.state = "";
-  elements.saveNote.textContent = `Preparing a short English ${voiceName} preview…`;
-
-  try {
-    await new Promise((resolve, reject) => {
-      let settled = false;
-      const timeoutId = setTimeout(() => finish(new Error("Voice preview timed out. Try again.")), 18000);
-      const finish = (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutId);
-        if (error) reject(error);
-        else resolve();
-      };
-      preview.finish = finish;
-
-      const websocket = new WebSocket(`${DIRECT_WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`);
-      preview.websocket = websocket;
-      websocket.onopen = () => {
-        websocket.send(JSON.stringify({
-          setup: {
-            model: `models/${MODEL}`,
-            generationConfig: {
-              responseModalities: ["AUDIO"],
-              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
-            },
-            systemInstruction: {
-              parts: [{ text: "You are a voice preview. Read the requested English sentence naturally and do not add any other words." }],
-            },
-          },
-        }));
-      };
-
-      websocket.onmessage = async (event) => {
-        if (preview.cancelled) return;
-        const raw = typeof event.data === "string" ? event.data : await event.data.text();
-        const response = JSON.parse(raw);
-        if (response.setupComplete) {
-          websocket.send(JSON.stringify({
-            realtimeInput: { text: "Have a wonderful day!" },
-          }));
-        }
-
-        const parts = response.serverContent?.modelTurn?.parts ?? [];
-        for (const part of parts) {
-          if (!part.inlineData?.data || preview.cancelled) continue;
-          receivedAudio = true;
-          const pcm = base64ToInt16(part.inlineData.data);
-          const floats = new Float32Array(pcm.length);
-          for (let index = 0; index < pcm.length; index += 1) floats[index] = pcm[index] / 32768;
-          const buffer = audioContext.createBuffer(1, floats.length, 24000);
-          buffer.copyToChannel(floats, 0);
-          const source = audioContext.createBufferSource();
-          source.buffer = buffer;
-          source.connect(audioContext.destination);
-          preview.sources.add(source);
-          source.addEventListener("ended", () => preview.sources.delete(source), { once: true });
-          const startAt = Math.max(audioContext.currentTime + 0.025, nextPlaybackTime);
-          nextPlaybackTime = startAt + buffer.duration;
-          source.start(startAt);
-        }
-
-        if (response.serverContent?.turnComplete) {
-          turnComplete = true;
-          websocket.close(1000, "Preview complete");
-          const remainingMs = Math.max(0, (nextPlaybackTime - audioContext.currentTime) * 1000);
-          setTimeout(() => finish(receivedAudio ? null : new Error("Gemini returned no preview audio.")), remainingMs + 80);
-        }
-      };
-      websocket.onerror = () => finish(new Error("Could not connect to Gemini Live. Check the API key."));
-      websocket.onclose = () => {
-        if (!turnComplete && !preview.cancelled) finish(new Error("Gemini Live ended before the preview was ready."));
-      };
-    });
-    if (!preview.cancelled) {
-      elements.saveNote.dataset.state = "saved";
-      elements.saveNote.textContent = `${voiceName} preview finished. Save when this voice feels right.`;
-    }
-  } catch (error) {
-    if (!(error instanceof DOMException && error.name === "AbortError")) {
-      elements.saveNote.dataset.state = "error";
-      elements.saveNote.textContent = error instanceof Error ? error.message : "Could not play the voice preview.";
-    }
-  } finally {
-    if (activeVoicePreview === preview) {
-      activeVoicePreview = null;
-      for (const source of preview.sources) {
-        try { source.stop(); } catch { /* Source may already be stopped. */ }
-      }
-      preview.websocket?.close();
-      await audioContext.close().catch(() => {});
-      elements.previewVoiceButton.dataset.state = "";
-      elements.previewVoiceButton.textContent = "▶ Test voice";
-    }
-  }
-}
+const voicePreview = createVoicePreviewController({
+  apiKeyInput: elements.apiKeyInput,
+  voiceInput: elements.voiceInput,
+  previewButton: elements.previewVoiceButton,
+  statusElement: elements.saveNote,
+});
 
 function sendRuntime(command, payload = {}) {
   return chrome.runtime.sendMessage({ type: MESSAGE_TYPE, command, ...payload }).then((response) => {
@@ -687,11 +521,11 @@ elements.toggleKeyButton.addEventListener("click", () => {
   elements.toggleKeyButton.textContent = shouldShow ? "Hide" : "Show";
 });
 elements.saveSettingsButton.addEventListener("click", () => void saveSettings());
-elements.previewVoiceButton.addEventListener("click", () => void previewVoice());
+elements.previewVoiceButton.addEventListener("click", () => void voicePreview.toggle());
 elements.voiceInput.addEventListener("change", () => {
   const profile = VOICE_PROFILES.find(([name]) => name === elements.voiceInput.value) || VOICE_PROFILES[0];
-  stopVoicePreview(`${profile[0]} selected · ${profile[1]} · ${profile[2]}`);
-  updateVoiceProfile();
+  voicePreview.stop(`${profile[0]} selected · ${profile[1]} · ${profile[2]}`);
+  voicePreview.updateVoiceProfiles();
   if (!activeVoicePreview) {
     elements.saveNote.dataset.state = "";
     elements.saveNote.textContent = `${profile[0]} selected · ${profile[1]} · ${profile[2]}`;
@@ -759,7 +593,7 @@ window.addEventListener("focus", () => void refreshMicrophonePermission());
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void refreshMicrophonePermission();
 });
-window.addEventListener("unload", () => stopVoicePreview());
+window.addEventListener("unload", () => voicePreview.stop());
 chrome.storage.onChanged.addListener((changes, areaName) => {
   const disabledToolsChanged = areaName === "session" && changes[MCP_DISABLED_TOOLS_STORAGE_KEY];
   const policiesChanged = areaName === "local" && changes[MCP_TOOL_POLICIES_STORAGE_KEY];
@@ -777,7 +611,7 @@ async function initialize() {
   ]);
   elements.apiKeyInput.value = String(stored[API_KEY_STORAGE_KEY] || "");
   elements.voiceInput.value = String(stored[VOICE_STORAGE_KEY] || "Zephyr");
-  updateVoiceProfile();
+  voicePreview.updateVoiceProfiles();
   elements.showElementHighlightsInput.checked = stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true;
   elements.connectMcpButton.disabled = true;
   await Promise.all([

@@ -11,7 +11,9 @@
     "build:extension": "node extensions/build.mjs",
     "build:extensions": "npm run build:extension",
     "start": "next start",
-    "lint": "eslint app"
+    "lint": "eslint app",
+    "test": "node --test extensions/lumi-live/*.test.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@google/genai": "^2.11.0",
