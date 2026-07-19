@@ -33,10 +33,12 @@ Lumi has two reactive avatar types:
 
 ## Choose how to run Lumi
 
+The repository ships one Chrome extension at [`extensions/lumi-live`](./extensions/lumi-live), which includes both the side panel and active-tab controller.
+
 | Experience | Best for | Browser control |
 | --- | --- | --- |
-| **Lumi Live extension** | Daily voice/chat agent with both avatars, automatic tab targeting, and MCP tools | Included |
-| **Next.js web app** | Full-page voice, vision, scenes, outfits, themes, and remote MCP tools | Not included; use the extension when UI control is required |
+| **Lumi Live extension** | Daily voice/chat agent with both avatars, automatic tab targeting, and MCP tools | Controls the active Chrome tab |
+| **Next.js web app** | Full-page voice, vision, scenes, outfits, themes, and remote MCP tools | Controls the current Lumi Studio document; install the extension for active-tab control |
 
 ## Avatar assets
 
@@ -168,6 +170,8 @@ For live video translation on the web, choose **Screen**, press **Start voice**,
 
 ```text
 app/                         Next.js Lumi experience, token endpoint, and MCP proxy
+app/components/              Studio header, settings, stage, conversation, and avatar UI
+app/hooks/                   Focused preferences, device, voice-preview, and lip-sync state
 app/lib/live/                Web Live audio, media, auth, and session configuration
 app/lib/mcp/                 Web MCP transport, schema, state manager, and value helpers
 extensions/lumi-live/        Standalone voice agent extension

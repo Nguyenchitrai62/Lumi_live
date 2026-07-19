@@ -3682,6 +3682,41 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     element.blur();
   }
 
+  // extensions/lumi-live/browser/page-agent-safety.js
+  var SENSITIVE_INPUT_PATTERN = /(password|passcode|mật.?khẩu|mat.?khau|otp|one.?time|mã.?xác.?thực|ma.?xac.?thuc|credit.?card|card.?number|thẻ.?tín.?dụng|the.?tin.?dung|cvv|cvc|api.?key|khóa.?api|khoa.?api|secret|bí.?mật|bi.?mat|access.?token)/i;
+  var HIGH_IMPACT_CLICK_PATTERN = /(submit|send|gửi|gui|publish|xuất.?bản|xuat.?ban|post|đăng|dang|pay|thanh.?toán|thanh.?toan|purchase|buy now|mua.?ngay|place order|đặt.?hàng|dat.?hang|delete|xóa|xoa|remove account|xóa.?tài.?khoản|xoa.?tai.?khoan|confirm order|xác.?nhận.?đơn|xac.?nhan.?don|authorize|ủy.?quyền|uy.?quyen|transfer|chuyển.?tiền|chuyen.?tien|unsubscribe|hủy.?đăng.?ký|huy.?dang.?ky|save password)/i;
+  function joinElementValues(element, values) {
+    return values.map((name) => name in element ? element[name] : element.getAttribute?.(name)).filter(Boolean).join(" ").trim().slice(0, 240);
+  }
+  function assertSafePageAgentInput(element) {
+    if (!element) return;
+    const descriptor = joinElementValues(element, [
+      "type",
+      "name",
+      "id",
+      "autocomplete",
+      "aria-label",
+      "placeholder"
+    ]);
+    if (SENSITIVE_INPUT_PATTERN.test(descriptor)) {
+      throw new Error("Lumi blocks typing passwords, OTPs, payment-card data, API keys, and other secrets.");
+    }
+  }
+  function assertConfirmedPageAgentClick(element, confirmed) {
+    if (!element) return;
+    const label = joinElementValues(element, [
+      "innerText",
+      "textContent",
+      "aria-label",
+      "title"
+    ]);
+    if (HIGH_IMPACT_CLICK_PATTERN.test(label) && confirmed !== true) {
+      throw new Error(
+        `This looks like a consequential action (${label || "unlabeled control"}). Ask for explicit confirmation, then retry with confirmed=true.`
+      );
+    }
+  }
+
   // extensions/lumi-live/core/visual-preferences.js
   var DEFAULT_VISUAL_PREFERENCES = Object.freeze({
     showElementHighlights: false,
@@ -3814,31 +3849,11 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     }, assertSafeInput = function(index) {
       const element = indexedElement(index);
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
-      const descriptor = [
-        element.getAttribute("type"),
-        element.getAttribute("name"),
-        element.getAttribute("id"),
-        element.getAttribute("autocomplete"),
-        element.getAttribute("aria-label"),
-        element.getAttribute("placeholder")
-      ].filter(Boolean).join(" ").toLowerCase();
-      if (/(password|passcode|mật.?khẩu|otp|one.?time|mã.?xác.?thực|credit.?card|card.?number|thẻ.?tín.?dụng|cvv|cvc|api.?key|khóa.?api|secret|bí.?mật|access.?token)/i.test(descriptor)) {
-        throw new Error("Lumi blocks typing passwords, OTPs, payment-card data, API keys, and other secrets.");
-      }
+      assertSafePageAgentInput(element);
     }, assertConfirmedHighImpactClick = function(index, confirmed) {
       const element = indexedElement(index);
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
-      const label = [
-        element.innerText,
-        element.textContent,
-        element.getAttribute("aria-label"),
-        element.getAttribute("title")
-      ].filter(Boolean).join(" ").trim().slice(0, 240);
-      if (/(submit|send|gửi|publish|xuất.?bản|post|đăng|pay|thanh.?toán|purchase|buy now|mua.?ngay|place order|đặt.?hàng|delete|xóa|remove account|xóa.?tài.?khoản|confirm order|xác.?nhận.?đơn|authorize|ủy.?quyền|transfer|chuyển.?tiền|unsubscribe|hủy.?đăng.?ký|save password)/i.test(label) && confirmed !== true) {
-        throw new Error(
-          `This looks like a consequential action (${label || "unlabeled control"}). Ask for explicit confirmation, then retry with confirmed=true.`
-        );
-      }
+      assertConfirmedPageAgentClick(element, confirmed);
     };
     getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
     const runtime = {

@@ -100,8 +100,8 @@ test("cancel is silent, unlocks promptly, and stops pending translation without 
   assert.match(app, /stop_live_translation/);
   assert.doesNotMatch(app, /cancelActiveAudioPicker|chooseDesktopMedia/);
   assert.match(app, /setTimeout\(completeTurnCancellation, 80\)/);
-  assert.match(webPage, /cancelledTurnBoundarySeenRef/);
-  assert.match(webPage, /freshUserInputStartedRef/);
+  assert.match(webPage, /toolRuntimeRef\.current!\.cancelledTurnBoundarySeen/);
+  assert.match(webPage, /toolRuntimeRef\.current!\.freshUserInputStarted/);
 });
 
 test("extension renders Live Translate as a built-in conversation activity", async () => {
@@ -115,10 +115,12 @@ test("extension renders Live Translate as a built-in conversation activity", asy
 
 test("web uses PageAgent while remaining scoped to the Lumi Studio document", async () => {
   const webPage = await readFile(new URL("../../../app/page.tsx", import.meta.url), "utf8");
+  const pageRuntime = await readFile(new URL("../../../app/lib/live/page-runtime.ts", import.meta.url), "utf8");
   const studioPageAgent = await readFile(new URL("../../../app/lib/live/studio-page-agent.ts", import.meta.url), "utf8");
   assert.match(webPage, /\.\.\.STUDIO_PAGE_AGENT_TOOL_DECLARATIONS/);
   assert.match(webPage, /STUDIO_PAGE_AGENT_GUIDANCE/);
-  assert.match(webPage, /studioPageAgentRef\.current!\.run/);
+  assert.match(webPage, /toolRuntimeRef\.current!\.studioPageAgent!\.run/);
+  assert.match(pageRuntime, /studioPageAgent: new StudioPageAgent\(\)/);
   assert.match(studioPageAgent, /@page-agent\/page-controller/);
   for (const tool of [
     "browser_get_page_state",

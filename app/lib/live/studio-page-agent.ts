@@ -3,6 +3,10 @@ import {
   scrollPageGradually,
   scrollToTextGradually,
 } from "../../../extensions/lumi-live/browser/effects/scroll.js";
+import {
+  assertConfirmedPageAgentClick,
+  assertSafePageAgentInput,
+} from "../../../extensions/lumi-live/browser/page-agent-safety.js";
 
 const MAX_PAGE_STATE_CHARACTERS = 16000;
 const PAGE_ACTION_TIMEOUT_MS = 12000;
@@ -148,32 +152,12 @@ export class StudioPageAgent {
 
   private assertSafeInput(index: number) {
     const element = this.indexedElement(index);
-    if (!element) return;
-    const descriptor = [
-      element.getAttribute("type"),
-      element.getAttribute("name"),
-      element.getAttribute("id"),
-      element.getAttribute("autocomplete"),
-      element.getAttribute("aria-label"),
-      element.getAttribute("placeholder"),
-    ].filter(Boolean).join(" ").toLowerCase();
-    if (/(password|passcode|otp|one.?time|credit.?card|card.?number|cvv|cvc|api.?key|secret|access.?token)/i.test(descriptor)) {
-      throw new Error("Lumi blocks PageAgent from typing passwords, OTPs, payment-card data, API keys, and other secrets.");
-    }
+    assertSafePageAgentInput(element);
   }
 
   private assertConfirmedHighImpactClick(index: number, confirmed: unknown) {
     const element = this.indexedElement(index);
-    if (!element) return;
-    const label = [
-      element.innerText,
-      element.textContent,
-      element.getAttribute("aria-label"),
-      element.getAttribute("title"),
-    ].filter(Boolean).join(" ").trim().slice(0, 240);
-    if (/(submit|send|publish|post|pay|purchase|buy now|delete|remove account|authorize|transfer|unsubscribe|save password)/i.test(label) && confirmed !== true) {
-      throw new Error(`This looks like a consequential action (${label || "unlabeled control"}). Ask for explicit confirmation, then retry with confirmed=true.`);
-    }
+    assertConfirmedPageAgentClick(element, confirmed);
   }
 
   private async withVisualAction<T>(

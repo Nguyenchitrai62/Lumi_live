@@ -10,6 +10,10 @@ import {
 } from "./effects/scroll.js";
 import { typeTextGradually } from "./effects/text-input.js";
 import {
+  assertConfirmedPageAgentClick,
+  assertSafePageAgentInput,
+} from "./page-agent-safety.js";
+import {
   DEFAULT_VISUAL_PREFERENCES,
   normalizeVisualPreferences,
 } from "../core/visual-preferences.js";
@@ -91,35 +95,13 @@ if (!globalThis[GLOBAL_KEY]) {
   function assertSafeInput(index) {
     const element = indexedElement(index);
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
-    const descriptor = [
-      element.getAttribute("type"),
-      element.getAttribute("name"),
-      element.getAttribute("id"),
-      element.getAttribute("autocomplete"),
-      element.getAttribute("aria-label"),
-      element.getAttribute("placeholder"),
-    ].filter(Boolean).join(" ").toLowerCase();
-
-    if (/(password|passcode|mật.?khẩu|otp|one.?time|mã.?xác.?thực|credit.?card|card.?number|thẻ.?tín.?dụng|cvv|cvc|api.?key|khóa.?api|secret|bí.?mật|access.?token)/i.test(descriptor)) {
-      throw new Error("Lumi blocks typing passwords, OTPs, payment-card data, API keys, and other secrets.");
-    }
+    assertSafePageAgentInput(element);
   }
 
   function assertConfirmedHighImpactClick(index, confirmed) {
     const element = indexedElement(index);
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
-    const label = [
-      element.innerText,
-      element.textContent,
-      element.getAttribute("aria-label"),
-      element.getAttribute("title"),
-    ].filter(Boolean).join(" ").trim().slice(0, 240);
-
-    if (/(submit|send|gửi|publish|xuất.?bản|post|đăng|pay|thanh.?toán|purchase|buy now|mua.?ngay|place order|đặt.?hàng|delete|xóa|remove account|xóa.?tài.?khoản|confirm order|xác.?nhận.?đơn|authorize|ủy.?quyền|transfer|chuyển.?tiền|unsubscribe|hủy.?đăng.?ký|save password)/i.test(label) && confirmed !== true) {
-      throw new Error(
-        `This looks like a consequential action (${label || "unlabeled control"}). Ask for explicit confirmation, then retry with confirmed=true.`,
-      );
-    }
+    assertConfirmedPageAgentClick(element, confirmed);
   }
 
   async function withVisualAction(action) {
