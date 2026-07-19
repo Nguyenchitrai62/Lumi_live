@@ -24,7 +24,7 @@ Lumi has two reactive avatar types:
 - Agent-triggered speech-to-speech translation into Google's documented 70+ languages with `gemini-3.5-live-translate-preview`; the translation tool owns audio playback, preserves the video's speaking voices, ducks the source audio to 6%, and uses a small jitter buffer without changing video or translated-audio playback speed.
 - 30 selectable voices with audio preview.
 - Automatic active-tab targeting in the Lumi Live Chrome extension.
-- PageAgent DOM tools for reading, clicking, typing, selecting, and scrolling: self-scoped in the web Studio and active-tab aware in the extension.
+- PageAgent DOM tools for reading, clicking, typing, selecting, and scrolling, including content-text targets and exact normalized positions from `0` (top) to `1` (bottom): self-scoped in the web Studio and active-tab aware in the extension.
 - User-configured Streamable HTTP MCP servers.
 - Per-tool permissions: **Always allow**, **Ask every time**, or **Block**.
 - Expandable activity cards for tool arguments, results, failures, and cancellations.

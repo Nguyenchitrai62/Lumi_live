@@ -1,0 +1,1111 @@
+import { createPanelAudioController } from "./panel-audio-controller.js";
+import { createMcpPanelController } from "./mcp-panel-controller.js";
+import {
+  createAvatarController,
+  normalizeAvatarMode,
+} from "./pixel-avatar-controller.js";
+import { EXTENSION_EVENTS, STORAGE_KEYS } from "../core/extension-config.js";
+import {
+  BROWSER_TOOLS,
+  BUILTIN_TOOLS,
+  BROWSER_UI_ACTION_TOOLS,
+  buildSessionInstruction,
+  configureMcpTools,
+  findRejectedMcpDeclaration,
+  MAX_MCP_TOOL_RESPONSE_CHARS,
+  MODEL,
+  WS_ENDPOINT,
+} from "../live/session-config.js";
+import {
+  getLiveTranslationLanguageLabel,
+  LIVE_TRANSLATE_TOOL_NAME,
+  normalizeLiveTranslationLanguageCode,
+} from "../live/translate.js";
+import { mergeTranscriptText } from "../live/audio-utils.js";
+import { createPetalEmitter } from "./petal-emitter.js";
+import {
+  consumeResponseAudioDirective,
+  createTurnAudioGate,
+  RESPONSE_AUDIO_DIRECTIVE_KEY,
+} from "../core/response-audio-policy.js";
+
+const MESSAGE_TYPE = EXTENSION_EVENTS.request;
+const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
+const VOICE_STORAGE_KEY = STORAGE_KEYS.voice;
+const MICROPHONE_GRANTED_STORAGE_KEY = STORAGE_KEYS.microphoneGrantedAt;
+const PETALS_STORAGE_KEY = STORAGE_KEYS.fallingPetals;
+const AVATAR_MODE_STORAGE_KEY = STORAGE_KEYS.avatarMode;
+const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
+const PANEL_LIFECYCLE_MESSAGE = EXTENSION_EVENTS.lifecycle;
+const sidePanelLifecyclePort = chrome.runtime.connect({ name: "lumi_live_side_panel" });
+const elements = {
+  liveBadge: document.querySelector("#liveBadge"),
+  translateBadge: document.querySelector("#translateBadge"),
+  settingsButton: document.querySelector("#settingsButton"),
+  avatarModeButton: document.querySelector("#avatarModeButton"),
+  petalsButton: document.querySelector("#petalsButton"),
+  petalField: document.querySelector(".petal-field"),
+  targetCard: document.querySelector(".target-card"),
+  targetTitle: document.querySelector("#targetTitle"),
+  targetHint: document.querySelector("#targetHint"),
+  connectTabButton: document.querySelector("#connectTabButton"),
+  transcript: document.querySelector("#transcript"),
+  mcpToolNotice: document.querySelector("#mcpToolNotice"),
+  mcpToolNoticeTitle: document.querySelector("#mcpToolNoticeTitle"),
+  mcpToolNoticeMessage: document.querySelector("#mcpToolNoticeMessage"),
+  mcpToolNoticePrimary: document.querySelector("#mcpToolNoticePrimary"),
+  mcpToolNoticeSecondary: document.querySelector("#mcpToolNoticeSecondary"),
+  mcpToolNoticeTertiary: document.querySelector("#mcpToolNoticeTertiary"),
+  vtuberCard: document.querySelector("#vtuberCard"),
+  vtuberToggle: document.querySelector("#vtuberToggle"),
+  lumiRig: document.querySelector(".lumi-rig"),
+  pixelAvatar: document.querySelector("#pixelAvatar"),
+  pixelAvatarSprite: document.querySelector("#pixelAvatarSprite"),
+  eyesOpen: document.querySelector("#eyesOpen"),
+  eyesHalf: document.querySelector("#eyesHalf"),
+  eyesClosed: document.querySelector("#eyesClosed"),
+  mouthNeutral: document.querySelector("#mouthNeutral"),
+  mouthSmall: document.querySelector("#mouthSmall"),
+  mouthWide: document.querySelector("#mouthWide"),
+  vtuberMood: document.querySelector("#vtuberMood"),
+  startButton: document.querySelector("#startButton"),
+  muteButton: document.querySelector("#muteButton"),
+  messageForm: document.querySelector("#messageForm"),
+  messageInput: document.querySelector("#messageInput"),
+  messageSubmit: document.querySelector("#messageForm button[type='submit']"),
+  statusLine: document.querySelector("#statusLine"),
+  microphoneHelpButton: document.querySelector("#microphoneHelpButton"),
+};
+
+let sessionStatus = "idle";
+let intentionalClose = false;
+let isMuted = false;
+let agentTurnActive = false;
+let turnCancellationPending = false;
+let turnExecutionSequence = 0;
+let turnCancellationDrainTimeoutId = null;
+let turnCancellationWatchdogTimeoutId = null;
+let suppressServerOutputUntilNextUserTurn = false;
+let cancelledTurnBoundarySeen = false;
+let freshUserInputStarted = false;
+let browserToolRunning = false;
+let activeMcpTools = new Map();
+const cancelledToolCallIds = new Set();
+const pendingToolCallIds = new Set();
+const pendingToolCallNames = new Map();
+let websocket = null;
+let activeApiKey = "";
+let pendingLiveTranslationStart = false;
+let liveTranslationTargetLanguageCode = "";
+
+let petalsEnabled = true;
+
+let setupTimeoutId = null;
+
+const partialMessages = { user: null, lumi: null };
+
+const avatarController = createAvatarController({
+  elements: {
+    avatarCard: elements.vtuberCard,
+    avatarMood: elements.vtuberMood,
+    modeButton: elements.avatarModeButton,
+    pixelAvatar: elements.pixelAvatar,
+    pixelAvatarSprite: elements.pixelAvatarSprite,
+    vtuber: elements.lumiRig,
+  },
+  getSessionState: () => ({ status: sessionStatus, isMuted }),
+});
+const petalEmitter = createPetalEmitter({
+  field: elements.petalField,
+  isEnabled: () => petalsEnabled,
+});
+
+const panelAudio = createPanelAudioController({
+  avatarController,
+  elements,
+  getInputState: () => ({
+    canSendAudio: sessionStatus === "ready"
+      && !isMuted
+      && !turnCancellationPending
+      && websocket?.readyState === WebSocket.OPEN,
+    freshUserInputStarted,
+    suppressServerOutputUntilNextUserTurn,
+  }),
+  onFreshUserInput: () => {
+    markFreshUserInputStarted();
+    finalizeTranscript("user");
+    finalizeTranscript("lumi");
+  },
+  sendJson,
+});
+const responseAudioGate = createTurnAudioGate(() => panelAudio.stopPlayback());
+
+function sendRuntime(command, payload = {}) {
+  return chrome.runtime.sendMessage({
+    type: MESSAGE_TYPE,
+    command,
+    ...payload,
+  }).then((response) => {
+    if (!response?.ok) throw new Error(response?.error || "The Lumi extension did not respond.");
+    return response.result;
+  });
+}
+
+const {
+  applyMcpToolPolicies,
+  cancelPendingMcpActivities,
+  cancelPendingMcpPermissionPrompts,
+  createMcpActivityCard,
+  finishMcpActivity,
+  handleMcpToolNoticeAction,
+  normalizeMcpToolResult,
+  notifyInvalidMcpSchemas,
+  promptToDisableFailedMcpTool,
+  requestMcpToolPermission,
+  resetSessionFailures: resetMcpSessionFailures,
+} = createMcpPanelController({
+  elements,
+  getActiveMcpTools: () => activeMcpTools,
+  getPendingToolCallIds: () => pendingToolCallIds,
+  maxToolResponseChars: MAX_MCP_TOOL_RESPONSE_CHARS,
+  rememberCancelledToolCall,
+  sendRuntime,
+});
+
+function syncMessageComposer() {
+  const ready = sessionStatus === "ready";
+  const cancelMode = ready && agentTurnActive;
+  elements.messageInput.disabled = !ready || cancelMode || turnCancellationPending;
+  elements.messageInput.placeholder = !ready
+    ? "Start voice to type a message…"
+    : turnCancellationPending ? "Cancelling current action…"
+      : cancelMode ? "Lumi is working…" : "Type a message to Lumi…";
+  elements.messageSubmit.dataset.mode = cancelMode ? "cancel" : "send";
+  elements.messageSubmit.setAttribute("aria-label", cancelMode ? "Cancel current action" : "Send message");
+  elements.messageSubmit.title = cancelMode ? "Cancel current action" : "Send message";
+  elements.messageSubmit.disabled = !ready
+    || turnCancellationPending
+    || (!cancelMode && !elements.messageInput.value.trim());
+}
+
+function setAgentTurnActive(active) {
+  if (active === true && (
+    turnCancellationPending
+    || (suppressServerOutputUntilNextUserTurn && !freshUserInputStarted)
+  )) return;
+  agentTurnActive = sessionStatus === "ready" && active === true;
+  syncMessageComposer();
+}
+
+function clearTurnCancellationTimers() {
+  clearTimeout(turnCancellationDrainTimeoutId);
+  clearTimeout(turnCancellationWatchdogTimeoutId);
+  turnCancellationDrainTimeoutId = null;
+  turnCancellationWatchdogTimeoutId = null;
+}
+
+function markFreshUserInputStarted() {
+  freshUserInputStarted = true;
+  if (!cancelledTurnBoundarySeen) return;
+  suppressServerOutputUntilNextUserTurn = false;
+  cancelledTurnBoundarySeen = false;
+  freshUserInputStarted = false;
+}
+
+function markCancelledTurnBoundarySeen() {
+  cancelledTurnBoundarySeen = true;
+  if (!freshUserInputStarted) return;
+  suppressServerOutputUntilNextUserTurn = false;
+  cancelledTurnBoundarySeen = false;
+  freshUserInputStarted = false;
+  setAgentTurnActive(true);
+}
+
+function rememberCancelledToolCall(callId) {
+  if (!callId) return;
+  cancelledToolCallIds.add(callId);
+  setTimeout(() => cancelledToolCallIds.delete(callId), 60000);
+}
+
+function resetPendingTurnExecution(message = "Cancelled by the user.") {
+  cancelPendingMcpPermissionPrompts();
+  if (pendingLiveTranslationStart) {
+    pendingLiveTranslationStart = false;
+    void sendRuntime("stop_live_translation").catch(() => {});
+  }
+  const cancelledResponses = [];
+  for (const callId of pendingToolCallIds) {
+    rememberCancelledToolCall(callId);
+    finishMcpActivity(callId, "cancelled", message);
+    const name = pendingToolCallNames.get(callId);
+    if (name) {
+      cancelledResponses.push({
+        id: callId,
+        name,
+        response: { error: "Cancelled by the user before this tool could finish." },
+      });
+    }
+  }
+  pendingToolCallIds.clear();
+  pendingToolCallNames.clear();
+  browserToolRunning = false;
+  panelAudio.stopPlayback();
+  responseAudioGate.reset();
+  finalizeTranscript("user");
+  finalizeTranscript("lumi");
+  return cancelledResponses;
+}
+
+function completeTurnCancellation() {
+  if (!turnCancellationPending) return;
+  clearTurnCancellationTimers();
+  resetPendingTurnExecution();
+  turnCancellationPending = false;
+  setAgentTurnActive(false);
+  elements.statusLine.textContent = "Current action stopped. Waiting silently for your next instruction.";
+  avatarController.syncState();
+  syncMessageComposer();
+}
+
+function scheduleTurnCancellationCompletion() {
+  clearTimeout(turnCancellationDrainTimeoutId);
+  turnCancellationDrainTimeoutId = setTimeout(completeTurnCancellation, 120);
+}
+
+function setSessionStatus(nextStatus, message) {
+  sessionStatus = nextStatus;
+  if (nextStatus !== "ready") agentTurnActive = false;
+  if (nextStatus !== "ready") turnCancellationPending = false;
+  if (nextStatus !== "error") elements.microphoneHelpButton.hidden = true;
+  elements.liveBadge.className = `badge badge-${nextStatus === "ready" ? "live" : nextStatus === "connecting" ? "joining" : nextStatus === "error" ? "error" : "offline"}`;
+  elements.liveBadge.textContent = nextStatus === "ready" ? "Live" : nextStatus === "connecting" ? "Joining" : nextStatus === "error" ? "Retry" : "Offline";
+  elements.statusLine.textContent = message;
+  elements.startButton.disabled = nextStatus === "connecting";
+  elements.startButton.classList.toggle("live", nextStatus === "ready");
+  elements.startButton.querySelector("span:last-child").textContent = nextStatus === "ready" ? "End voice" : nextStatus === "connecting" ? "Connecting…" : "Start voice";
+  elements.muteButton.disabled = nextStatus !== "ready";
+  syncMessageComposer();
+  avatarController.syncState();
+}
+
+function clearSetupTimeout() {
+  if (setupTimeoutId !== null) {
+    clearTimeout(setupTimeoutId);
+    setupTimeoutId = null;
+  }
+}
+
+function describeStartError(error) {
+  const name = error && typeof error === "object" ? error.name : "";
+  const original = error instanceof Error ? error.message : String(error || "");
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return {
+      microphone: true,
+      message: "Chrome has not allowed Lumi to use the microphone. Press Enable microphone and follow the permission tab.",
+    };
+  }
+  if (name === "NotFoundError") {
+    return { microphone: true, message: "No microphone was found. Connect an input device, then try again." };
+  }
+  if (name === "NotReadableError" || name === "AbortError") {
+    return { microphone: true, message: "The microphone is busy or unavailable. Close other apps using it, then retry." };
+  }
+  return { microphone: false, message: original || "Could not start Gemini Live voice." };
+}
+
+async function queryMicrophonePermission() {
+  try {
+    const permission = await navigator.permissions.query({ name: "microphone" });
+    return permission.state;
+  } catch {
+    return "prompt";
+  }
+}
+
+async function refreshMicrophonePermission() {
+  return queryMicrophonePermission();
+}
+
+async function openMicrophonePermissionPage() {
+  await chrome.tabs.create({ url: chrome.runtime.getURL("settings/microphone-permission.html"), active: true });
+  elements.microphoneHelpButton.hidden = false;
+  setSessionStatus("idle", "A Lumi permission tab opened. Choose Allow there, then return and press Start voice again.");
+}
+
+async function validateGeminiApiKey(apiKey) {
+  let response;
+  try {
+    response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?pageSize=1&key=${encodeURIComponent(apiKey)}`,
+      { method: "GET", cache: "no-store" },
+    );
+  } catch {
+    throw new Error("Could not reach Google Gemini. Check the network connection and try again.");
+  }
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const detail = data?.error?.message || `HTTP ${response.status}`;
+    throw new Error(`Gemini rejected this API key: ${detail}`);
+  }
+}
+
+function updateTarget(status) {
+  const connected = Boolean(status?.connected);
+  elements.targetCard.classList.toggle("connected", connected);
+  elements.targetTitle.textContent = connected ? status.title || "Active web page" : "No controllable page";
+  elements.targetHint.textContent = connected
+    ? status.controllerReady === false ? "PageAgent is preparing this page..." : "Auto-following the active Chrome tab."
+    : status?.reason || "Switch to a web page and Lumi will follow it.";
+  elements.connectTabButton.textContent = connected ? "Auto" : "Waiting";
+  elements.connectTabButton.title = connected ? status.url || "Automatically follows the active tab" : "Waiting for an http/https tab";
+}
+
+async function refreshTarget() {
+  if (browserToolRunning) return;
+  try {
+    updateTarget(await sendRuntime("get_status"));
+  } catch {
+    updateTarget({ connected: false });
+  }
+}
+
+function openSettings() {
+  return chrome.runtime.openOptionsPage();
+}
+
+function createMessage(role, text) {
+  const article = document.createElement("article");
+  article.className = `message message-${role}`;
+  const author = document.createElement("span");
+  author.textContent = role === "lumi" ? "Lumi" : "You";
+  const content = document.createElement("p");
+  content.textContent = text;
+  article.append(author, content);
+  elements.transcript.append(article);
+  elements.transcript.scrollTop = elements.transcript.scrollHeight;
+  return { article, content, text };
+}
+
+function updateTranscript(role, incoming) {
+  const clean = String(incoming || "").trim();
+  if (!clean) return;
+  if (!partialMessages[role]) partialMessages[role] = createMessage(role, clean);
+  else {
+    const message = partialMessages[role];
+    message.text = mergeTranscriptText(message.text, clean);
+    message.content.textContent = message.text;
+  }
+  elements.transcript.scrollTop = elements.transcript.scrollHeight;
+}
+
+function finalizeTranscript(role) {
+  partialMessages[role] = null;
+}
+
+function sendJson(payload, targetSocket = websocket) {
+  if (targetSocket?.readyState !== WebSocket.OPEN) return false;
+  targetSocket.send(JSON.stringify(payload));
+  return true;
+}
+
+function setLiveTranslationBadge(state, detail = "") {
+  const languageCode = normalizeLiveTranslationLanguageCode(detail)
+    || liveTranslationTargetLanguageCode
+    || "";
+  if (languageCode) liveTranslationTargetLanguageCode = languageCode;
+  if (state === "off") liveTranslationTargetLanguageCode = "";
+  elements.translateBadge.hidden = state === "off";
+  elements.translateBadge.className = `badge badge-translate translate-${state}`;
+  elements.translateBadge.textContent = state === "active"
+    ? `Translate · ${languageCode}`
+    : state === "reconnecting"
+      ? `Translate · reconnecting`
+      : state === "error"
+        ? "Translate · error"
+        : "Translate · joining";
+  if (sessionStatus === "ready") {
+    elements.startButton.querySelector("span:last-child").textContent =
+      state === "active" || state === "connecting" || state === "reconnecting"
+        ? "End voice + translate"
+        : "End voice";
+  }
+}
+
+async function runLiveTranslationTool(args = {}) {
+  const action = String(args.action || "").trim().toLowerCase();
+  if (!activeApiKey) {
+    throw new Error("Start the Lumi voice session before using Live Translate.");
+  }
+  if (action === "status") {
+    return sendRuntime("live_translation_status");
+  }
+  if (action === "stop") {
+    const result = await sendRuntime("stop_live_translation");
+    setLiveTranslationBadge("off");
+    elements.statusLine.textContent = result.wasActive
+      ? "Live translation stopped. Lumi is still listening."
+      : "Live translation was already off.";
+    return { success: true, ...result };
+  }
+  if (action !== "start") {
+    throw new Error("Live Translate action must be start, stop, or status.");
+  }
+  const targetLanguageCode = normalizeLiveTranslationLanguageCode(args.targetLanguageCode);
+  if (!targetLanguageCode) {
+    throw new Error("Choose one of the supported Live Translate target languages.");
+  }
+  avatarController.transitionState("tool_call");
+  pendingLiveTranslationStart = true;
+  let result;
+  try {
+    result = await sendRuntime("start_live_translation", {
+      apiKey: activeApiKey,
+      targetLanguageCode,
+    });
+    if (!pendingLiveTranslationStart) {
+      await sendRuntime("stop_live_translation").catch(() => {});
+      throw new DOMException("Live translation was cancelled.", "AbortError");
+    }
+  } catch (error) {
+    avatarController.transitionState("error", { forMs: 2080 });
+    throw error;
+  } finally {
+    pendingLiveTranslationStart = false;
+  }
+  liveTranslationTargetLanguageCode = targetLanguageCode;
+  const languageLabel = result.languageLabel || getLiveTranslationLanguageLabel(targetLanguageCode);
+  const captureLabel = result.captureMode === "mediaElement"
+    ? "direct video audio"
+    : "authorized tab audio";
+  elements.statusLine.textContent = `Live translating ${result.source?.title || "the active video"} to ${languageLabel} · ${captureLabel} · source audio at 6%.`;
+  avatarController.transitionState("success", { forMs: 1760 });
+  return {
+    success: true,
+    state: "active",
+    targetLanguageCode,
+    sourceTabId: result.source?.tabId,
+    sourceTitle: result.source?.title,
+    captureMode: result.captureMode || result.source?.mode || "tabCapture",
+    audioOwner: "Gemini Live Translate tool",
+    sourcePlaybackVolume: 0.06,
+    [RESPONSE_AUDIO_DIRECTIVE_KEY]: { suppressForTurn: true },
+  };
+}
+
+async function runBrowserTool(tool, args) {
+  browserToolRunning = true;
+  const isUiAction = BROWSER_UI_ACTION_TOOLS.has(tool);
+  avatarController.transitionState(isUiAction ? "ui_control" : "thinking");
+  try {
+    const result = await sendRuntime("browser_tool", { tool, args });
+    if (isUiAction) {
+      avatarController.transitionState("success", { forMs: 1760, resumeState: "thinking" });
+    } else {
+      avatarController.transitionState("thinking");
+    }
+    return result;
+  } catch (error) {
+    avatarController.transitionState("error", { forMs: 2080 });
+    throw error;
+  } finally {
+    browserToolRunning = false;
+    void refreshTarget();
+  }
+}
+
+async function runMcpTool(tool, args, callId) {
+  if (tool.permission === "block") throw new Error("This MCP tool is blocked in Lumi Settings.");
+  avatarController.transitionState("tool_call");
+  try {
+    let permissionGranted = false;
+    if (tool.permission !== "allow") {
+      permissionGranted = await requestMcpToolPermission(tool, args, callId);
+      if (!permissionGranted) {
+        const error = new Error("MCP tool permission was denied or timed out.");
+        error.name = "McpPermissionDeniedError";
+        throw error;
+      }
+    }
+    const result = await sendRuntime("mcp_call_tool", {
+      serverId: tool.serverId,
+      tool: tool.toolName,
+      args,
+      permissionGranted,
+    });
+    avatarController.transitionState("success", { forMs: 1760, resumeState: "thinking" });
+    return result;
+  } catch (error) {
+    avatarController.transitionState("error", { forMs: 2080 });
+    throw error;
+  }
+}
+
+async function handleServerMessage(event, sourceSocket) {
+  const raw = typeof event.data === "string" ? event.data : await event.data.text();
+  const response = JSON.parse(raw);
+  if (sourceSocket !== websocket) return;
+
+  for (const id of response.toolCallCancellation?.ids || []) {
+    if (pendingToolCallNames.get(id) === LIVE_TRANSLATE_TOOL_NAME && pendingLiveTranslationStart) {
+      pendingLiveTranslationStart = false;
+      void sendRuntime("stop_live_translation").catch(() => {});
+    }
+    rememberCancelledToolCall(id);
+    finishMcpActivity(id, "cancelled", "Gemini cancelled this tool call because the conversation turn was interrupted.");
+  }
+  if (response.setupComplete) {
+    clearSetupTimeout();
+    clearTurnCancellationTimers();
+    turnCancellationPending = false;
+    suppressServerOutputUntilNextUserTurn = false;
+    cancelledTurnBoundarySeen = false;
+    freshUserInputStarted = false;
+    setSessionStatus("ready", "Lumi is listening. PageAgent automatically follows your active web tab.");
+    setAgentTurnActive(true);
+    sendJson({ realtimeInput: { text: "Greet the user warmly in one short sentence and say you are ready." } }, sourceSocket);
+  }
+
+  const serverContent = response.serverContent;
+  const functionCalls = response.toolCall?.functionCalls || [];
+  const hasTurnPayload = Boolean(
+    serverContent?.modelTurn?.parts?.length
+    || serverContent?.inputTranscription?.text
+    || serverContent?.outputTranscription?.text
+    || functionCalls.length
+  );
+  if (turnCancellationPending) {
+    if (hasTurnPayload) clearTimeout(turnCancellationDrainTimeoutId);
+    for (const functionCall of functionCalls) rememberCancelledToolCall(functionCall.id);
+    const cancelledResponses = functionCalls
+      .filter((functionCall) => functionCall.id && functionCall.name)
+      .map((functionCall) => ({
+        id: functionCall.id,
+        name: functionCall.name,
+        response: { error: "Cancelled by the user before this tool could run." },
+      }));
+    if (cancelledResponses.length && sourceSocket === websocket) {
+      sendJson({ toolResponse: { functionResponses: cancelledResponses } }, sourceSocket);
+    }
+    if (serverContent?.interrupted || serverContent?.turnComplete) {
+      markCancelledTurnBoundarySeen();
+    }
+    if (serverContent?.interrupted) resetPendingTurnExecution();
+    if (serverContent?.turnComplete) scheduleTurnCancellationCompletion();
+    return;
+  }
+  if (suppressServerOutputUntilNextUserTurn) {
+    const cancelledResponses = functionCalls
+      .filter((functionCall) => functionCall.id && functionCall.name)
+      .map((functionCall) => ({
+        id: functionCall.id,
+        name: functionCall.name,
+        response: { error: "Ignored because the previous turn was cancelled." },
+      }));
+    for (const functionCall of functionCalls) rememberCancelledToolCall(functionCall.id);
+    if (cancelledResponses.length && sourceSocket === websocket) {
+      sendJson({ toolResponse: { functionResponses: cancelledResponses } }, sourceSocket);
+    }
+    if (
+      serverContent?.interrupted
+      || serverContent?.turnComplete
+      || (freshUserInputStarted && serverContent?.inputTranscription?.text)
+    ) {
+      markCancelledTurnBoundarySeen();
+      if (suppressServerOutputUntilNextUserTurn) setAgentTurnActive(false);
+    }
+    return;
+  }
+  if (
+    serverContent?.modelTurn?.parts?.length
+    || serverContent?.inputTranscription?.text
+    || serverContent?.outputTranscription?.text
+    || functionCalls.length
+  ) setAgentTurnActive(true);
+  for (const part of serverContent?.modelTurn?.parts || []) {
+    if (part.inlineData?.data && responseAudioGate.shouldPlay()) {
+      panelAudio.playPcmChunk(part.inlineData.data);
+    }
+  }
+  if (serverContent?.inputTranscription?.text) updateTranscript("user", serverContent.inputTranscription.text);
+  if (serverContent?.outputTranscription?.text) updateTranscript("lumi", serverContent.outputTranscription.text);
+  if (serverContent?.interrupted) {
+    const wasUserCancellation = turnCancellationPending;
+    turnCancellationPending = false;
+    cancelPendingMcpActivities();
+    panelAudio.stopPlayback();
+    responseAudioGate.reset();
+    finalizeTranscript("lumi");
+    setAgentTurnActive(false);
+    if (wasUserCancellation) {
+      elements.statusLine.textContent = "Current action cancelled. Lumi is ready for your next request.";
+    }
+  }
+  if (serverContent?.turnComplete) {
+    const wasUserCancellation = turnCancellationPending;
+    turnCancellationPending = false;
+    finalizeTranscript("user");
+    finalizeTranscript("lumi");
+    setAgentTurnActive(false);
+    if (wasUserCancellation) {
+      elements.statusLine.textContent = "Current action cancelled. Lumi is ready for your next request.";
+    }
+  }
+
+  if (functionCalls.length) {
+    const executionSequence = turnExecutionSequence;
+    const functionResponses = [];
+    for (const functionCall of functionCalls) {
+      if (executionSequence !== turnExecutionSequence || turnCancellationPending) break;
+      const callId = functionCall.id;
+      if (!callId || cancelledToolCallIds.has(callId)) continue;
+      pendingToolCallIds.add(callId);
+      pendingToolCallNames.set(callId, functionCall.name);
+      let mcpTool = null;
+      let activityTool = null;
+      try {
+        const isBrowserTool = BROWSER_TOOLS.some((tool) => tool.name === functionCall.name);
+        const isLiveTranslationTool = functionCall.name === LIVE_TRANSLATE_TOOL_NAME;
+        mcpTool = activeMcpTools.get(functionCall.name) || null;
+        if (!isBrowserTool && !isLiveTranslationTool && !mcpTool) {
+          throw new Error(`Unsupported tool: ${functionCall.name}`);
+        }
+        if (mcpTool?.disabled) throw new Error("This MCP tool is disabled for the rest of this session.");
+        activityTool = isLiveTranslationTool
+          ? {
+              activityLabel: "BUILT-IN TOOL",
+              toolName: LIVE_TRANSLATE_TOOL_NAME,
+              serverName: "Gemini Live Translate",
+            }
+          : mcpTool;
+        if (activityTool) createMcpActivityCard(callId, activityTool, functionCall.args || {});
+        let result = isLiveTranslationTool
+          ? await runLiveTranslationTool(functionCall.args || {})
+          : isBrowserTool
+            ? await runBrowserTool(functionCall.name, functionCall.args || {})
+            : normalizeMcpToolResult(await runMcpTool(mcpTool, functionCall.args || {}, callId));
+        if (isBrowserTool || isLiveTranslationTool) {
+          const consumed = consumeResponseAudioDirective(result);
+          result = consumed.result;
+          if (consumed.suppressForTurn) responseAudioGate.suppress();
+        }
+        if (
+          cancelledToolCallIds.has(callId)
+          || executionSequence !== turnExecutionSequence
+          || turnCancellationPending
+          || sourceSocket !== websocket
+        ) {
+          if (activityTool) finishMcpActivity(callId, "cancelled", "The session ended before Lumi could use this tool result.");
+          continue;
+        }
+        if (activityTool) finishMcpActivity(callId, "completed", result);
+        functionResponses.push({
+          id: callId,
+          name: functionCall.name,
+          response: { result },
+        });
+      } catch (error) {
+        if (
+          cancelledToolCallIds.has(callId)
+          || executionSequence !== turnExecutionSequence
+          || turnCancellationPending
+          || sourceSocket !== websocket
+        ) {
+          if (activityTool) finishMcpActivity(callId, "cancelled", "The tool call was cancelled before it completed.");
+          continue;
+        }
+        if (activityTool) {
+          finishMcpActivity(callId, "failed", error instanceof Error ? error.message : "Tool call failed.");
+        }
+        if (mcpTool) promptToDisableFailedMcpTool(mcpTool, error);
+        functionResponses.push({
+          id: callId,
+          name: functionCall.name,
+          response: { error: (error instanceof Error ? error.message : "Tool call failed.").slice(0, 1200) },
+        });
+      } finally {
+        pendingToolCallIds.delete(callId);
+        pendingToolCallNames.delete(callId);
+      }
+    }
+    if (
+      functionResponses.length
+      && executionSequence === turnExecutionSequence
+      && !turnCancellationPending
+      && sourceSocket === websocket
+    ) {
+      sendJson({ toolResponse: { functionResponses } }, sourceSocket);
+    }
+  }
+  if (serverContent?.turnComplete && !functionCalls.length) responseAudioGate.reset();
+}
+
+function openGeminiSocket({ apiKey, voiceName, mcpInfo, mcpFunctionDeclarations, activeTabContext }) {
+  setSessionStatus("connecting", "Microphone is ready. Opening Gemini Live...");
+  const functionDeclarations = [...BUILTIN_TOOLS, ...mcpFunctionDeclarations];
+  websocket = new WebSocket(`${WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`);
+  const sessionSocket = websocket;
+  setupTimeoutId = setTimeout(() => {
+    if (sessionStatus !== "connecting" || websocket !== sessionSocket) return;
+    intentionalClose = true;
+    websocket = null;
+    sessionSocket.close(4000, "Gemini setup timed out");
+    cleanupMedia();
+    setSessionStatus("error", "Gemini Live did not finish setup within 15 seconds. Check API access, then retry.");
+  }, 15000);
+  sessionSocket.onopen = () => {
+    if (websocket !== sessionSocket) return;
+    sendJson({
+      setup: {
+        model: `models/${MODEL}`,
+        generationConfig: {
+          responseModalities: ["AUDIO"],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+        },
+        realtimeInputConfig: {
+          automaticActivityDetection: {
+            disabled: false,
+            startOfSpeechSensitivity: "START_SENSITIVITY_LOW",
+            endOfSpeechSensitivity: "END_SENSITIVITY_LOW",
+            prefixPaddingMs: 40,
+            silenceDurationMs: 650,
+          },
+        },
+        tools: [{ functionDeclarations }],
+        systemInstruction: { parts: [{ text: buildSessionInstruction(mcpInfo, activeTabContext) }] },
+        inputAudioTranscription: {},
+        outputAudioTranscription: {},
+      },
+    }, sessionSocket);
+  };
+  sessionSocket.onmessage = (event) => {
+    void handleServerMessage(event, sessionSocket).catch((error) => {
+      if (websocket !== sessionSocket) return;
+      intentionalClose = true;
+      websocket = null;
+      sessionSocket.close(4001, "Invalid Gemini response");
+      cleanupMedia();
+      setSessionStatus("error", `Gemini Live returned an unreadable response: ${error instanceof Error ? error.message : "Unknown response"}`);
+    });
+  };
+  sessionSocket.onerror = () => {
+    if (websocket !== sessionSocket) return;
+    elements.statusLine.textContent = "Gemini Live connection failed; waiting for the server error details...";
+  };
+  sessionSocket.onclose = (event) => {
+    if (websocket !== sessionSocket) return;
+    const expected = intentionalClose;
+    const reason = event.reason?.replace(/\s+/g, " ").trim() || "";
+    clearSetupTimeout();
+
+    const rejected = !expected && sessionStatus === "connecting"
+      ? findRejectedMcpDeclaration(reason, functionDeclarations, activeMcpTools)
+      : null;
+    if (rejected) {
+      websocket = null;
+      activeMcpTools.delete(rejected.declaration.name);
+      const declarationIndex = mcpFunctionDeclarations.findIndex(
+        (declaration) => declaration.name === rejected.declaration.name,
+      );
+      if (declarationIndex >= 0) mcpFunctionDeclarations.splice(declarationIndex, 1);
+      void sendRuntime("mcp_disable_tool", {
+        serverId: rejected.tool.serverId,
+        tool: rejected.tool.toolName,
+        source: "gemini_setup",
+        reason: reason || "Gemini Live rejected this tool declaration.",
+      }).catch(() => {});
+      queueMcpToolNotice({
+        key: `gemini-setup:${rejected.tool.serverId}:${rejected.tool.toolName}`,
+        title: `MCP tool auto-disabled: ${rejected.tool.toolName}`,
+        message: `${rejected.tool.serverName} exposed a declaration Gemini rejected. Lumi disabled only this tool and is reconnecting now; voice, chat, and other tools remain available.`,
+        primaryLabel: "OK",
+      });
+      setSessionStatus(
+        "connecting",
+        `Temporarily disabled incompatible MCP tool ${rejected.tool.toolName}. Retrying Gemini Live...`,
+      );
+      openGeminiSocket({ apiKey, voiceName, mcpInfo, mcpFunctionDeclarations, activeTabContext });
+      return;
+    }
+
+    cleanupMedia();
+    if (!expected) {
+      setSessionStatus(
+        "error",
+        reason
+          ? `Gemini Live closed (${event.code}): ${reason.slice(0, 140)}`
+          : `Gemini Live closed with code ${event.code}. The key passed validation; reload this extension and try again.`,
+      );
+    }
+  };
+}
+
+async function startSession() {
+  if (sessionStatus === "ready") {
+    stopSession();
+    return;
+  }
+  if (sessionStatus === "connecting") return;
+
+  const stored = await chrome.storage.local.get([API_KEY_STORAGE_KEY, VOICE_STORAGE_KEY]);
+  const apiKey = String(stored[API_KEY_STORAGE_KEY] || "").trim();
+  const voiceName = String(stored[VOICE_STORAGE_KEY] || "Zephyr");
+  if (!apiKey) {
+    await openSettings();
+    setSessionStatus("error", "Save a Gemini API key before starting voice.");
+    return;
+  }
+
+  const microphonePermission = await refreshMicrophonePermission();
+  if (microphonePermission !== "granted") {
+    await openMicrophonePermissionPage();
+    return;
+  }
+
+  intentionalClose = false;
+  cancelledToolCallIds.clear();
+  pendingToolCallIds.clear();
+  resetMcpSessionFailures();
+  elements.microphoneHelpButton.hidden = true;
+  setSessionStatus("connecting", "Checking the Gemini key and requesting microphone access…");
+  try {
+    const mcpInfo = await sendRuntime("mcp_get_tools");
+    notifyInvalidMcpSchemas(mcpInfo);
+    const mcpFunctionDeclarations = configureMcpTools(mcpInfo, activeMcpTools);
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Microphone access is unavailable in Lumi Live. Update Chrome and reopen the extension.");
+    }
+    await panelAudio.requestMicrophone();
+    setSessionStatus("connecting", "Microphone is ready. Checking the Gemini API key…");
+    await validateGeminiApiKey(apiKey);
+    await panelAudio.startMicrophone();
+    activeApiKey = apiKey;
+
+    const activeTabContext = await sendRuntime("browser_tool", {
+      tool: "browser_get_active_context",
+      args: {},
+    });
+    openGeminiSocket({ apiKey, voiceName, mcpInfo, mcpFunctionDeclarations, activeTabContext });
+  } catch (error) {
+    intentionalClose = true;
+    const activeSocket = websocket;
+    websocket = null;
+    activeSocket?.close();
+    cleanupMedia();
+    const diagnosis = describeStartError(error);
+    elements.microphoneHelpButton.hidden = !diagnosis.microphone;
+    setSessionStatus("error", diagnosis.message);
+  }
+}
+
+function cleanupMedia() {
+  clearSetupTimeout();
+  clearTurnCancellationTimers();
+  turnExecutionSequence += 1;
+  cancelPendingMcpPermissionPrompts();
+  cancelPendingMcpActivities("The voice session ended before this MCP tool call completed.");
+  void sendRuntime("release_tab_audio").catch(() => {});
+  pendingToolCallIds.clear();
+  pendingToolCallNames.clear();
+  activeApiKey = "";
+  pendingLiveTranslationStart = false;
+  liveTranslationTargetLanguageCode = "";
+  setLiveTranslationBadge("off");
+  panelAudio.closeSession();
+  responseAudioGate.reset();
+  websocket = null;
+  isMuted = false;
+  agentTurnActive = false;
+  turnCancellationPending = false;
+  suppressServerOutputUntilNextUserTurn = false;
+  cancelledTurnBoundarySeen = false;
+  freshUserInputStarted = false;
+  elements.muteButton.textContent = "Mute";
+  finalizeTranscript("user");
+  finalizeTranscript("lumi");
+}
+
+function stopSession() {
+  intentionalClose = true;
+  const activeSocket = websocket;
+  websocket = null;
+  activeSocket?.close();
+  cleanupMedia();
+  setSessionStatus("idle", "Ready. PageAgent will follow whichever web tab you open.");
+}
+
+function toggleMute() {
+  if (sessionStatus !== "ready") return;
+  isMuted = !isMuted;
+  elements.muteButton.textContent = isMuted ? "Unmute" : "Mute";
+  avatarController.syncState();
+  if (isMuted) sendJson({ realtimeInput: { audioStreamEnd: true } });
+}
+
+function sendText(text) {
+  const clean = text.trim();
+  if (!clean || sessionStatus !== "ready" || agentTurnActive || turnCancellationPending) return;
+  turnExecutionSequence += 1;
+  if (suppressServerOutputUntilNextUserTurn) markFreshUserInputStarted();
+  responseAudioGate.reset();
+  finalizeTranscript("user");
+  finalizeTranscript("lumi");
+  createMessage("user", clean);
+  avatarController.transitionState("thinking");
+  turnCancellationPending = false;
+  setAgentTurnActive(true);
+  sendJson({ realtimeInput: { text: clean } });
+  elements.messageInput.value = "";
+  syncMessageComposer();
+}
+
+function cancelCurrentTurn() {
+  if (sessionStatus !== "ready" || !agentTurnActive) return;
+  clearTurnCancellationTimers();
+  turnCancellationPending = true;
+  suppressServerOutputUntilNextUserTurn = true;
+  cancelledTurnBoundarySeen = false;
+  freshUserInputStarted = false;
+  turnExecutionSequence += 1;
+  const cancelledResponses = resetPendingTurnExecution("Cancelled by the user.");
+  if (cancelledResponses.length) {
+    sendJson({ toolResponse: { functionResponses: cancelledResponses } });
+  }
+  sendJson({ realtimeInput: { audioStreamEnd: true } });
+  void Promise.allSettled([
+    sendRuntime("cancel_active_browser_action"),
+    sendRuntime("cancel_active_mcp_calls"),
+  ]);
+  setAgentTurnActive(false);
+  elements.statusLine.textContent = "Stopping the current action…";
+  avatarController.syncState();
+  turnCancellationWatchdogTimeoutId = setTimeout(completeTurnCancellation, 80);
+}
+
+function toggleVtuberSize() {
+  const expanded = elements.vtuberCard.classList.toggle("expanded");
+  document.body.classList.toggle("vtuber-expanded", expanded);
+  elements.transcript.setAttribute("aria-hidden", String(expanded));
+  elements.vtuberToggle.setAttribute("aria-expanded", String(expanded));
+  elements.vtuberToggle.setAttribute(
+    "aria-label",
+    expanded ? "Shrink Lumi to the conversation corner" : "Expand Lumi over the conversation",
+  );
+}
+
+function applyPetals(enabled) {
+  petalsEnabled = enabled;
+  document.body.classList.toggle("petals-off", !enabled);
+  if (enabled) petalEmitter.start();
+  else petalEmitter.stop();
+  elements.petalsButton.setAttribute("aria-pressed", String(enabled));
+  elements.petalsButton.setAttribute(
+    "aria-label",
+    enabled ? "Turn off falling petals" : "Turn on falling petals",
+  );
+  elements.petalsButton.title = enabled ? "Turn off falling petals" : "Turn on falling petals";
+}
+
+async function togglePetals() {
+  const enabled = elements.petalsButton.getAttribute("aria-pressed") !== "true";
+  applyPetals(enabled);
+  await chrome.storage.local.set({ [PETALS_STORAGE_KEY]: enabled });
+}
+
+async function toggleAvatarMode() {
+  const nextMode = avatarController.mode === "pixel" ? "vtuber" : "pixel";
+  await chrome.storage.local.set({ [AVATAR_MODE_STORAGE_KEY]: nextMode });
+}
+
+elements.settingsButton.addEventListener("click", () => void openSettings());
+elements.avatarModeButton.addEventListener("click", () => void toggleAvatarMode());
+elements.petalsButton.addEventListener("click", () => void togglePetals());
+elements.vtuberToggle.addEventListener("click", toggleVtuberSize);
+elements.startButton.addEventListener("click", () => void startSession());
+elements.muteButton.addEventListener("click", toggleMute);
+elements.microphoneHelpButton.addEventListener("click", () => void openMicrophonePermissionPage());
+elements.mcpToolNoticePrimary.addEventListener("click", () => void handleMcpToolNoticeAction("primary"));
+elements.mcpToolNoticeSecondary.addEventListener("click", () => void handleMcpToolNoticeAction("secondary"));
+elements.mcpToolNoticeTertiary.addEventListener("click", () => void handleMcpToolNoticeAction("tertiary"));
+elements.messageInput.addEventListener("input", () => {
+  syncMessageComposer();
+});
+elements.messageForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (agentTurnActive) cancelCurrentTurn();
+  else sendText(elements.messageInput.value);
+});
+window.addEventListener("unload", () => {
+  intentionalClose = true;
+  sidePanelLifecyclePort.disconnect();
+  petalEmitter.stop();
+  websocket?.close();
+  cleanupMedia();
+  panelAudio.dispose();
+  avatarController.dispose();
+});
+window.addEventListener("focus", () => void refreshMicrophonePermission());
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) void refreshMicrophonePermission();
+});
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local") return;
+  if (changes[MCP_TOOL_POLICIES_STORAGE_KEY]) {
+    applyMcpToolPolicies(changes[MCP_TOOL_POLICIES_STORAGE_KEY].newValue);
+  }
+  if (changes[PETALS_STORAGE_KEY]) {
+    applyPetals(changes[PETALS_STORAGE_KEY].newValue !== false);
+  }
+  if (changes[AVATAR_MODE_STORAGE_KEY]) {
+    void avatarController.applyMode(normalizeAvatarMode(changes[AVATAR_MODE_STORAGE_KEY].newValue));
+  }
+  if (changes[API_KEY_STORAGE_KEY]?.newValue && sessionStatus !== "ready") {
+    setSessionStatus("idle", "Settings saved. Lumi is ready to start with the selected voice.");
+  }
+  if (!changes[MICROPHONE_GRANTED_STORAGE_KEY]) return;
+  void refreshMicrophonePermission();
+  if (changes[MICROPHONE_GRANTED_STORAGE_KEY].newValue) {
+    setSessionStatus("idle", "Microphone allowed. Return to Lumi and press Start voice.");
+  }
+});
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === EXTENSION_EVENTS.translationState) {
+    setLiveTranslationBadge(message.state || "off", message.targetLanguageCode || message.detail || "");
+    if (message.state === "error" && message.detail) {
+      elements.statusLine.textContent = message.detail;
+      avatarController.transitionState("error", { forMs: 2080 });
+    } else if (message.detail === "Tab audio authorized" && sessionStatus !== "ready") {
+      elements.statusLine.textContent = "Active tab audio authorized. Start voice when you are ready.";
+    }
+    return;
+  }
+  if (message?.type === PANEL_LIFECYCLE_MESSAGE) {
+    if (message.state === "opened") petalEmitter.restart();
+    else if (message.state === "closed") petalEmitter.stop();
+    return;
+  }
+  if (message?.type === EXTENSION_EVENTS.targetChanged) void refreshTarget();
+});
+
+async function initialize() {
+  const stored = await chrome.storage.local.get([API_KEY_STORAGE_KEY, PETALS_STORAGE_KEY, AVATAR_MODE_STORAGE_KEY]);
+  const savedKey = String(stored[API_KEY_STORAGE_KEY] || "");
+  applyPetals(stored[PETALS_STORAGE_KEY] !== false);
+  const storedAvatarMode = normalizeAvatarMode(stored[AVATAR_MODE_STORAGE_KEY]);
+  if (stored[AVATAR_MODE_STORAGE_KEY] !== storedAvatarMode) {
+    await chrome.storage.local.set({ [AVATAR_MODE_STORAGE_KEY]: storedAvatarMode });
+  }
+  await avatarController.applyMode(storedAvatarMode);
+  if (!savedKey) setSessionStatus("idle", "Open settings and save a Gemini API key before starting voice.");
+  else setSessionStatus("idle", "Ready. PageAgent will follow whichever web tab you open.");
+  await refreshMicrophonePermission();
+  await refreshTarget();
+  const translationStatus = await sendRuntime("live_translation_status").catch(() => null);
+  if (translationStatus?.prepared) {
+    setLiveTranslationBadge(translationStatus.state || "off", translationStatus.targetLanguageCode || "");
+    elements.statusLine.textContent = "Active tab audio authorized. Start voice when you are ready.";
+  }
+  panelAudio.startAnimations();
+  setInterval(refreshTarget, 2800);
+}
+
+void initialize();

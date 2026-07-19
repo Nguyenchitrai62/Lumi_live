@@ -31,6 +31,26 @@ Live translation uses 100 ms PCM input chunks and a bounded realtime input queue
 
 After rebuilding, press **Reload** on `chrome://extensions` and reopen any old Lumi Live or Settings pages.
 
+## Source layout
+
+The extension root contains only `manifest.json`, documentation, generated/runtime assets, and domain directories. Chrome and the build pipeline reference the domain entrypoints directly, so there are no duplicate compatibility wrappers to keep in sync.
+
+Implementations are grouped by responsibility:
+
+| Directory | Responsibility |
+| --- | --- |
+| `background/` | Manifest V3 worker orchestration and MCP service lifecycle |
+| `browser/` | PageAgent controller, direct media capture, and visual browser effects |
+| `core/` | Shared extension events, storage keys, policies, and active-tab context |
+| `live/` | Gemini Live session, translation, and PCM audio utilities |
+| `mcp/` | MCP HTTP client and Gemini schema conversion |
+| `offscreen/` | Authorized tab-audio translation document |
+| `settings/` | Settings page and MCP permission UI |
+| `side-panel/` | Main Lumi panel, avatars, petals, and MCP activity UI |
+| `tests/` | Unit, integration, manifest, asset, and import-graph checks |
+
+`manifest.json` loads `background/index.js`, `side-panel/index.html`, and `settings/index.html` directly. `extensions/build.mjs` bundles `browser/controller.js` into `dist/controller.js`. `npm test` validates these paths and recursively resolves every local JavaScript import reachable at runtime.
+
 ## Avatars
 
 The Pixel Companion is enabled by default and starts animating in `idle` before voice starts. The avatar button in the topbar switches between the Pixel Companion and the VTuber.
@@ -55,7 +75,7 @@ The build copies the source atlas from `public/avatars/pixel` and the layered VT
 
 - **PAGEAGENT TARGET** follows the active normal web tab automatically.
 - Page element guides are optional and disabled by default.
-- Switching to a tab that already exists happens immediately without an overlay transition. For a destination that is not already available, Lumi completes the Google Search sequence on the current page before Chrome creates and activates the new tab. Page scrolling is animated over 1 second with an on-screen direction/progress HUD. Form text is always revealed over 0.5 seconds.
+- Switching to a tab that already exists happens immediately without an overlay transition. For a destination that is not already available, Lumi completes the Google Search sequence on the current page before Chrome creates and activates the new tab. Every page-scroll call is animated over 1 second with an on-screen direction/progress HUD. A `text` target reveals matching rendered content, while `position=0` is the exact top, `position=0.5` the middle, and `position=1` the exact bottom. Form text is always revealed over 0.5 seconds.
 - While Lumi is generating or running a browser/MCP tool, the send button becomes a circular stop control. Cancelling interrupts the Gemini turn, stops playback and visual actions, and aborts active MCP requests without ending the voice session.
 - If a PageAgent click opens a YouTube video link or starts a paused YouTube video, Lumi locally suppresses only its remaining response audio for that turn. Output transcription still appears, and the next turn speaks normally even while the video remains open.
 - Video fullscreen controls use PageAgent's standard click path. Lumi does not request the `debugger` permission or add a synthetic keyboard fallback that cannot provide genuine user activation.

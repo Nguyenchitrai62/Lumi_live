@@ -1097,6 +1097,324 @@ gl_Position = vec4(aPosition, 0.0, 1.0);
     }
   });
 
+  // extensions/lumi-live/live/audio-utils.js
+  function bytesToBase64(bytes) {
+    let binary = "";
+    for (let index = 0; index < bytes.length; index += 1) {
+      binary += String.fromCharCode(bytes[index]);
+    }
+    return btoa(binary);
+  }
+  var MAX_LIVE_AUDIO_SOCKET_BACKLOG_BYTES = 48 * 1024;
+  function resampleTo16k(input, inputRate) {
+    if (inputRate === 16e3) return input;
+    const ratio = inputRate / 16e3;
+    const output = new Float32Array(Math.max(1, Math.floor(input.length / ratio)));
+    for (let index = 0; index < output.length; index += 1) {
+      const start = Math.floor(index * ratio);
+      const end = Math.min(input.length, Math.floor((index + 1) * ratio));
+      let total = 0;
+      for (let sourceIndex = start; sourceIndex < end; sourceIndex += 1) {
+        total += input[sourceIndex];
+      }
+      output[index] = total / Math.max(1, end - start);
+    }
+    return output;
+  }
+  function floatToPcm16(input) {
+    const pcm = new Int16Array(input.length);
+    for (let index = 0; index < input.length; index += 1) {
+      const sample = Math.max(-1, Math.min(1, input[index]));
+      pcm[index] = sample < 0 ? sample * 32768 : sample * 32767;
+    }
+    return new Uint8Array(pcm.buffer);
+  }
+
+  // extensions/lumi-live/browser/media-element-audio-controller.js
+  var OFFSCREEN_TARGET = "lumi_live_offscreen";
+  var EXTERNAL_AUDIO_FRAME_SAMPLES = 1600;
+  function createMediaElementAudioController() {
+    let mediaElementAudioCapture = null;
+    const mediaElementAudioRoutes = /* @__PURE__ */ new WeakMap();
+    function chooseActiveMediaElement() {
+      const candidates = [...document.querySelectorAll("video, audio")].filter((element) => {
+        const rect = element.getBoundingClientRect();
+        return !element.paused && !element.ended && element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && (element.tagName === "AUDIO" || rect.width > 0 && rect.height > 0);
+      }).sort((left, right) => {
+        const leftRect = left.getBoundingClientRect();
+        const rightRect = right.getBoundingClientRect();
+        const leftScore = left.tagName === "AUDIO" ? 1 : leftRect.width * leftRect.height;
+        const rightScore = right.tagName === "AUDIO" ? 1 : rightRect.width * rightRect.height;
+        return rightScore - leftScore;
+      });
+      return candidates[0] || null;
+    }
+    function createExternalPcmWriter(capture) {
+      let frame = new Float32Array(EXTERNAL_AUDIO_FRAME_SAMPLES);
+      let offset = 0;
+      return (samples, sampleRate) => {
+        const mono16k = resampleTo16k(samples, sampleRate);
+        let inputOffset = 0;
+        while (inputOffset < mono16k.length && mediaElementAudioCapture === capture) {
+          const sampleCount = Math.min(frame.length - offset, mono16k.length - inputOffset);
+          frame.set(mono16k.subarray(inputOffset, inputOffset + sampleCount), offset);
+          offset += sampleCount;
+          inputOffset += sampleCount;
+          if (offset !== frame.length) continue;
+          const data = bytesToBase64(floatToPcm16(frame));
+          chrome.runtime.sendMessage({
+            target: OFFSCREEN_TARGET,
+            command: "external_audio",
+            data
+          }).catch(() => {
+          });
+          frame = new Float32Array(EXTERNAL_AUDIO_FRAME_SAMPLES);
+          offset = 0;
+        }
+      };
+    }
+    async function stopMediaElementAudioCapture() {
+      const capture = mediaElementAudioCapture;
+      mediaElementAudioCapture = null;
+      if (!capture) return { success: true, stopped: false };
+      capture.started = false;
+      capture.element?.removeEventListener("ended", capture.onMediaEnded);
+      capture.element?.removeEventListener("emptied", capture.onMediaEnded);
+      await capture.reader?.cancel().catch(() => {
+      });
+      capture.processorNode?.disconnect();
+      capture.silentGain?.disconnect();
+      if (capture.scriptProcessor) capture.scriptProcessor.onaudioprocess = null;
+      if (capture.mode === "mediaElementSource") {
+        const route = capture.route;
+        if (route?.audioContext.state !== "closed") {
+          route.playbackGain.gain.cancelScheduledValues(route.audioContext.currentTime);
+          route.playbackGain.gain.setTargetAtTime(1, route.audioContext.currentTime, 0.025);
+        }
+      } else {
+        capture.sourceNode?.disconnect();
+        await capture.audioContext?.close().catch(() => {
+        });
+        capture.stream?.getTracks().forEach((track) => track.stop());
+        if (capture.element?.isConnected && Math.abs(capture.element.volume - capture.duckedVolume) < 2e-3) {
+          capture.element.volume = capture.originalVolume;
+        }
+      }
+      return { success: true, stopped: true };
+    }
+    function assertWebAudioSourceIsReadable(element) {
+      const sourceUrl = String(element.currentSrc || element.src || "");
+      if (!sourceUrl) return;
+      const parsed = new URL(sourceUrl, location.href);
+      if (["blob:", "data:"].includes(parsed.protocol)) return;
+      if (parsed.origin === location.origin || element.crossOrigin) return;
+      throw new Error("This cross-origin player does not expose CORS-readable audio.");
+    }
+    async function prepareMediaElementAudioCapture() {
+      await stopMediaElementAudioCapture();
+      const element = chooseActiveMediaElement();
+      if (!element) {
+        throw new Error("No actively playing HTML video or audio element was found in this tab.");
+      }
+      const captureStream = element.captureStream || element.mozCaptureStream;
+      let stream = null;
+      let audioTrack = null;
+      if (typeof captureStream === "function") {
+        try {
+          stream = captureStream.call(element);
+          audioTrack = stream.getAudioTracks()[0] || null;
+        } catch {
+          stream = null;
+        }
+      }
+      if (!audioTrack) {
+        stream?.getTracks().forEach((track) => track.stop());
+        assertWebAudioSourceIsReadable(element);
+      }
+      const capture = {
+        mode: audioTrack ? "captureStream" : "mediaElementSource",
+        element,
+        stream,
+        audioTrack,
+        originalVolume: element.volume,
+        duckedVolume: Math.min(element.volume, 0.06),
+        started: false,
+        reader: null,
+        audioContext: null,
+        sourceNode: null,
+        processorNode: null,
+        silentGain: null,
+        scriptProcessor: null,
+        route: null,
+        onMediaEnded: null
+      };
+      mediaElementAudioCapture = capture;
+      return {
+        success: true,
+        prepared: true,
+        source: element.tagName.toLowerCase(),
+        captureMode: capture.mode,
+        title: document.title,
+        url: location.href
+      };
+    }
+    async function pumpTrackProcessor(capture, writePcm) {
+      const TrackProcessor = globalThis.MediaStreamTrackProcessor;
+      if (typeof TrackProcessor !== "function") return false;
+      let reader;
+      try {
+        const processor = new TrackProcessor({ track: capture.audioTrack });
+        reader = processor.readable.getReader();
+      } catch {
+        return false;
+      }
+      capture.reader = reader;
+      void (async () => {
+        let failure = null;
+        try {
+          while (mediaElementAudioCapture === capture && capture.started) {
+            const { value, done } = await reader.read();
+            if (done || !value) break;
+            try {
+              const samples = new Float32Array(value.numberOfFrames);
+              const channelCount = Math.max(1, value.numberOfChannels || 1);
+              for (let channel = 0; channel < channelCount; channel += 1) {
+                const plane = new Float32Array(value.numberOfFrames);
+                value.copyTo(plane, { planeIndex: channel, format: "f32-planar" });
+                for (let index = 0; index < samples.length; index += 1) {
+                  samples[index] += plane[index] / channelCount;
+                }
+              }
+              writePcm(samples, value.sampleRate);
+            } finally {
+              value.close();
+            }
+          }
+        } catch (error) {
+          failure = error;
+        }
+        if (mediaElementAudioCapture === capture && capture.started) {
+          const detail = failure instanceof Error ? failure.message : "The playing media element stopped providing audio.";
+          await stopMediaElementAudioCapture();
+          chrome.runtime.sendMessage({
+            target: OFFSCREEN_TARGET,
+            command: "external_source_ended",
+            detail
+          }).catch(() => {
+          });
+        }
+      })();
+      return true;
+    }
+    async function pumpScriptProcessor(capture, writePcm) {
+      const audioContext = new AudioContext({ latencyHint: "interactive" });
+      const sourceNode = audioContext.createMediaStreamSource(capture.stream);
+      const processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+      const silentGain = audioContext.createGain();
+      silentGain.gain.value = 0;
+      processorNode.onaudioprocess = (event) => {
+        if (mediaElementAudioCapture !== capture || !capture.started) return;
+        writePcm(event.inputBuffer.getChannelData(0), event.inputBuffer.sampleRate);
+      };
+      sourceNode.connect(processorNode);
+      processorNode.connect(silentGain);
+      silentGain.connect(audioContext.destination);
+      capture.audioContext = audioContext;
+      capture.sourceNode = sourceNode;
+      capture.processorNode = processorNode;
+      capture.silentGain = silentGain;
+      capture.scriptProcessor = processorNode;
+      await audioContext.resume();
+      if (audioContext.state !== "running") {
+        throw new Error("Chrome suspended direct media capture for this page.");
+      }
+    }
+    async function pumpMediaElementSource(capture, writePcm) {
+      let route = mediaElementAudioRoutes.get(capture.element);
+      if (!route || route.audioContext.state === "closed") {
+        const audioContext = new AudioContext({ latencyHint: "interactive" });
+        await audioContext.resume();
+        if (audioContext.state !== "running") {
+          await audioContext.close().catch(() => {
+          });
+          throw new Error("Chrome suspended direct audio access for this video.");
+        }
+        const sourceNode = audioContext.createMediaElementSource(capture.element);
+        const playbackGain = audioContext.createGain();
+        playbackGain.gain.value = 1;
+        sourceNode.connect(playbackGain);
+        playbackGain.connect(audioContext.destination);
+        route = { audioContext, sourceNode, playbackGain };
+        mediaElementAudioRoutes.set(capture.element, route);
+      }
+      await route.audioContext.resume();
+      if (route.audioContext.state !== "running") {
+        throw new Error("Chrome suspended direct audio access for this video.");
+      }
+      const processorNode = route.audioContext.createScriptProcessor(4096, 1, 1);
+      const silentGain = route.audioContext.createGain();
+      silentGain.gain.value = 0;
+      processorNode.onaudioprocess = (event) => {
+        if (mediaElementAudioCapture !== capture || !capture.started) return;
+        writePcm(event.inputBuffer.getChannelData(0), event.inputBuffer.sampleRate);
+      };
+      route.sourceNode.connect(processorNode);
+      processorNode.connect(silentGain);
+      silentGain.connect(route.audioContext.destination);
+      route.playbackGain.gain.cancelScheduledValues(route.audioContext.currentTime);
+      route.playbackGain.gain.setTargetAtTime(0.06, route.audioContext.currentTime, 0.025);
+      capture.route = route;
+      capture.audioContext = route.audioContext;
+      capture.sourceNode = route.sourceNode;
+      capture.processorNode = processorNode;
+      capture.silentGain = silentGain;
+      capture.scriptProcessor = processorNode;
+    }
+    async function startMediaElementAudioCapture() {
+      const capture = mediaElementAudioCapture;
+      if (!capture) throw new Error("Prepare the active media element before starting audio capture.");
+      if (capture.started) return { success: true, started: true, alreadyActive: true };
+      capture.started = true;
+      capture.onMediaEnded = () => {
+        if (mediaElementAudioCapture !== capture || !capture.started) return;
+        void stopMediaElementAudioCapture().then(() => {
+          chrome.runtime.sendMessage({
+            target: OFFSCREEN_TARGET,
+            command: "external_source_ended",
+            detail: "The playing media element ended."
+          }).catch(() => {
+          });
+        });
+      };
+      capture.element.addEventListener("ended", capture.onMediaEnded, { once: true });
+      capture.element.addEventListener("emptied", capture.onMediaEnded, { once: true });
+      const writePcm = createExternalPcmWriter(capture);
+      try {
+        if (capture.mode === "mediaElementSource") {
+          await pumpMediaElementSource(capture, writePcm);
+        } else {
+          capture.element.volume = capture.duckedVolume;
+          const usingTrackProcessor = await pumpTrackProcessor(capture, writePcm);
+          if (!usingTrackProcessor) await pumpScriptProcessor(capture, writePcm);
+        }
+      } catch (error) {
+        await stopMediaElementAudioCapture();
+        throw error;
+      }
+      return {
+        success: true,
+        started: true,
+        sourcePlaybackVolume: capture.duckedVolume
+      };
+    }
+    return {
+      isPrepared: () => Boolean(mediaElementAudioCapture),
+      prepare: prepareMediaElementAudioCapture,
+      start: startMediaElementAudioCapture,
+      stop: stopMediaElementAudioCapture
+    };
+  }
+
   // node_modules/@page-agent/page-controller/dist/lib/page-controller.js
   var __defProp2 = Object.defineProperty;
   var __exportAll = (all, no_symbols) => {
@@ -2816,106 +3134,116 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     }
   };
 
-  // extensions/lumi-live/page-visual-effects.js
-  var TAB_TRANSITION_HOST_ID = "lumi-page-agent-tab-transition";
-  var SCROLL_EFFECT_HOST_ID = "lumi-page-agent-scroll-effect";
-  var tabTransitionCleanupTimer = null;
+  // extensions/lumi-live/browser/effects/timing.js
   function wait(milliseconds) {
     return new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
-  function setNativeControlValue(element, value) {
-    const elementWindow = element.ownerDocument.defaultView || window;
-    const prototype = element.tagName === "TEXTAREA" ? elementWindow.HTMLTextAreaElement.prototype : elementWindow.HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-    if (!setter) throw new Error("The input does not expose a native value setter.");
-    setter.call(element, value);
-    try {
-      element.setSelectionRange(value.length, value.length);
-    } catch {
-    }
-  }
-  function replaceTextAndDispatchInput(element, value, inputType, data = null) {
-    const elementWindow = element.ownerDocument.defaultView || window;
-    const InputEventConstructor = elementWindow.InputEvent || InputEvent;
-    element.dispatchEvent(new InputEventConstructor("beforeinput", {
-      bubbles: true,
-      cancelable: true,
-      inputType,
-      data
-    }));
-    replaceVisibleText(element, value);
-    element.dispatchEvent(new InputEventConstructor("input", {
-      bubbles: true,
-      inputType,
-      data
-    }));
-  }
-  function replaceVisibleText(element, value) {
-    if (element.isContentEditable) {
-      element.innerText = value;
-      return;
-    }
-    setNativeControlValue(element, value);
-  }
-  async function typeTextGradually(element, text, durationMs, signal2) {
-    const isTextControl = element?.tagName === "INPUT" || element?.tagName === "TEXTAREA" || element?.isContentEditable;
-    if (!isTextControl) {
-      throw new Error("Element is not an input, textarea, or contenteditable.");
-    }
-    const elementWindow = element.ownerDocument.defaultView || window;
-    const rawText = String(text);
-    const segmenter = elementWindow.Intl?.Segmenter ? new elementWindow.Intl.Segmenter(void 0, { granularity: "grapheme" }) : null;
-    const characters = segmenter ? [...segmenter.segment(rawText)].map(({ segment }) => segment) : Array.from(rawText);
-    const duration = Math.max(0, Number(durationMs) || 0);
-    const originalValue = element.isContentEditable ? element.innerText : element.value;
-    const throwIfCancelled = () => {
-      if (signal2?.aborted) throw new DOMException("The page action was cancelled by the user.", "AbortError");
+
+  // extensions/lumi-live/browser/effects/tab-transition.js
+  var TAB_TRANSITION_HOST_ID = "lumi-page-agent-tab-transition";
+  var tabTransitionCleanupTimer = null;
+  function createGoogleSearchTransitionHost() {
+    document.getElementById(TAB_TRANSITION_HOST_ID)?.remove();
+    const host = document.createElement("div");
+    host.id = TAB_TRANSITION_HOST_ID;
+    host.style.cssText = "all:initial;position:fixed;z-index:2147483647;inset:0;pointer-events:none;";
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+    <style>
+      .veil { position:absolute; inset:0; overflow:hidden; background:rgba(19,15,34,.58); backdrop-filter:blur(14px); }
+      .stage { position:absolute; left:50%; top:50%; width:min(620px,calc(100vw - 36px)); transform:translate3d(-50%,calc(-50% + 14px),0) scale(.96); opacity:0; animation:lumi-search-in 1s cubic-bezier(.2,.8,.2,1) forwards; }
+      .brand { display:flex; justify-content:center; margin:0 0 22px; font:600 clamp(36px,7vw,62px)/1 Arial,sans-serif; letter-spacing:-.08em; filter:drop-shadow(0 10px 25px rgba(0,0,0,.2)); }
+      .brand span:nth-child(1),.brand span:nth-child(4) { color:#4285f4; }
+      .brand span:nth-child(2),.brand span:nth-child(6) { color:#ea4335; }
+      .brand span:nth-child(3) { color:#fbbc05; }
+      .brand span:nth-child(5) { color:#34a853; }
+      .search { display:flex; align-items:center; gap:14px; min-height:58px; padding:0 20px; border:1px solid #dfe1e5; border-radius:999px; background:#fff; box-shadow:0 8px 24px rgba(32,33,36,.24); }
+      .magnifier { position:relative; width:17px; height:17px; flex:0 0 auto; border:2px solid #9aa0a6; border-radius:50%; }
+      .magnifier::after { content:""; position:absolute; width:7px; height:2px; right:-6px; bottom:-3px; border-radius:2px; background:#9aa0a6; transform:rotate(45deg); }
+      .query { min-width:0; overflow:hidden; color:#202124; font:400 18px/1.4 Arial,sans-serif; white-space:nowrap; text-overflow:ellipsis; }
+      .caret { width:2px; height:24px; flex:0 0 auto; border-radius:2px; background:#4285f4; animation:lumi-caret .7s step-end infinite; }
+      .actions { display:flex; justify-content:center; margin-top:20px; }
+      .search-button { position:relative; min-width:132px; padding:10px 18px; border:1px solid #f8f9fa; border-radius:4px; color:#3c4043; background:#f8f9fa; box-shadow:0 1px 1px rgba(0,0,0,.08); font:500 14px/1 Arial,sans-serif; text-align:center; transition:background .1s ease,border-color .1s ease,box-shadow .1s ease,transform .1s ease; }
+      .pointer { position:absolute; z-index:2; left:50%; top:50%; width:30px; height:34px; opacity:0; transform:translate3d(150px,78px,0); filter:drop-shadow(0 3px 4px rgba(0,0,0,.35)); }
+      .pointer svg { display:block; width:100%; height:100%; overflow:visible; }
+      .click-ring { position:absolute; left:7px; top:7px; width:12px; height:12px; border:2px solid rgba(66,133,244,.9); border-radius:50%; opacity:0; transform:scale(.25); }
+      .status { margin:14px 0 0; color:rgba(255,255,255,.9); font:700 12px/1.35 "Segoe UI",sans-serif; letter-spacing:.04em; text-align:center; text-shadow:0 2px 8px rgba(0,0,0,.32); }
+      :host([data-state="aim"]) .caret,:host([data-state="click"]) .caret { opacity:0; animation:none; }
+      :host([data-state="aim"]) .pointer { animation:lumi-pointer-aim .36s cubic-bezier(.2,.75,.2,1) forwards; }
+      :host([data-state="click"]) .pointer { opacity:1; transform:translate3d(10px,5px,0) scale(.92); }
+      :host([data-state="click"]) .click-ring { animation:lumi-click-ring .24s ease-out forwards; }
+      :host([data-state="click"]) .search-button { border-color:#dadce0; background:#eef3fe; box-shadow:inset 0 1px 3px rgba(60,64,67,.2); transform:translateY(2px); }
+      @keyframes lumi-search-in { to { transform:translate3d(-50%,-50%,0) scale(1); opacity:1; } }
+      @keyframes lumi-caret { 50% { opacity:0; } }
+      @keyframes lumi-pointer-aim { from { opacity:0; transform:translate3d(150px,78px,0); } 18% { opacity:1; } to { opacity:1; transform:translate3d(10px,5px,0); } }
+      @keyframes lumi-click-ring { from { opacity:.9; transform:scale(.25); } to { opacity:0; transform:scale(2.4); } }
+      @media (prefers-reduced-motion:reduce) { .stage { animation:none; transform:translate3d(-50%,-50%,0); opacity:1; } .caret { animation:none; } :host([data-state="aim"]) .pointer { animation:none; opacity:1; transform:translate3d(10px,5px,0); } }
+    </style>
+    <div class="veil">
+      <div class="stage">
+        <div class="brand" aria-hidden="true"><span>G</span><span>o</span><span>o</span><span>g</span><span>l</span><span>e</span></div>
+        <div class="search"><span class="magnifier"></span><span class="query"></span><span class="caret"></span></div>
+        <div class="actions"><div class="search-button">Google Search
+          <span class="pointer" aria-hidden="true">
+            <svg viewBox="0 0 30 34"><path d="M3 2.5 25.5 23l-10.4.6-5.2 8.8z" fill="#fff" stroke="#202124" stroke-width="2" stroke-linejoin="round"/></svg>
+            <span class="click-ring"></span>
+          </span>
+        </div></div>
+        <div class="status">Lumi is preparing a new tab</div>
+      </div>
+    </div>`;
+    (document.documentElement || document.body).append(host);
+    return {
+      host,
+      query: shadow.querySelector(".query"),
+      status: shadow.querySelector(".status")
     };
-    throwIfCancelled();
-    element.focus({ preventScroll: true });
-    replaceTextAndDispatchInput(element, "", "deleteContentBackward");
-    try {
-      if (characters.length && duration > 0) {
-        const startedAt = elementWindow.performance.now();
-        let renderedCount = 0;
-        while (renderedCount < characters.length) {
-          throwIfCancelled();
-          const elapsed = elementWindow.performance.now() - startedAt;
-          const nextCount = Math.min(
-            characters.length,
-            Math.max(1, Math.ceil(elapsed / duration * characters.length))
-          );
-          if (nextCount > renderedCount) {
-            const insertedText = characters.slice(renderedCount, nextCount).join("");
-            replaceTextAndDispatchInput(
-              element,
-              characters.slice(0, nextCount).join(""),
-              "insertText",
-              insertedText
-            );
-            renderedCount = nextCount;
-          }
-          if (renderedCount < characters.length) {
-            await new Promise((resolve) => elementWindow.requestAnimationFrame(resolve));
-          }
-        }
-        const remaining = duration - (elementWindow.performance.now() - startedAt);
-        if (remaining > 0) await wait(remaining);
-      } else if (characters.length) {
-        replaceTextAndDispatchInput(element, characters.join(""), "insertText", characters.join(""));
-      }
-      throwIfCancelled();
-    } catch (error) {
-      if (signal2?.aborted) {
-        replaceTextAndDispatchInput(element, originalValue, "insertReplacementText", originalValue);
-      }
-      element.blur();
-      throw error;
-    }
-    const EventConstructor = elementWindow.Event || Event;
-    element.dispatchEvent(new EventConstructor("change", { bubbles: true }));
-    element.blur();
   }
+  async function revealSearchText(element, text, durationMs = 500) {
+    const elementWindow = element.ownerDocument.defaultView || window;
+    const segmenter = elementWindow.Intl?.Segmenter ? new elementWindow.Intl.Segmenter(void 0, { granularity: "grapheme" }) : null;
+    const characters = segmenter ? [...segmenter.segment(String(text))].map(({ segment }) => segment) : Array.from(String(text));
+    const startedAt = elementWindow.performance.now();
+    let renderedCount = 0;
+    while (renderedCount < characters.length) {
+      const elapsed = elementWindow.performance.now() - startedAt;
+      const nextCount = Math.min(
+        characters.length,
+        Math.max(1, Math.ceil(elapsed / durationMs * characters.length))
+      );
+      if (nextCount > renderedCount) {
+        element.textContent = characters.slice(0, nextCount).join("");
+        renderedCount = nextCount;
+      }
+      if (renderedCount < characters.length) {
+        await new Promise((resolve) => elementWindow.requestAnimationFrame(resolve));
+      }
+    }
+    const remaining = durationMs - (elementWindow.performance.now() - startedAt);
+    if (remaining > 0) await wait(remaining);
+  }
+  function clearTabTransition() {
+    clearTimeout(tabTransitionCleanupTimer);
+    tabTransitionCleanupTimer = null;
+    document.getElementById(TAB_TRANSITION_HOST_ID)?.remove();
+  }
+  async function showGoogleSearchDeparture(searchText = "new tab") {
+    clearTabTransition();
+    const { host, query, status } = createGoogleSearchTransitionHost();
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await wait(1e3);
+    status.textContent = "Lumi is typing the destination";
+    await revealSearchText(query, String(searchText || "new tab"), 500);
+    status.textContent = "Opening a new tab";
+    host.dataset.state = "aim";
+    await wait(360);
+    host.dataset.state = "click";
+    await wait(120);
+    tabTransitionCleanupTimer = setTimeout(() => host.remove(), 12e3);
+  }
+
+  // extensions/lumi-live/browser/effects/scroll.js
+  var SCROLL_EFFECT_HOST_ID = "lumi-page-agent-scroll-effect";
   function createScrollEffect(direction) {
     document.getElementById(SCROLL_EFFECT_HOST_ID)?.remove();
     const host = document.createElement("div");
@@ -3028,18 +3356,206 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       frameId = requestAnimationFrame(frame);
     });
   }
+  function normalizeSearchText(value) {
+    return String(value ?? "").normalize("NFKD").replace(new RegExp("\\p{M}", "gu"), "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+  }
+  function isRenderedTextCandidate(element) {
+    if (!element || element.matches("script,style,noscript,template,head,meta,link")) return false;
+    const style = (element.ownerDocument.defaultView || window).getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+    return Array.from(element.getClientRects()).some((rect) => rect.width > 0 && rect.height > 0);
+  }
+  function textMatchRank(value, query) {
+    if (value === query) return 0;
+    if (value.startsWith(query) || value.endsWith(query)) return 1;
+    return value.includes(query) ? 2 : -1;
+  }
+  function semanticTextRank(element) {
+    if (/^H[1-6]$/.test(element.tagName) || element.getAttribute("role") === "heading") return 0;
+    if (["SECTION", "ARTICLE", "MAIN"].includes(element.tagName)) return 1;
+    if (["P", "LI", "DT", "DD", "LABEL", "LEGEND", "FIGCAPTION"].includes(element.tagName)) return 2;
+    return 3;
+  }
+  function elementDepth(element) {
+    let depth = 0;
+    for (let current = element; current?.parentElement; current = current.parentElement) depth += 1;
+    return depth;
+  }
+  function findTextElement(text, root, occurrence = 1) {
+    const query = normalizeSearchText(text);
+    if (!query) return null;
+    const searchRoot = root?.isConnected ? root : document.body || document.documentElement;
+    if (!searchRoot) return null;
+    const ownerDocument = searchRoot.ownerDocument || document;
+    const showElement = ownerDocument.defaultView?.NodeFilter?.SHOW_ELEMENT ?? 1;
+    const walker = ownerDocument.createTreeWalker(searchRoot, showElement);
+    const matches = [];
+    let element = searchRoot;
+    let scanned = 0;
+    while (element && scanned < 2e4 && matches.length < 300) {
+      scanned += 1;
+      const attributeText = [
+        element.getAttribute("aria-label"),
+        element.getAttribute("title")
+      ].filter(Boolean).join(" ");
+      const preliminaryText = normalizeSearchText(`${attributeText} ${element.textContent || ""}`);
+      if (preliminaryText.includes(query) && isRenderedTextCandidate(element)) {
+        const visibleText = String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim();
+        const values = [attributeText, visibleText].map((value) => ({ raw: value, normalized: normalizeSearchText(value) })).filter(({ normalized }) => normalized);
+        const rankedValues = values.map((value) => ({ ...value, rank: textMatchRank(value.normalized, query) })).filter(({ rank }) => rank >= 0).sort((a, b) => a.rank - b.rank || a.normalized.length - b.normalized.length);
+        if (rankedValues.length) {
+          const best = rankedValues[0];
+          matches.push({
+            element,
+            matchRank: best.rank,
+            semanticRank: semanticTextRank(element),
+            textLength: best.normalized.length,
+            depth: elementDepth(element),
+            matchedText: best.raw.slice(0, 500)
+          });
+        }
+      }
+      element = walker.nextNode();
+    }
+    if (!matches.length) return null;
+    const bestMatchRank = Math.min(...matches.map((match) => match.matchRank));
+    const rankedMatches = matches.filter((match) => match.matchRank === bestMatchRank);
+    const bestSemanticRank = Math.min(...rankedMatches.map((match) => match.semanticRank));
+    const preferredMatches = rankedMatches.filter((match) => match.semanticRank === bestSemanticRank).sort((a, b) => a.textLength - b.textLength || b.depth - a.depth);
+    const specificMatches = [];
+    for (const candidate of preferredMatches) {
+      if (specificMatches.some((match) => candidate.element.contains(match.element))) continue;
+      specificMatches.push(candidate);
+    }
+    specificMatches.sort((a, b) => {
+      if (a.element === b.element) return 0;
+      return a.element.compareDocumentPosition(b.element) & 4 ? -1 : 1;
+    });
+    const selected = specificMatches[occurrence - 1];
+    return selected ? { ...selected, matchCount: specificMatches.length } : {
+      missingOccurrence: true,
+      matchCount: specificMatches.length
+    };
+  }
+  function collectScrollEntries(element, alignment) {
+    const ownerDocument = element.ownerDocument || document;
+    const scrollers = [];
+    for (let current = element.parentElement; current; current = current.parentElement) {
+      if (isScrollableElement(current)) scrollers.push(current);
+    }
+    const documentScroller = ownerDocument.scrollingElement || ownerDocument.documentElement;
+    if (documentScroller && !scrollers.includes(documentScroller)) scrollers.push(documentScroller);
+    const entries = scrollers.map((scroller) => ({
+      element: scroller,
+      startTop: scroller.scrollTop,
+      startLeft: scroller.scrollLeft,
+      targetTop: scroller.scrollTop,
+      previousScrollBehavior: scroller.style.scrollBehavior
+    }));
+    try {
+      for (const entry of entries) entry.element.style.scrollBehavior = "auto";
+      element.scrollIntoView({ behavior: "auto", block: alignment, inline: "nearest" });
+      for (const entry of entries) entry.targetTop = entry.element.scrollTop;
+    } finally {
+      for (const entry of entries) {
+        entry.element.scrollTop = entry.startTop;
+        entry.element.scrollLeft = entry.startLeft;
+        entry.element.style.scrollBehavior = entry.previousScrollBehavior;
+      }
+    }
+    return entries;
+  }
+  async function animateScrollEntries(entries, durationMs, effect, signal2) {
+    const elementWindow = entries[0]?.element.ownerDocument.defaultView || window;
+    const startedAt = elementWindow.performance.now();
+    const duration = Math.max(1, durationMs);
+    await new Promise((resolve, reject) => {
+      let frameId = null;
+      const abort = () => {
+        if (frameId !== null) elementWindow.cancelAnimationFrame(frameId);
+        reject(abortError());
+      };
+      const frame = (now) => {
+        if (signal2?.aborted) {
+          abort();
+          return;
+        }
+        const progress = Math.min(1, (now - startedAt) / duration);
+        const easedProgress = easeInOutCubic(progress);
+        for (const entry of entries) {
+          entry.element.scrollTop = entry.startTop + (entry.targetTop - entry.startTop) * easedProgress;
+        }
+        effect.update(progress);
+        if (progress >= 1) {
+          signal2?.removeEventListener("abort", abort);
+          resolve();
+          return;
+        }
+        frameId = elementWindow.requestAnimationFrame(frame);
+      };
+      if (signal2?.aborted) {
+        reject(abortError());
+        return;
+      }
+      signal2?.addEventListener("abort", abort, { once: true });
+      frameId = elementWindow.requestAnimationFrame(frame);
+    });
+  }
+  async function scrollToTextGradually({
+    text,
+    occurrence = 1,
+    alignment = "center",
+    root,
+    durationMs = 1e3,
+    signal: signal2
+  }) {
+    const match = findTextElement(text, root, occurrence);
+    if (!match) {
+      return {
+        success: false,
+        message: `No rendered page content matched "${String(text).slice(0, 200)}". The content may not be loaded in the DOM yet.`
+      };
+    }
+    if (match.missingOccurrence) {
+      return {
+        success: false,
+        message: `Found ${match.matchCount} matching content item(s), but occurrence ${occurrence} was requested.`,
+        matchCount: match.matchCount
+      };
+    }
+    const entries = collectScrollEntries(match.element, alignment);
+    const motionEntry = entries.reduce((largest, entry) => Math.abs(entry.targetTop - entry.startTop) > Math.abs(largest.targetTop - largest.startTop) ? entry : largest, entries[0]);
+    const direction = motionEntry && motionEntry.targetTop < motionEntry.startTop ? "up" : "down";
+    const effect = createScrollEffect(direction);
+    try {
+      await animateScrollEntries(entries, Math.max(1, durationMs), effect, signal2);
+      await effect.finish();
+    } catch (error) {
+      effect.remove();
+      throw error;
+    }
+    return {
+      success: true,
+      message: `Scrolled to matching content "${match.matchedText.slice(0, 200)}" with ${alignment} alignment over ${durationMs} ms.`,
+      matchedText: match.matchedText,
+      occurrence,
+      matchCount: match.matchCount,
+      alignment
+    };
+  }
   async function scrollPageGradually({
     direction = "down",
     pages = 0.8,
+    position,
     indexedElement,
     durationMs = 1e3,
     signal: signal2
   } = {}) {
     const scrollTarget = findVerticalScroller(indexedElement);
-    const effect = createScrollEffect(direction);
     if (!scrollTarget) {
-      effect.update(1);
-      await effect.finish();
+      const effect2 = createScrollEffect(direction);
+      effect2.update(1);
+      await effect2.finish();
       return { success: true, message: "No scrollable container was found for that element." };
     }
     const { element, targeted } = scrollTarget;
@@ -3047,7 +3563,8 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
     const viewportDistance = targeted ? window.innerHeight / 3 : window.innerHeight;
     const signedDistance = viewportDistance * pages * (direction === "up" ? -1 : 1);
-    const targetTop = Math.max(0, Math.min(maxTop, startTop + signedDistance));
+    const targetTop = Number.isFinite(position) ? maxTop * position : Math.max(0, Math.min(maxTop, startTop + signedDistance));
+    const effect = createScrollEffect(targetTop < startTop ? "up" : "down");
     try {
       await animateScrollTop(element, targetTop, Math.max(1, durationMs), effect, signal2);
       await effect.finish();
@@ -3069,107 +3586,103 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       message: `Scrolled ${location2} by ${scrolled}px over ${durationMs} ms.${edge}`
     };
   }
-  function createGoogleSearchTransitionHost() {
-    document.getElementById(TAB_TRANSITION_HOST_ID)?.remove();
-    const host = document.createElement("div");
-    host.id = TAB_TRANSITION_HOST_ID;
-    host.style.cssText = "all:initial;position:fixed;z-index:2147483647;inset:0;pointer-events:none;";
-    const shadow = host.attachShadow({ mode: "open" });
-    shadow.innerHTML = `
-    <style>
-      .veil { position:absolute; inset:0; overflow:hidden; background:rgba(19,15,34,.58); backdrop-filter:blur(14px); }
-      .stage { position:absolute; left:50%; top:50%; width:min(620px,calc(100vw - 36px)); transform:translate3d(-50%,calc(-50% + 14px),0) scale(.96); opacity:0; animation:lumi-search-in 1s cubic-bezier(.2,.8,.2,1) forwards; }
-      .brand { display:flex; justify-content:center; margin:0 0 22px; font:600 clamp(36px,7vw,62px)/1 Arial,sans-serif; letter-spacing:-.08em; filter:drop-shadow(0 10px 25px rgba(0,0,0,.2)); }
-      .brand span:nth-child(1),.brand span:nth-child(4) { color:#4285f4; }
-      .brand span:nth-child(2),.brand span:nth-child(6) { color:#ea4335; }
-      .brand span:nth-child(3) { color:#fbbc05; }
-      .brand span:nth-child(5) { color:#34a853; }
-      .search { display:flex; align-items:center; gap:14px; min-height:58px; padding:0 20px; border:1px solid #dfe1e5; border-radius:999px; background:#fff; box-shadow:0 8px 24px rgba(32,33,36,.24); }
-      .magnifier { position:relative; width:17px; height:17px; flex:0 0 auto; border:2px solid #9aa0a6; border-radius:50%; }
-      .magnifier::after { content:""; position:absolute; width:7px; height:2px; right:-6px; bottom:-3px; border-radius:2px; background:#9aa0a6; transform:rotate(45deg); }
-      .query { min-width:0; overflow:hidden; color:#202124; font:400 18px/1.4 Arial,sans-serif; white-space:nowrap; text-overflow:ellipsis; }
-      .caret { width:2px; height:24px; flex:0 0 auto; border-radius:2px; background:#4285f4; animation:lumi-caret .7s step-end infinite; }
-      .actions { display:flex; justify-content:center; margin-top:20px; }
-      .search-button { position:relative; min-width:132px; padding:10px 18px; border:1px solid #f8f9fa; border-radius:4px; color:#3c4043; background:#f8f9fa; box-shadow:0 1px 1px rgba(0,0,0,.08); font:500 14px/1 Arial,sans-serif; text-align:center; transition:background .1s ease,border-color .1s ease,box-shadow .1s ease,transform .1s ease; }
-      .pointer { position:absolute; z-index:2; left:50%; top:50%; width:30px; height:34px; opacity:0; transform:translate3d(150px,78px,0); filter:drop-shadow(0 3px 4px rgba(0,0,0,.35)); }
-      .pointer svg { display:block; width:100%; height:100%; overflow:visible; }
-      .click-ring { position:absolute; left:7px; top:7px; width:12px; height:12px; border:2px solid rgba(66,133,244,.9); border-radius:50%; opacity:0; transform:scale(.25); }
-      .status { margin:14px 0 0; color:rgba(255,255,255,.9); font:700 12px/1.35 "Segoe UI",sans-serif; letter-spacing:.04em; text-align:center; text-shadow:0 2px 8px rgba(0,0,0,.32); }
-      :host([data-state="aim"]) .caret,:host([data-state="click"]) .caret { opacity:0; animation:none; }
-      :host([data-state="aim"]) .pointer { animation:lumi-pointer-aim .36s cubic-bezier(.2,.75,.2,1) forwards; }
-      :host([data-state="click"]) .pointer { opacity:1; transform:translate3d(10px,5px,0) scale(.92); }
-      :host([data-state="click"]) .click-ring { animation:lumi-click-ring .24s ease-out forwards; }
-      :host([data-state="click"]) .search-button { border-color:#dadce0; background:#eef3fe; box-shadow:inset 0 1px 3px rgba(60,64,67,.2); transform:translateY(2px); }
-      @keyframes lumi-search-in { to { transform:translate3d(-50%,-50%,0) scale(1); opacity:1; } }
-      @keyframes lumi-caret { 50% { opacity:0; } }
-      @keyframes lumi-pointer-aim { from { opacity:0; transform:translate3d(150px,78px,0); } 18% { opacity:1; } to { opacity:1; transform:translate3d(10px,5px,0); } }
-      @keyframes lumi-click-ring { from { opacity:.9; transform:scale(.25); } to { opacity:0; transform:scale(2.4); } }
-      @media (prefers-reduced-motion:reduce) { .stage { animation:none; transform:translate3d(-50%,-50%,0); opacity:1; } .caret { animation:none; } :host([data-state="aim"]) .pointer { animation:none; opacity:1; transform:translate3d(10px,5px,0); } }
-    </style>
-    <div class="veil">
-      <div class="stage">
-        <div class="brand" aria-hidden="true"><span>G</span><span>o</span><span>o</span><span>g</span><span>l</span><span>e</span></div>
-        <div class="search"><span class="magnifier"></span><span class="query"></span><span class="caret"></span></div>
-        <div class="actions"><div class="search-button">Google Search
-          <span class="pointer" aria-hidden="true">
-            <svg viewBox="0 0 30 34"><path d="M3 2.5 25.5 23l-10.4.6-5.2 8.8z" fill="#fff" stroke="#202124" stroke-width="2" stroke-linejoin="round"/></svg>
-            <span class="click-ring"></span>
-          </span>
-        </div></div>
-        <div class="status">Lumi is preparing a new tab</div>
-      </div>
-    </div>`;
-    (document.documentElement || document.body).append(host);
-    return {
-      host,
-      query: shadow.querySelector(".query"),
-      status: shadow.querySelector(".status")
-    };
-  }
-  async function revealSearchText(element, text, durationMs = 500) {
+
+  // extensions/lumi-live/browser/effects/text-input.js
+  function setNativeControlValue(element, value) {
     const elementWindow = element.ownerDocument.defaultView || window;
-    const segmenter = elementWindow.Intl?.Segmenter ? new elementWindow.Intl.Segmenter(void 0, { granularity: "grapheme" }) : null;
-    const characters = segmenter ? [...segmenter.segment(String(text))].map(({ segment }) => segment) : Array.from(String(text));
-    const startedAt = elementWindow.performance.now();
-    let renderedCount = 0;
-    while (renderedCount < characters.length) {
-      const elapsed = elementWindow.performance.now() - startedAt;
-      const nextCount = Math.min(
-        characters.length,
-        Math.max(1, Math.ceil(elapsed / durationMs * characters.length))
-      );
-      if (nextCount > renderedCount) {
-        element.textContent = characters.slice(0, nextCount).join("");
-        renderedCount = nextCount;
-      }
-      if (renderedCount < characters.length) {
-        await new Promise((resolve) => elementWindow.requestAnimationFrame(resolve));
-      }
+    const prototype = element.tagName === "TEXTAREA" ? elementWindow.HTMLTextAreaElement.prototype : elementWindow.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+    if (!setter) throw new Error("The input does not expose a native value setter.");
+    setter.call(element, value);
+    try {
+      element.setSelectionRange(value.length, value.length);
+    } catch {
     }
-    const remaining = durationMs - (elementWindow.performance.now() - startedAt);
-    if (remaining > 0) await wait(remaining);
   }
-  function clearTabTransition() {
-    clearTimeout(tabTransitionCleanupTimer);
-    tabTransitionCleanupTimer = null;
-    document.getElementById(TAB_TRANSITION_HOST_ID)?.remove();
+  function replaceTextAndDispatchInput(element, value, inputType, data = null) {
+    const elementWindow = element.ownerDocument.defaultView || window;
+    const InputEventConstructor = elementWindow.InputEvent || InputEvent;
+    element.dispatchEvent(new InputEventConstructor("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      inputType,
+      data
+    }));
+    replaceVisibleText(element, value);
+    element.dispatchEvent(new InputEventConstructor("input", {
+      bubbles: true,
+      inputType,
+      data
+    }));
   }
-  async function showGoogleSearchDeparture(searchText = "new tab") {
-    clearTabTransition();
-    const { host, query, status } = createGoogleSearchTransitionHost();
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    await wait(1e3);
-    status.textContent = "Lumi is typing the destination";
-    await revealSearchText(query, String(searchText || "new tab"), 500);
-    status.textContent = "Opening a new tab";
-    host.dataset.state = "aim";
-    await wait(360);
-    host.dataset.state = "click";
-    await wait(120);
-    tabTransitionCleanupTimer = setTimeout(() => host.remove(), 12e3);
+  function replaceVisibleText(element, value) {
+    if (element.isContentEditable) {
+      element.innerText = value;
+      return;
+    }
+    setNativeControlValue(element, value);
+  }
+  async function typeTextGradually(element, text, durationMs, signal2) {
+    const isTextControl = element?.tagName === "INPUT" || element?.tagName === "TEXTAREA" || element?.isContentEditable;
+    if (!isTextControl) {
+      throw new Error("Element is not an input, textarea, or contenteditable.");
+    }
+    const elementWindow = element.ownerDocument.defaultView || window;
+    const rawText = String(text);
+    const segmenter = elementWindow.Intl?.Segmenter ? new elementWindow.Intl.Segmenter(void 0, { granularity: "grapheme" }) : null;
+    const characters = segmenter ? [...segmenter.segment(rawText)].map(({ segment }) => segment) : Array.from(rawText);
+    const duration = Math.max(0, Number(durationMs) || 0);
+    const originalValue = element.isContentEditable ? element.innerText : element.value;
+    const throwIfCancelled = () => {
+      if (signal2?.aborted) throw new DOMException("The page action was cancelled by the user.", "AbortError");
+    };
+    throwIfCancelled();
+    element.focus({ preventScroll: true });
+    replaceTextAndDispatchInput(element, "", "deleteContentBackward");
+    try {
+      if (characters.length && duration > 0) {
+        const startedAt = elementWindow.performance.now();
+        let renderedCount = 0;
+        while (renderedCount < characters.length) {
+          throwIfCancelled();
+          const elapsed = elementWindow.performance.now() - startedAt;
+          const nextCount = Math.min(
+            characters.length,
+            Math.max(1, Math.ceil(elapsed / duration * characters.length))
+          );
+          if (nextCount > renderedCount) {
+            const insertedText = characters.slice(renderedCount, nextCount).join("");
+            replaceTextAndDispatchInput(
+              element,
+              characters.slice(0, nextCount).join(""),
+              "insertText",
+              insertedText
+            );
+            renderedCount = nextCount;
+          }
+          if (renderedCount < characters.length) {
+            await new Promise((resolve) => elementWindow.requestAnimationFrame(resolve));
+          }
+        }
+        const remaining = duration - (elementWindow.performance.now() - startedAt);
+        if (remaining > 0) await wait(remaining);
+      } else if (characters.length) {
+        replaceTextAndDispatchInput(element, characters.join(""), "insertText", characters.join(""));
+      }
+      throwIfCancelled();
+    } catch (error) {
+      if (signal2?.aborted) {
+        replaceTextAndDispatchInput(element, originalValue, "insertReplacementText", originalValue);
+      }
+      element.blur();
+      throw error;
+    }
+    const EventConstructor = elementWindow.Event || Event;
+    element.dispatchEvent(new EventConstructor("change", { bubbles: true }));
+    element.blur();
   }
 
-  // extensions/lumi-live/visual-preferences.js
+  // extensions/lumi-live/core/visual-preferences.js
   var DEFAULT_VISUAL_PREFERENCES = Object.freeze({
     showElementHighlights: false,
     scrollDurationMs: 1e3,
@@ -3183,10 +3696,10 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     };
   }
 
-  // extensions/lumi-live/response-audio-policy.js
+  // extensions/lumi-live/core/response-audio-policy.js
   var RESPONSE_AUDIO_DIRECTIVE_KEY = "lumiResponseAudio";
 
-  // extensions/lumi-live/youtube-video-action.js
+  // extensions/lumi-live/browser/youtube-video-action.js
   function parseUrl(rawUrl, baseUrl) {
     const value = String(rawUrl || "").trim();
     if (!value) return null;
@@ -3246,46 +3759,11 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     return Boolean(capture?.video && capture.videoWasPaused && !capture.video.paused);
   }
 
-  // extensions/lumi-live/live-audio-utils.js
-  function bytesToBase64(bytes) {
-    let binary = "";
-    for (let index = 0; index < bytes.length; index += 1) {
-      binary += String.fromCharCode(bytes[index]);
-    }
-    return btoa(binary);
-  }
-  var MAX_LIVE_AUDIO_SOCKET_BACKLOG_BYTES = 48 * 1024;
-  function resampleTo16k(input, inputRate) {
-    if (inputRate === 16e3) return input;
-    const ratio = inputRate / 16e3;
-    const output = new Float32Array(Math.max(1, Math.floor(input.length / ratio)));
-    for (let index = 0; index < output.length; index += 1) {
-      const start = Math.floor(index * ratio);
-      const end = Math.min(input.length, Math.floor((index + 1) * ratio));
-      let total = 0;
-      for (let sourceIndex = start; sourceIndex < end; sourceIndex += 1) {
-        total += input[sourceIndex];
-      }
-      output[index] = total / Math.max(1, end - start);
-    }
-    return output;
-  }
-  function floatToPcm16(input) {
-    const pcm = new Int16Array(input.length);
-    for (let index = 0; index < input.length; index += 1) {
-      const sample = Math.max(-1, Math.min(1, input[index]));
-      pcm[index] = sample < 0 ? sample * 32768 : sample * 32767;
-    }
-    return new Uint8Array(pcm.buffer);
-  }
-
-  // extensions/lumi-live/page-controller.js
+  // extensions/lumi-live/browser/controller.js
   var CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
   var MAX_STATE_CHARACTERS = 16e3;
   var GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
   var HIGHLIGHT_STYLE_ID = "lumi-page-agent-highlight-preference";
-  var OFFSCREEN_TARGET = "lumi_live_offscreen";
-  var EXTERNAL_AUDIO_FRAME_SAMPLES = 1600;
   if (!globalThis[GLOBAL_KEY]) {
     let getController = function() {
       if (!runtime.controller) {
@@ -3361,59 +3839,16 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
           `This looks like a consequential action (${label || "unlabeled control"}). Ask for explicit confirmation, then retry with confirmed=true.`
         );
       }
-    }, chooseActiveMediaElement = function() {
-      const candidates = [...document.querySelectorAll("video, audio")].filter((element) => {
-        const rect = element.getBoundingClientRect();
-        return !element.paused && !element.ended && element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && (element.tagName === "AUDIO" || rect.width > 0 && rect.height > 0);
-      }).sort((left, right) => {
-        const leftRect = left.getBoundingClientRect();
-        const rightRect = right.getBoundingClientRect();
-        const leftScore = left.tagName === "AUDIO" ? 1 : leftRect.width * leftRect.height;
-        const rightScore = right.tagName === "AUDIO" ? 1 : rightRect.width * rightRect.height;
-        return rightScore - leftScore;
-      });
-      return candidates[0] || null;
-    }, createExternalPcmWriter = function(capture) {
-      let frame = new Float32Array(EXTERNAL_AUDIO_FRAME_SAMPLES);
-      let offset = 0;
-      return (samples, sampleRate) => {
-        const mono16k = resampleTo16k(samples, sampleRate);
-        let inputOffset = 0;
-        while (inputOffset < mono16k.length && runtime.mediaElementAudioCapture === capture) {
-          const sampleCount = Math.min(frame.length - offset, mono16k.length - inputOffset);
-          frame.set(mono16k.subarray(inputOffset, inputOffset + sampleCount), offset);
-          offset += sampleCount;
-          inputOffset += sampleCount;
-          if (offset !== frame.length) continue;
-          const data = bytesToBase64(floatToPcm16(frame));
-          chrome.runtime.sendMessage({
-            target: OFFSCREEN_TARGET,
-            command: "external_audio",
-            data
-          }).catch(() => {
-          });
-          frame = new Float32Array(EXTERNAL_AUDIO_FRAME_SAMPLES);
-          offset = 0;
-        }
-      };
-    }, assertWebAudioSourceIsReadable = function(element) {
-      const sourceUrl = String(element.currentSrc || element.src || "");
-      if (!sourceUrl) return;
-      const parsed = new URL(sourceUrl, location.href);
-      if (["blob:", "data:"].includes(parsed.protocol)) return;
-      if (parsed.origin === location.origin || element.crossOrigin) return;
-      throw new Error("This cross-origin player does not expose CORS-readable audio.");
     };
-    getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick, chooseActiveMediaElement2 = chooseActiveMediaElement, createExternalPcmWriter2 = createExternalPcmWriter, assertWebAudioSourceIsReadable2 = assertWebAudioSourceIsReadable;
+    getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
     const runtime = {
       controller: null,
       stateIndexed: false,
       visualPreferences: { ...DEFAULT_VISUAL_PREFERENCES },
-      activeVisualActionController: null,
-      mediaElementAudioCapture: null,
-      mediaElementAudioRoutes: /* @__PURE__ */ new WeakMap()
+      activeVisualActionController: null
     };
     globalThis[GLOBAL_KEY] = runtime;
+    const mediaElementAudio = createMediaElementAudioController();
     async function withVisualAction(action) {
       const pageController = getController();
       runtime.activeVisualActionController?.abort();
@@ -3441,232 +3876,6 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
         }
       }
     }
-    async function stopMediaElementAudioCapture() {
-      const capture = runtime.mediaElementAudioCapture;
-      runtime.mediaElementAudioCapture = null;
-      if (!capture) return { success: true, stopped: false };
-      capture.started = false;
-      capture.element?.removeEventListener("ended", capture.onMediaEnded);
-      capture.element?.removeEventListener("emptied", capture.onMediaEnded);
-      await capture.reader?.cancel().catch(() => {
-      });
-      capture.processorNode?.disconnect();
-      capture.silentGain?.disconnect();
-      if (capture.scriptProcessor) capture.scriptProcessor.onaudioprocess = null;
-      if (capture.mode === "mediaElementSource") {
-        const route = capture.route;
-        if (route?.audioContext.state !== "closed") {
-          route.playbackGain.gain.cancelScheduledValues(route.audioContext.currentTime);
-          route.playbackGain.gain.setTargetAtTime(1, route.audioContext.currentTime, 0.025);
-        }
-      } else {
-        capture.sourceNode?.disconnect();
-        await capture.audioContext?.close().catch(() => {
-        });
-        capture.stream?.getTracks().forEach((track) => track.stop());
-        if (capture.element?.isConnected && Math.abs(capture.element.volume - capture.duckedVolume) < 2e-3) {
-          capture.element.volume = capture.originalVolume;
-        }
-      }
-      return { success: true, stopped: true };
-    }
-    async function prepareMediaElementAudioCapture() {
-      await stopMediaElementAudioCapture();
-      const element = chooseActiveMediaElement();
-      if (!element) {
-        throw new Error("No actively playing HTML video or audio element was found in this tab.");
-      }
-      const captureStream = element.captureStream || element.mozCaptureStream;
-      let stream = null;
-      let audioTrack = null;
-      if (typeof captureStream === "function") {
-        try {
-          stream = captureStream.call(element);
-          audioTrack = stream.getAudioTracks()[0] || null;
-        } catch {
-          stream = null;
-        }
-      }
-      if (!audioTrack) {
-        stream?.getTracks().forEach((track) => track.stop());
-        assertWebAudioSourceIsReadable(element);
-      }
-      const capture = {
-        mode: audioTrack ? "captureStream" : "mediaElementSource",
-        element,
-        stream,
-        audioTrack,
-        originalVolume: element.volume,
-        duckedVolume: Math.min(element.volume, 0.06),
-        started: false,
-        reader: null,
-        audioContext: null,
-        sourceNode: null,
-        processorNode: null,
-        silentGain: null,
-        scriptProcessor: null,
-        route: null,
-        onMediaEnded: null
-      };
-      runtime.mediaElementAudioCapture = capture;
-      return {
-        success: true,
-        prepared: true,
-        source: element.tagName.toLowerCase(),
-        captureMode: capture.mode,
-        title: document.title,
-        url: location.href
-      };
-    }
-    async function pumpTrackProcessor(capture, writePcm) {
-      const TrackProcessor = globalThis.MediaStreamTrackProcessor;
-      if (typeof TrackProcessor !== "function") return false;
-      let reader;
-      try {
-        const processor = new TrackProcessor({ track: capture.audioTrack });
-        reader = processor.readable.getReader();
-      } catch {
-        return false;
-      }
-      capture.reader = reader;
-      void (async () => {
-        let failure = null;
-        try {
-          while (runtime.mediaElementAudioCapture === capture && capture.started) {
-            const { value, done } = await reader.read();
-            if (done || !value) break;
-            try {
-              const samples = new Float32Array(value.numberOfFrames);
-              const channelCount = Math.max(1, value.numberOfChannels || 1);
-              for (let channel = 0; channel < channelCount; channel += 1) {
-                const plane = new Float32Array(value.numberOfFrames);
-                value.copyTo(plane, { planeIndex: channel, format: "f32-planar" });
-                for (let index = 0; index < samples.length; index += 1) {
-                  samples[index] += plane[index] / channelCount;
-                }
-              }
-              writePcm(samples, value.sampleRate);
-            } finally {
-              value.close();
-            }
-          }
-        } catch (error) {
-          failure = error;
-        }
-        if (runtime.mediaElementAudioCapture === capture && capture.started) {
-          const detail = failure instanceof Error ? failure.message : "The playing media element stopped providing audio.";
-          await stopMediaElementAudioCapture();
-          chrome.runtime.sendMessage({
-            target: OFFSCREEN_TARGET,
-            command: "external_source_ended",
-            detail
-          }).catch(() => {
-          });
-        }
-      })();
-      return true;
-    }
-    async function pumpScriptProcessor(capture, writePcm) {
-      const audioContext = new AudioContext({ latencyHint: "interactive" });
-      const sourceNode = audioContext.createMediaStreamSource(capture.stream);
-      const processorNode = audioContext.createScriptProcessor(4096, 1, 1);
-      const silentGain = audioContext.createGain();
-      silentGain.gain.value = 0;
-      processorNode.onaudioprocess = (event) => {
-        if (runtime.mediaElementAudioCapture !== capture || !capture.started) return;
-        writePcm(event.inputBuffer.getChannelData(0), event.inputBuffer.sampleRate);
-      };
-      sourceNode.connect(processorNode);
-      processorNode.connect(silentGain);
-      silentGain.connect(audioContext.destination);
-      capture.audioContext = audioContext;
-      capture.sourceNode = sourceNode;
-      capture.processorNode = processorNode;
-      capture.silentGain = silentGain;
-      capture.scriptProcessor = processorNode;
-      await audioContext.resume();
-      if (audioContext.state !== "running") {
-        throw new Error("Chrome suspended direct media capture for this page.");
-      }
-    }
-    async function pumpMediaElementSource(capture, writePcm) {
-      let route = runtime.mediaElementAudioRoutes.get(capture.element);
-      if (!route || route.audioContext.state === "closed") {
-        const audioContext = new AudioContext({ latencyHint: "interactive" });
-        await audioContext.resume();
-        if (audioContext.state !== "running") {
-          await audioContext.close().catch(() => {
-          });
-          throw new Error("Chrome suspended direct audio access for this video.");
-        }
-        const sourceNode = audioContext.createMediaElementSource(capture.element);
-        const playbackGain = audioContext.createGain();
-        playbackGain.gain.value = 1;
-        sourceNode.connect(playbackGain);
-        playbackGain.connect(audioContext.destination);
-        route = { audioContext, sourceNode, playbackGain };
-        runtime.mediaElementAudioRoutes.set(capture.element, route);
-      }
-      await route.audioContext.resume();
-      if (route.audioContext.state !== "running") {
-        throw new Error("Chrome suspended direct audio access for this video.");
-      }
-      const processorNode = route.audioContext.createScriptProcessor(4096, 1, 1);
-      const silentGain = route.audioContext.createGain();
-      silentGain.gain.value = 0;
-      processorNode.onaudioprocess = (event) => {
-        if (runtime.mediaElementAudioCapture !== capture || !capture.started) return;
-        writePcm(event.inputBuffer.getChannelData(0), event.inputBuffer.sampleRate);
-      };
-      route.sourceNode.connect(processorNode);
-      processorNode.connect(silentGain);
-      silentGain.connect(route.audioContext.destination);
-      route.playbackGain.gain.cancelScheduledValues(route.audioContext.currentTime);
-      route.playbackGain.gain.setTargetAtTime(0.06, route.audioContext.currentTime, 0.025);
-      capture.route = route;
-      capture.audioContext = route.audioContext;
-      capture.sourceNode = route.sourceNode;
-      capture.processorNode = processorNode;
-      capture.silentGain = silentGain;
-      capture.scriptProcessor = processorNode;
-    }
-    async function startMediaElementAudioCapture() {
-      const capture = runtime.mediaElementAudioCapture;
-      if (!capture) throw new Error("Prepare the active media element before starting audio capture.");
-      if (capture.started) return { success: true, started: true, alreadyActive: true };
-      capture.started = true;
-      capture.onMediaEnded = () => {
-        if (runtime.mediaElementAudioCapture !== capture || !capture.started) return;
-        void stopMediaElementAudioCapture().then(() => {
-          chrome.runtime.sendMessage({
-            target: OFFSCREEN_TARGET,
-            command: "external_source_ended",
-            detail: "The playing media element ended."
-          }).catch(() => {
-          });
-        });
-      };
-      capture.element.addEventListener("ended", capture.onMediaEnded, { once: true });
-      capture.element.addEventListener("emptied", capture.onMediaEnded, { once: true });
-      const writePcm = createExternalPcmWriter(capture);
-      try {
-        if (capture.mode === "mediaElementSource") {
-          await pumpMediaElementSource(capture, writePcm);
-        } else {
-          capture.element.volume = capture.duckedVolume;
-          const usingTrackProcessor = await pumpTrackProcessor(capture, writePcm);
-          if (!usingTrackProcessor) await pumpScriptProcessor(capture, writePcm);
-        }
-      } catch (error) {
-        await stopMediaElementAudioCapture();
-        throw error;
-      }
-      return {
-        success: true,
-        started: true,
-        sourcePlaybackVolume: capture.duckedVolume
-      };
-    }
     async function handleControllerTool(tool, args = {}) {
       const pageController = getController();
       if (tool === "bridge_controller_ping") {
@@ -3674,17 +3883,17 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
           success: true,
           ready: true,
           visualPreferences: runtime.visualPreferences,
-          mediaElementAudioPrepared: Boolean(runtime.mediaElementAudioCapture)
+          mediaElementAudioPrepared: mediaElementAudio.isPrepared()
         };
       }
       if (tool === "bridge_prepare_media_element_audio") {
-        return prepareMediaElementAudioCapture();
+        return mediaElementAudio.prepare();
       }
       if (tool === "bridge_start_media_element_audio") {
-        return startMediaElementAudioCapture();
+        return mediaElementAudio.start();
       }
       if (tool === "bridge_stop_media_element_audio") {
-        return stopMediaElementAudioCapture();
+        return mediaElementAudio.stop();
       }
       if (tool === "bridge_set_visual_preferences") {
         runtime.visualPreferences = normalizeVisualPreferences(args);
@@ -3770,12 +3979,41 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
           await pageController.getBrowserState();
           runtime.stateIndexed = true;
         }
+        const hasText = args.text !== void 0;
+        const text = hasText ? String(args.text).trim() : "";
+        if (hasText && !text) throw new Error("browser_scroll text must not be empty.");
+        const occurrence = args.occurrence === void 0 ? 1 : Number(args.occurrence);
+        if (!Number.isInteger(occurrence) || occurrence < 1 || occurrence > 20) {
+          throw new Error("browser_scroll occurrence must be an integer from 1 to 20.");
+        }
+        const alignment = args.alignment === void 0 ? "center" : String(args.alignment);
+        if (alignment !== "start" && alignment !== "center" && alignment !== "end") {
+          throw new Error("browser_scroll alignment must be start, center, or end.");
+        }
+        const position = args.position === void 0 ? void 0 : Number(args.position);
+        if (position !== void 0 && (!Number.isFinite(position) || position < 0 || position > 1)) {
+          throw new Error("browser_scroll position must be a number from 0 (top) to 1 (bottom).");
+        }
+        if (!text && position === void 0 && args.direction !== "up" && args.direction !== "down") {
+          throw new Error("browser_scroll requires text, direction=up/down, or an absolute position from 0 to 1.");
+        }
         const direction = args.direction === "up" ? "up" : "down";
         const pages = Math.min(3, Math.max(0.25, Number(args.pages) || 0.8));
         const index = args.index === void 0 ? void 0 : requireIndex(args);
+        if (text) {
+          return withVisualAction((_activeController, signal2) => scrollToTextGradually({
+            text,
+            occurrence,
+            alignment,
+            root: index === void 0 ? void 0 : indexedElement(index) ?? void 0,
+            durationMs: runtime.visualPreferences.scrollDurationMs,
+            signal: signal2
+          }));
+        }
         return withVisualAction((_activeController, signal2) => scrollPageGradually({
           direction,
           pages,
+          position,
           indexedElement: index === void 0 ? void 0 : indexedElement(index),
           durationMs: runtime.visualPreferences.scrollDurationMs,
           signal: signal2
@@ -3798,7 +4036,4 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
   var indexedElement2;
   var assertSafeInput2;
   var assertConfirmedHighImpactClick2;
-  var chooseActiveMediaElement2;
-  var createExternalPcmWriter2;
-  var assertWebAudioSourceIsReadable2;
 })();

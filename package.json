@@ -11,8 +11,8 @@
     "build:extension": "node extensions/build.mjs",
     "build:extensions": "npm run build:extension",
     "start": "next start",
-    "lint": "eslint app",
-    "test": "node --test extensions/lumi-live/*.test.mjs",
+    "lint": "eslint app extensions/lumi-live --ignore-pattern extensions/lumi-live/dist",
+    "test": "node --test extensions/lumi-live/tests/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

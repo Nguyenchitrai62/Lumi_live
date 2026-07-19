@@ -69,7 +69,7 @@ await Promise.all([
   ),
 ]);
 await build({
-  entryPoints: [path.join(extensionRoot, "page-controller.js")],
+  entryPoints: [path.join(extensionRoot, "browser", "controller.js")],
   outfile: path.join(outputDirectory, "controller.js"),
   bundle: true,
   format: "iife",
