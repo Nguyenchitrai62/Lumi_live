@@ -152,13 +152,24 @@ button { -webkit-tap-highlight-color: transparent; }
 .settings-panel, .stage, .conversation-panel { border: 1px solid var(--line); box-shadow: 0 24px 70px var(--panel-shadow); }
 
 .settings-panel {
+  position: relative;
   grid-area: settings;
+  display: grid;
   min-width: 0;
-  overflow-y: auto;
-  padding: 20px 16px 24px;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
   border-radius: 30px;
   background: var(--surface);
   backdrop-filter: blur(20px);
+}
+.settings-panel-scroll {
+  position: relative;
+  z-index: 1;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 20px 16px 24px;
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--lavender) 35%, transparent) transparent;
 }
@@ -394,6 +405,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .web-petal-field.petal-field-entering { animation: web-petal-field-enter 1.2s ease-out; }
 .web-petal-field i { position: absolute; top: 0; width: 10px; height: 7px; border-radius: 78% 22% 70% 30%; background: linear-gradient(145deg, rgba(255,238,247,.88), rgba(229,170,211,.72)); box-shadow: 0 3px 9px rgba(94,54,118,.14); opacity: 0; transform-origin: 60% 45%; animation-name: web-petal-fall; animation-timing-function: linear; animation-fill-mode: forwards; will-change: transform, opacity; }
 .stage-petal-field { z-index: 5; }
+.settings-petal-field { --petal-field-opacity: .72; z-index: 0; }
 .conversation-petal-field { --petal-field-opacity: .6; z-index: 0; }
 .petals-disabled .web-petal-field { opacity: 0; }
 .scene-garden.petals-disabled::after { opacity: 0; }
@@ -602,8 +614,14 @@ h1 { margin: 0; font-size: clamp(23px, 2vw, 29px); letter-spacing: -.05em; line-
 .message-form:focus-within { border-color: #b2a3df; box-shadow: 0 0 0 3px rgba(160,140,219,.12); }
 .message-form input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--control-text); background: transparent; font-size: 12px; }
 .message-form input::placeholder { color: #aaa3b6; }
-.message-form button { width: 31px; height: 31px; border: 0; border-radius: 10px; color: #fff; background: #8d79d3; cursor: pointer; font-size: 17px; }
+.message-form button { position: relative; width: 31px; height: 31px; flex: 0 0 auto; display: grid; place-items: center; border: 0; border-radius: 10px; color: #fff; background: #8d79d3; cursor: pointer; font-size: 17px; transition: border-radius .2s ease, background-color .2s ease, box-shadow .2s ease; }
 .message-form button:disabled { color: #bbb4c7; background: #efecf3; cursor: not-allowed; }
+.message-send-icon { line-height: 1; transform: translateY(-1px); }
+.message-cancel-icon { position: relative; display: none; width: 18px; height: 18px; border: 2px solid currentColor; border-radius: 50%; }
+.message-cancel-icon::after { content: ""; position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; border-radius: 1px; background: currentColor; transform: translate(-50%,-50%); }
+.message-form button[data-mode="cancel"] { border-radius: 50%; background: linear-gradient(145deg,#dc7890,#bc4f69); animation: message-cancel-pulse 1.5s ease-out infinite; }
+.message-form button[data-mode="cancel"] .message-send-icon { display: none; }
+.message-form button[data-mode="cancel"] .message-cancel-icon { display: block; }
 
 .customize-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--line); }
 .scene-options, .outfit-options { display: flex; gap: 7px; }
@@ -667,6 +685,7 @@ h1 { margin: 0; font-size: clamp(23px, 2vw, 29px); letter-spacing: -.05em; line-
 @keyframes pulse { 50% { opacity: .35; } }
 @keyframes wave { from { height: 5px; } to { height: 22px; } }
 @keyframes mcp-activity-spin { to { transform: rotate(360deg); } }
+@keyframes message-cancel-pulse { 0%,100% { box-shadow:0 0 0 0 rgba(206,107,130,.32); } 50% { box-shadow:0 0 0 5px rgba(206,107,130,0); } }
 @keyframes settings-enter { from { opacity: 0; transform: translateX(10px) scale(.985); } to { opacity: 1; transform: none; } }
 @keyframes mcp-modal-enter { from { opacity: 0; } to { opacity: 1; } }
 
@@ -718,7 +737,7 @@ h1 { margin: 0; font-size: clamp(23px, 2vw, 29px); letter-spacing: -.05em; line-
   .stage-caption { left: 14px; right: 14px; bottom: 14px; }
   .call-dock { bottom: 76px; }
   .voice-button { min-width: 168px; }
-  .settings-panel { padding: 17px 12px 20px; }
+  .settings-panel-scroll { padding: 17px 12px 20px; }
   .settings-field, .settings-choice { grid-template-columns: minmax(76px, .68fr) minmax(0, 1.32fr); gap: 7px; }
   .mcp-server-manage { font-size: 0; }
   .mcp-server-manage b { font-size: 14px; }

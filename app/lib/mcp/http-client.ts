@@ -86,9 +86,16 @@ export class McpHttpClient {
     this.url = normalizeMcpUrl(rawUrl);
   }
 
-  private async post(payload: JsonRecord, expectedId?: number) {
+  private async post(payload: JsonRecord, expectedId?: number, externalSignal?: AbortSignal) {
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), MCP_REQUEST_TIMEOUT_MS);
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, MCP_REQUEST_TIMEOUT_MS);
+    const abortFromCaller = () => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    else externalSignal?.addEventListener("abort", abortFromCaller, { once: true });
 
     try {
       const response = await fetch("/api/mcp", {
@@ -145,17 +152,20 @@ export class McpHttpClient {
       return message.result;
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
-        throw new Error("The MCP server did not respond within 22 seconds.");
+        throw new Error(timedOut
+          ? "The MCP server did not respond within 22 seconds."
+          : "The MCP request was cancelled by the user.");
       }
       throw error;
     } finally {
       window.clearTimeout(timeoutId);
+      externalSignal?.removeEventListener("abort", abortFromCaller);
     }
   }
 
-  async request(method: string, params: JsonRecord = {}) {
+  async request(method: string, params: JsonRecord = {}, options: { signal?: AbortSignal } = {}) {
     const id = this.nextRequestId++;
-    return this.post({ jsonrpc: "2.0", id, method, params }, id);
+    return this.post({ jsonrpc: "2.0", id, method, params }, id, options.signal);
   }
 
   async notify(method: string, params: JsonRecord = {}) {
@@ -194,7 +204,7 @@ export class McpHttpClient {
     return isObject(result) && Array.isArray(result.tools) ? result.tools : [];
   }
 
-  async callTool(name: string, args: JsonRecord = {}) {
-    return this.request("tools/call", { name, arguments: args });
+  async callTool(name: string, args: JsonRecord = {}, options: { signal?: AbortSignal } = {}) {
+    return this.request("tools/call", { name, arguments: args }, options);
   }
 }

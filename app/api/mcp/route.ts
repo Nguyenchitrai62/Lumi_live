@@ -130,6 +130,7 @@ function createLimitedResponseStream(
   body: ReadableStream<Uint8Array>,
   abortController: AbortController,
   timeoutId: ReturnType<typeof setTimeout>,
+  cleanup: () => void,
 ) {
   const reader = body.getReader();
   let total = 0;
@@ -139,6 +140,7 @@ function createLimitedResponseStream(
     if (settled) return;
     settled = true;
     clearTimeout(timeoutId);
+    cleanup();
   };
 
   return new ReadableStream<Uint8Array>({
@@ -206,6 +208,9 @@ export async function POST(request: Request) {
     const url = await validateMcpUrl(body.url);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const abortFromClient = () => controller.abort();
+    if (request.signal.aborted) controller.abort();
+    else request.signal.addEventListener("abort", abortFromClient, { once: true });
     let streamOwnsTimeout = false;
     const headers = new Headers({
       Accept: "application/json, text/event-stream",
@@ -246,7 +251,12 @@ export async function POST(request: Request) {
 
       if (contentType.includes("text/event-stream") && upstream.body) {
         streamOwnsTimeout = true;
-        return new Response(createLimitedResponseStream(upstream.body, controller, timeoutId), {
+        return new Response(createLimitedResponseStream(
+          upstream.body,
+          controller,
+          timeoutId,
+          () => request.signal.removeEventListener("abort", abortFromClient),
+        ), {
           status: upstream.status,
           headers: responseHeaders,
         });
@@ -258,7 +268,10 @@ export async function POST(request: Request) {
         headers: responseHeaders,
       });
     } finally {
-      if (!streamOwnsTimeout) clearTimeout(timeoutId);
+      if (!streamOwnsTimeout) {
+        clearTimeout(timeoutId);
+        request.signal.removeEventListener("abort", abortFromClient);
+      }
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "The MCP request failed.";

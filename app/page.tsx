@@ -92,6 +92,8 @@ export default function Home() {
   const [mcpMessage, setMcpMessage] = useState("");
   const [mcpApproval, setMcpApproval] = useState<McpApprovalRequest | null>(null);
   const [mcpAvatarState, setMcpAvatarState] = useState<PixelAvatarState | null>(null);
+  const [agentTurnActive, setAgentTurnActive] = useState(false);
+  const [turnCancellationPending, setTurnCancellationPending] = useState(false);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -131,8 +133,32 @@ export default function Home() {
   const mcpAvatarTimerRef = useRef<number | null>(null);
   const mcpApprovalRef = useRef<McpApprovalRequest | null>(null);
   const cancelledToolCallIdsRef = useRef<Set<string>>(new Set());
+  const pendingToolCallIdsRef = useRef<Set<string>>(new Set());
+  const pendingToolCallNamesRef = useRef<Map<string, string>>(new Map());
+  const activeMcpCallControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const agentTurnActiveRef = useRef(false);
+  const turnCancellationPendingRef = useRef(false);
+  const turnCancellationSequenceRef = useRef(0);
+  const turnCancellationDrainTimerRef = useRef<number | null>(null);
+  const turnCancellationWatchdogTimerRef = useRef<number | null>(null);
+  const suppressServerOutputUntilNextUserTurnRef = useRef(false);
   const mcpToolCallSequenceRef = useRef(0);
   if (mcpManagerRef.current == null) mcpManagerRef.current = new McpManager();
+
+  const updateTurnCancellationPending = (pending: boolean) => {
+    turnCancellationPendingRef.current = pending;
+    setTurnCancellationPending(pending);
+  };
+
+  const updateAgentTurnActive = (active: boolean) => {
+    if (
+      active
+      && (turnCancellationPendingRef.current || suppressServerOutputUntilNextUserTurnRef.current)
+    ) return;
+    const nextActive = readyRef.current && active;
+    agentTurnActiveRef.current = nextActive;
+    setAgentTurnActive(nextActive);
+  };
 
   const setTransientMcpAvatarState = useCallback((nextState: PixelAvatarState, duration = 0) => {
     if (mcpAvatarTimerRef.current !== null) window.clearTimeout(mcpAvatarTimerRef.current);
@@ -327,6 +353,9 @@ export default function Home() {
 
   useEffect(() => {
     const transcriptTimers = transcriptFinalizeTimersRef.current;
+    const activeMcpCallControllers = activeMcpCallControllersRef.current;
+    const pendingToolCallIds = pendingToolCallIdsRef.current;
+    const pendingToolCallNames = pendingToolCallNamesRef.current;
     return () => {
       intentionalCloseRef.current = true;
       websocketRef.current?.close();
@@ -336,10 +365,16 @@ export default function Home() {
         if (timer !== null) window.clearTimeout(timer);
       });
       if (mcpAvatarTimerRef.current !== null) window.clearTimeout(mcpAvatarTimerRef.current);
+      if (turnCancellationDrainTimerRef.current !== null) window.clearTimeout(turnCancellationDrainTimerRef.current);
+      if (turnCancellationWatchdogTimerRef.current !== null) window.clearTimeout(turnCancellationWatchdogTimerRef.current);
       if (mcpApprovalRef.current) {
         window.clearTimeout(mcpApprovalRef.current.timeoutId);
         mcpApprovalRef.current.resolve(false);
       }
+      activeMcpCallControllers.forEach((controller) => controller.abort());
+      activeMcpCallControllers.clear();
+      pendingToolCallIds.clear();
+      pendingToolCallNames.clear();
       mcpApprovalRef.current = null;
       videoStreamRef.current?.getTracks().forEach((track) => track.stop());
       audioContextRef.current?.close();
@@ -560,11 +595,12 @@ export default function Home() {
 
       if (readyRef.current && !mutedRef.current && awaitingNewUserTurnRef.current && rms >= 0.012) {
         awaitingNewUserTurnRef.current = false;
+        suppressServerOutputUntilNextUserTurnRef.current = false;
         finalizeTranscript("user");
         finalizeTranscript("lumi");
       }
 
-      if (!readyRef.current || mutedRef.current) return;
+      if (!readyRef.current || mutedRef.current || turnCancellationPendingRef.current) return;
       const websocket = websocketRef.current;
       if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
 
@@ -604,6 +640,78 @@ export default function Home() {
         : message));
   };
 
+  const clearTurnCancellationTimers = () => {
+    if (turnCancellationDrainTimerRef.current !== null) {
+      window.clearTimeout(turnCancellationDrainTimerRef.current);
+      turnCancellationDrainTimerRef.current = null;
+    }
+    if (turnCancellationWatchdogTimerRef.current !== null) {
+      window.clearTimeout(turnCancellationWatchdogTimerRef.current);
+      turnCancellationWatchdogTimerRef.current = null;
+    }
+  };
+
+  const resetPendingTurnExecution = (message = "Cancelled by the user.") => {
+    const cancelledResponses: Array<{
+      id: string;
+      name: string;
+      response: { error: string };
+    }> = [];
+    for (const callId of pendingToolCallIdsRef.current) {
+      cancelledToolCallIdsRef.current.add(callId);
+      activeMcpCallControllersRef.current.get(callId)?.abort();
+      updateToolMessage(`mcp-${callId}`, "cancelled", message);
+      const name = pendingToolCallNamesRef.current.get(callId);
+      if (name) {
+        cancelledResponses.push({
+          id: callId,
+          name,
+          response: { error: "Cancelled by the user before this tool could finish." },
+        });
+      }
+    }
+    activeMcpCallControllersRef.current.forEach((controller) => controller.abort());
+    activeMcpCallControllersRef.current.clear();
+    pendingToolCallIdsRef.current.clear();
+    pendingToolCallNamesRef.current.clear();
+
+    if (mcpApprovalRef.current) {
+      const approval = mcpApprovalRef.current;
+      window.clearTimeout(approval.timeoutId);
+      cancelledToolCallIdsRef.current.add(approval.id);
+      mcpApprovalRef.current = null;
+      setMcpApproval(null);
+      approval.resolve(false);
+    }
+
+    if (mcpAvatarTimerRef.current !== null) window.clearTimeout(mcpAvatarTimerRef.current);
+    mcpAvatarTimerRef.current = null;
+    setMcpAvatarState(null);
+    awaitingNewUserTurnRef.current = false;
+    stopPlayback();
+    finalizeTranscript("user");
+    finalizeTranscript("lumi");
+    return cancelledResponses;
+  };
+
+  const completeTurnCancellation = () => {
+    if (!turnCancellationPendingRef.current) return;
+    clearTurnCancellationTimers();
+    resetPendingTurnExecution();
+    updateTurnCancellationPending(false);
+    updateAgentTurnActive(false);
+    awaitingNewUserTurnRef.current = true;
+    setStatusMessage("Current action cancelled and reset — Lumi is ready for your next request");
+    setTransientMcpAvatarState("listening", 600);
+  };
+
+  const scheduleTurnCancellationCompletion = () => {
+    if (turnCancellationDrainTimerRef.current !== null) {
+      window.clearTimeout(turnCancellationDrainTimerRef.current);
+    }
+    turnCancellationDrainTimerRef.current = window.setTimeout(completeTurnCancellation, 120);
+  };
+
   const handleServerMessage = async (event: MessageEvent) => {
     const raw = typeof event.data === "string" ? event.data : await event.data.text();
     const response = JSON.parse(raw);
@@ -611,6 +719,7 @@ export default function Home() {
     for (const id of response.toolCallCancellation?.ids ?? []) {
       if (typeof id !== "string") continue;
       cancelledToolCallIdsRef.current.add(id);
+      activeMcpCallControllersRef.current.get(id)?.abort();
       updateToolMessage(`mcp-${id}`, "cancelled", "Gemini cancelled this tool call because the current turn changed.");
       if (mcpApprovalRef.current?.id === id) {
         window.clearTimeout(mcpApprovalRef.current.timeoutId);
@@ -621,8 +730,11 @@ export default function Home() {
     }
 
     if (response.setupComplete) {
+      clearTurnCancellationTimers();
+      suppressServerOutputUntilNextUserTurnRef.current = false;
       readyRef.current = true;
       awaitingNewUserTurnRef.current = false;
+      updateTurnCancellationPending(false);
       setStatus("ready");
       const activeSource = activeVideoModeRef.current;
       const sourceMessage = activeSource === "screen"
@@ -632,6 +744,7 @@ export default function Home() {
           : videoNoticeRef.current || "Lumi is listening — vision is off";
       setStatusMessage(sourceMessage);
       startVideoFrames();
+      updateAgentTurnActive(true);
       sendJson({
         realtimeInput: {
           text: "Greet the player warmly in one short sentence and invite them to begin our roleplay.",
@@ -641,6 +754,67 @@ export default function Home() {
 
     const serverContent = response.serverContent;
     const parts = serverContent?.modelTurn?.parts ?? [];
+    const functionCalls = response.toolCall?.functionCalls ?? [];
+    const hasTurnPayload = Boolean(
+      parts.length > 0
+      || serverContent?.inputTranscription?.text
+      || serverContent?.outputTranscription?.text
+      || functionCalls.length > 0
+    );
+    if (turnCancellationPendingRef.current) {
+      if (hasTurnPayload && turnCancellationDrainTimerRef.current !== null) {
+        window.clearTimeout(turnCancellationDrainTimerRef.current);
+        turnCancellationDrainTimerRef.current = null;
+      }
+      for (const functionCall of functionCalls) {
+        if (typeof functionCall.id === "string") {
+          cancelledToolCallIdsRef.current.add(functionCall.id);
+          activeMcpCallControllersRef.current.get(functionCall.id)?.abort();
+        }
+      }
+      const cancelledResponses = functionCalls
+        .filter((functionCall: { id?: unknown; name?: unknown }) => (
+          typeof functionCall.id === "string" && typeof functionCall.name === "string"
+        ))
+        .map((functionCall: { id?: unknown; name?: unknown }) => ({
+          id: String(functionCall.id),
+          name: String(functionCall.name),
+          response: { error: "Cancelled by the user before this tool could run." },
+        }));
+      if (cancelledResponses.length > 0) {
+        sendJson({ toolResponse: { functionResponses: cancelledResponses } });
+      }
+      if (serverContent?.interrupted) resetPendingTurnExecution();
+      if (serverContent?.turnComplete) scheduleTurnCancellationCompletion();
+      return;
+    }
+    if (suppressServerOutputUntilNextUserTurnRef.current) {
+      const cancelledResponses = functionCalls
+        .filter((functionCall: { id?: unknown; name?: unknown }) => (
+          typeof functionCall.id === "string" && typeof functionCall.name === "string"
+        ))
+        .map((functionCall: { id?: unknown; name?: unknown }) => ({
+          id: String(functionCall.id),
+          name: String(functionCall.name),
+          response: { error: "Ignored because the previous turn was cancelled." },
+        }));
+      for (const functionCall of functionCalls) {
+        if (typeof functionCall.id === "string") {
+          cancelledToolCallIdsRef.current.add(functionCall.id);
+        }
+      }
+      if (cancelledResponses.length > 0) {
+        sendJson({ toolResponse: { functionResponses: cancelledResponses } });
+      }
+      if (serverContent?.interrupted || serverContent?.turnComplete) updateAgentTurnActive(false);
+      return;
+    }
+    if (
+      parts.length > 0
+      || serverContent?.inputTranscription?.text
+      || serverContent?.outputTranscription?.text
+      || functionCalls.length > 0
+    ) updateAgentTurnActive(true);
     for (const part of parts) {
       if (part.inlineData?.data) playPcmChunk(part.inlineData.data);
     }
@@ -652,26 +826,45 @@ export default function Home() {
       updateTranscript("lumi", serverContent.outputTranscription.text);
     }
     if (serverContent?.interrupted) {
+      const wasUserCancellation = turnCancellationPendingRef.current;
+      updateTurnCancellationPending(false);
       stopPlayback();
       scheduleTranscriptFinalization("lumi");
+      updateAgentTurnActive(false);
+      if (wasUserCancellation) {
+        setStatusMessage("Current action cancelled â€” Lumi is ready for your next request");
+      }
     }
     if (serverContent?.turnComplete) {
+      const wasUserCancellation = turnCancellationPendingRef.current;
+      updateTurnCancellationPending(false);
       awaitingNewUserTurnRef.current = true;
       scheduleTranscriptFinalization("user");
       scheduleTranscriptFinalization("lumi");
+      updateAgentTurnActive(false);
+      if (wasUserCancellation) {
+        setStatusMessage("Current action cancelled â€” Lumi is ready for your next request");
+      }
     }
 
-    const functionCalls = response.toolCall?.functionCalls ?? [];
     if (functionCalls.length > 0) {
+      const cancellationSequence = turnCancellationSequenceRef.current;
       const functionResponses = [];
       for (const functionCall of functionCalls) {
+        if (
+          cancellationSequence !== turnCancellationSequenceRef.current
+          || turnCancellationPendingRef.current
+        ) break;
         mcpToolCallSequenceRef.current += 1;
         const callId = typeof functionCall.id === "string"
           ? functionCall.id
           : `tool-${mcpToolCallSequenceRef.current}`;
         if (cancelledToolCallIdsRef.current.has(callId)) continue;
+        pendingToolCallIdsRef.current.add(callId);
+        pendingToolCallNamesRef.current.set(callId, functionCall.name);
         const mcpTool = mcpManagerRef.current!.getActiveTool(functionCall.name);
         const activityId = `mcp-${callId}`;
+        let mcpCallController: AbortController | null = null;
         try {
           if (!mcpTool) {
             throw new Error(`Unsupported tool: ${functionCall.name}`);
@@ -701,11 +894,18 @@ export default function Home() {
             }
           }
 
+          mcpCallController = new AbortController();
+          activeMcpCallControllersRef.current.set(callId, mcpCallController);
           const result = normalizeMcpToolResult(
-            await mcpManagerRef.current!.callFunction(functionCall.name, args),
+            await mcpManagerRef.current!.callFunction(functionCall.name, args, {
+              signal: mcpCallController.signal,
+            }),
           );
 
-          if (cancelledToolCallIdsRef.current.has(callId)) {
+          if (
+            cancelledToolCallIdsRef.current.has(callId)
+            || cancellationSequence !== turnCancellationSequenceRef.current
+          ) {
             if (mcpTool) {
               updateToolMessage(activityId, "cancelled", "The MCP result arrived after this turn was cancelled.");
             }
@@ -721,7 +921,10 @@ export default function Home() {
             response: { result },
           });
         } catch (error) {
-          if (cancelledToolCallIdsRef.current.has(callId)) continue;
+          if (
+            cancelledToolCallIdsRef.current.has(callId)
+            || cancellationSequence !== turnCancellationSequenceRef.current
+          ) continue;
           if (mcpTool) {
             const message = error instanceof Error ? error.message : "The MCP tool failed.";
             updateToolMessage(activityId, "failed", message);
@@ -735,18 +938,41 @@ export default function Home() {
             },
           });
         } finally {
-          cancelledToolCallIdsRef.current.delete(callId);
+          if (mcpCallController) activeMcpCallControllersRef.current.delete(callId);
+          pendingToolCallIdsRef.current.delete(callId);
+          pendingToolCallNamesRef.current.delete(callId);
+          if (
+            cancellationSequence === turnCancellationSequenceRef.current
+            && !turnCancellationPendingRef.current
+          ) cancelledToolCallIdsRef.current.delete(callId);
         }
       }
 
-      if (functionResponses.length) sendJson({ toolResponse: { functionResponses } });
+      if (
+        functionResponses.length
+        && cancellationSequence === turnCancellationSequenceRef.current
+        && !turnCancellationPendingRef.current
+      ) sendJson({ toolResponse: { functionResponses } });
     }
   };
 
   const stopSession = (showIdle = true) => {
+    clearTurnCancellationTimers();
+    suppressServerOutputUntilNextUserTurnRef.current = false;
     intentionalCloseRef.current = true;
     readyRef.current = false;
     awaitingNewUserTurnRef.current = false;
+    updateTurnCancellationPending(false);
+    updateAgentTurnActive(false);
+    turnCancellationSequenceRef.current += 1;
+    for (const callId of pendingToolCallIdsRef.current) {
+      cancelledToolCallIdsRef.current.add(callId);
+      updateToolMessage(
+        `mcp-${callId}`,
+        "cancelled",
+        "The live session ended before this MCP tool completed.",
+      );
+    }
     if (mcpApprovalRef.current) {
       window.clearTimeout(mcpApprovalRef.current.timeoutId);
       cancelledToolCallIdsRef.current.add(mcpApprovalRef.current.id);
@@ -759,6 +985,10 @@ export default function Home() {
     }
     mcpApprovalRef.current = null;
     setMcpApproval(null);
+    activeMcpCallControllersRef.current.forEach((controller) => controller.abort());
+    activeMcpCallControllersRef.current.clear();
+    pendingToolCallIdsRef.current.clear();
+    pendingToolCallNamesRef.current.clear();
     if (mcpAvatarTimerRef.current !== null) window.clearTimeout(mcpAvatarTimerRef.current);
     mcpAvatarTimerRef.current = null;
     setMcpAvatarState(null);
@@ -793,7 +1023,12 @@ export default function Home() {
     }
 
     const requestedVideoMode = videoMode;
+    clearTurnCancellationTimers();
+    suppressServerOutputUntilNextUserTurnRef.current = false;
     setStatus("connecting");
+    updateTurnCancellationPending(false);
+    updateAgentTurnActive(false);
+    turnCancellationSequenceRef.current += 1;
     setStatusMessage(requestedVideoMode === "screen"
       ? "Choose the Chrome Tab you want Lumi to see…"
       : requestedVideoMode === "camera"
@@ -934,7 +1169,14 @@ export default function Home() {
 
   const sendText = (text: string) => {
     const clean = text.trim();
-    if (!clean || status !== "ready") return;
+    if (
+      !clean
+      || status !== "ready"
+      || agentTurnActiveRef.current
+      || turnCancellationPendingRef.current
+    ) return;
+    turnCancellationSequenceRef.current += 1;
+    suppressServerOutputUntilNextUserTurnRef.current = false;
     awaitingNewUserTurnRef.current = false;
     finalizeTranscript("user");
     finalizeTranscript("lumi");
@@ -942,13 +1184,39 @@ export default function Home() {
       ...current,
       { id: `typed-${Date.now()}`, role: "user", text: clean },
     ]);
+    updateTurnCancellationPending(false);
+    updateAgentTurnActive(true);
     sendJson({ realtimeInput: { text: clean } });
     setInput("");
   };
 
+  const cancelCurrentTurn = () => {
+    if (status !== "ready" || !agentTurnActiveRef.current) return;
+    clearTurnCancellationTimers();
+    updateTurnCancellationPending(true);
+    suppressServerOutputUntilNextUserTurnRef.current = true;
+    turnCancellationSequenceRef.current += 1;
+    awaitingNewUserTurnRef.current = false;
+    const cancelledResponses = resetPendingTurnExecution("Cancelled by the user.");
+    if (cancelledResponses.length > 0) {
+      sendJson({ toolResponse: { functionResponses: cancelledResponses } });
+    }
+    sendJson({ realtimeInput: { audioStreamEnd: true } });
+    sendJson({
+      realtimeInput: {
+        text: "The user pressed Cancel. Stop the previous task immediately, do not call any tools, and acknowledge cancellation briefly.",
+      },
+    });
+    updateAgentTurnActive(false);
+    setStatusMessage("Cancelling and resetting the current action…");
+    setTransientMcpAvatarState("listening", 600);
+    turnCancellationWatchdogTimerRef.current = window.setTimeout(completeTurnCancellation, 1200);
+  };
+
   const submitText = (event: FormEvent) => {
     event.preventDefault();
-    sendText(input);
+    if (agentTurnActiveRef.current) cancelCurrentTurn();
+    else sendText(input);
   };
 
   const installMcpServer = async () => {
@@ -1078,6 +1346,8 @@ export default function Home() {
     (total, server) => total + server.enabledToolCount,
     0,
   );
+  const composerCancelMode = status === "ready" && agentTurnActive;
+  const composerLocked = status !== "ready" || composerCancelMode || turnCancellationPending;
   const pixelAvatarState: PixelAvatarState = mcpAvatarState
     ?? (status === "connecting"
       ? "connecting"
@@ -1129,7 +1399,9 @@ export default function Home() {
       </header>
 
       <section className="experience-grid">
-        <aside className="settings-panel" aria-label="Lumi settings">
+        <aside className={`settings-panel ${petalsEnabled ? "petals-enabled" : "petals-disabled"}`} aria-label="Lumi settings">
+          <PetalLayer className="settings-petal-field" enabled={petalsEnabled} />
+          <div className="settings-panel-scroll">
           <div className="settings-panel-head">
             <div>
               <span className="eyebrow">WEB STUDIO</span>
@@ -1236,6 +1508,7 @@ export default function Home() {
             onServerPolicy={setMcpServerPolicy}
           />
 
+          </div>
         </aside>
 
         <section className={`stage scene-${scene} ${petalsEnabled ? "petals-enabled" : "petals-disabled"}`} aria-label={`${scenes.find((item) => item.id === scene)?.name} character stage`}>
@@ -1394,14 +1667,32 @@ export default function Home() {
 
           <div className="quick-prompts" aria-label="Roleplay starters">
             {["Set a moonlit café scene", "Tell me a tiny secret", "Let’s go on an adventure"].map((prompt) => (
-              <button key={prompt} type="button" onClick={() => sendText(prompt)} disabled={status !== "ready"}>{prompt}</button>
+              <button key={prompt} type="button" onClick={() => sendText(prompt)} disabled={composerLocked}>{prompt}</button>
             ))}
           </div>
 
           <form className="message-form" onSubmit={submitText}>
             <label className="sr-only" htmlFor="message-input">Message Lumi</label>
-            <input id="message-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={status === "ready" ? "Or type a message…" : "Start voice chat to message…"} disabled={status !== "ready"} />
-            <button type="submit" disabled={status !== "ready" || !input.trim()} aria-label="Send message">↑</button>
+            <input
+              id="message-input"
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder={status !== "ready"
+                ? "Start voice chat to message…"
+                : turnCancellationPending ? "Cancelling current action…"
+                  : composerCancelMode ? "Lumi is working…" : "Or type a message…"}
+              disabled={composerLocked}
+            />
+            <button
+              type="submit"
+              data-mode={composerCancelMode ? "cancel" : "send"}
+              disabled={status !== "ready" || turnCancellationPending || (!composerCancelMode && !input.trim())}
+              aria-label={composerCancelMode ? "Cancel current action" : "Send message"}
+              title={composerCancelMode ? "Cancel current action" : "Send message"}
+            >
+              <span className="message-send-icon" aria-hidden="true">↑</span>
+              <span className="message-cancel-icon" aria-hidden="true" />
+            </button>
           </form>
         </aside>
       </section>

@@ -1,6 +1,8 @@
 import { PageController } from "@page-agent/page-controller";
 import {
-  showTabDeparture,
+  clearTabTransition,
+  scrollPageGradually,
+  showGoogleSearchDeparture,
   typeTextGradually,
 } from "./page-visual-effects.js";
 import {
@@ -23,6 +25,7 @@ if (!globalThis[GLOBAL_KEY]) {
     controller: null,
     stateIndexed: false,
     visualPreferences: { ...DEFAULT_VISUAL_PREFERENCES },
+    activeVisualActionController: null,
   };
   globalThis[GLOBAL_KEY] = runtime;
 
@@ -116,14 +119,29 @@ if (!globalThis[GLOBAL_KEY]) {
 
   async function withVisualAction(action) {
     const pageController = getController();
+    runtime.activeVisualActionController?.abort();
+    const actionController = new AbortController();
+    runtime.activeVisualActionController = actionController;
     await pageController.showMask();
     try {
-      return await action(pageController);
+      if (actionController.signal.aborted) {
+        throw new DOMException("The page action was cancelled by the user.", "AbortError");
+      }
+      const result = await action(pageController, actionController.signal);
+      if (actionController.signal.aborted) {
+        throw new DOMException("The page action was cancelled by the user.", "AbortError");
+      }
+      return result;
     } finally {
-      await new Promise((resolve) => setTimeout(resolve, 420));
+      if (!actionController.signal.aborted) {
+        await new Promise((resolve) => setTimeout(resolve, 420));
+      }
       await pageController.hideMask();
       await pageController.cleanUpHighlights();
       runtime.stateIndexed = false;
+      if (runtime.activeVisualActionController === actionController) {
+        runtime.activeVisualActionController = null;
+      }
     }
   }
 
@@ -143,8 +161,24 @@ if (!globalThis[GLOBAL_KEY]) {
       return { success: true, visualPreferences: runtime.visualPreferences };
     }
 
-    if (tool === "bridge_show_tab_departure") {
-      await showTabDeparture(String(args.searchText || "new tab"));
+    if (tool === "bridge_cancel_active_action") {
+      const activeActionController = runtime.activeVisualActionController;
+      runtime.activeVisualActionController = null;
+      activeActionController?.abort();
+      clearTabTransition();
+      await pageController.hideMask().catch(() => {});
+      await pageController.cleanUpHighlights().catch(() => {});
+      runtime.stateIndexed = false;
+      return { success: true, cancelled: true };
+    }
+
+    if (tool === "bridge_show_google_search_departure") {
+      await showGoogleSearchDeparture(String(args.searchText || "new tab"));
+      return { success: true };
+    }
+
+    if (tool === "bridge_clear_tab_transition") {
+      clearTabTransition();
       return { success: true };
     }
 
@@ -182,14 +216,14 @@ if (!globalThis[GLOBAL_KEY]) {
       const index = requireIndex(args);
       const text = String(args.text ?? "");
       assertSafeInput(index);
-      return withVisualAction(async (activeController) => {
+      return withVisualAction(async (activeController, signal) => {
         const element = indexedElement(index);
         if (!element || element.nodeType !== Node.ELEMENT_NODE) {
           throw new Error(`Element at index ${index} is no longer available.`);
         }
         const clickResult = await activeController.clickElement(index);
         if (clickResult?.success === false) throw new Error(clickResult.message);
-        await typeTextGradually(element, text, runtime.visualPreferences.typingDurationMs);
+        await typeTextGradually(element, text, runtime.visualPreferences.typingDurationMs, signal);
         return {
           success: true,
           message: `Input text gradually over ${runtime.visualPreferences.typingDurationMs} ms.`,
@@ -212,10 +246,12 @@ if (!globalThis[GLOBAL_KEY]) {
       const direction = args.direction === "up" ? "up" : "down";
       const pages = Math.min(3, Math.max(0.25, Number(args.pages) || 0.8));
       const index = args.index === undefined ? undefined : requireIndex(args);
-      return withVisualAction((activeController) => activeController.scroll({
-        down: direction === "down",
-        numPages: pages,
-        index,
+      return withVisualAction((_activeController, signal) => scrollPageGradually({
+        direction,
+        pages,
+        indexedElement: index === undefined ? undefined : indexedElement(index),
+        durationMs: runtime.visualPreferences.scrollDurationMs,
+        signal,
       }));
     }
 

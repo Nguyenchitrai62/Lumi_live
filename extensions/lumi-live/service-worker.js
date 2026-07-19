@@ -22,7 +22,9 @@ const DEFAULT_MCP_TOOL_POLICY = "allow";
 let connectedTabId = null;
 let listedTabIds = new Set();
 let listedTabsExpireAt = 0;
+let activeBrowserAction = null;
 const mcpConnections = new Map();
+const activeMcpCallControllers = new Set();
 
 async function loadTarget() {
   const stored = await chrome.storage.session.get(TARGET_STORAGE_KEY);
@@ -170,19 +172,49 @@ async function getStatus() {
   }
 }
 
-async function sendBrowserTool(tool, args) {
+function assertBrowserActionActive(action) {
+  if (action?.cancelled) throw new Error("The browser action was cancelled by the user.");
+}
+
+function trackBrowserActionTab(action, tabId) {
+  if (action && Number.isInteger(tabId)) action.tabIds.add(tabId);
+}
+
+async function cancelActiveBrowserAction() {
+  const action = activeBrowserAction;
+  if (action) action.cancelled = true;
+  const tabIds = new Set(action ? action.tabIds : []);
+  if (Number.isInteger(connectedTabId)) tabIds.add(connectedTabId);
+  listedTabIds = new Set();
+  listedTabsExpireAt = 0;
+  await Promise.all([...tabIds].map((tabId) =>
+    sendControllerBridge(tabId, "bridge_cancel_active_action").catch(() => null)));
+  return { cancelled: Boolean(action), resetTabCount: tabIds.size };
+}
+
+function cancelActiveMcpCalls() {
+  const controllers = [...activeMcpCallControllers];
+  for (const controller of controllers) controller.abort();
+  return { cancelled: controllers.length > 0, count: controllers.length };
+}
+
+async function sendBrowserTool(tool, args, action) {
   const status = await getStatus();
+  assertBrowserActionActive(action);
   if (!status.connected || !status.tabId) {
     throw new Error("No controllable web page is active. Switch to a normal http/https tab and try again.");
   }
+  trackBrowserActionTab(action, status.tabId);
   if (!(await ensureController(status.tabId, 4))) {
     throw new Error("The PageAgent controller is still recovering after navigation.");
   }
+  assertBrowserActionActive(action);
   const result = await chrome.tabs.sendMessage(status.tabId, {
     source: CONTENT_REQUEST_SOURCE,
     tool,
     args: args || {},
   });
+  assertBrowserActionActive(action);
   if (result?.success === false) {
     throw new Error(result.error || result.message || "PageAgent action failed.");
   }
@@ -263,8 +295,24 @@ function tabTransitionSearchText(url) {
   return parsed.hostname.replace(/^www\./i, "").slice(0, 120) || "new tab";
 }
 
-async function waitForTabToSettle(tabId) {
+async function findExistingTabForUrl(url) {
+  const focusedWindow = await chrome.windows.getLastFocused();
+  const tabs = await chrome.tabs.query({ windowId: focusedWindow.id });
+  const controllableTabs = tabs.filter((tab) => Number.isInteger(tab.id) && isWebPage(tab.url));
+  listedTabIds = new Set(controllableTabs.map((tab) => tab.id));
+  listedTabsExpireAt = Date.now() + 30000;
+  return controllableTabs.find((tab) => {
+    try {
+      return new URL(tab.url).href === url;
+    } catch {
+      return false;
+    }
+  }) || null;
+}
+
+async function waitForTabToSettle(tabId, action) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
+    assertBrowserActionActive(action);
     const tab = await chrome.tabs.get(tabId);
     if (tab.status === "complete") return tab;
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -272,27 +320,61 @@ async function waitForTabToSettle(tabId) {
   return chrome.tabs.get(tabId);
 }
 
-async function openBrowserTab(args = {}) {
+async function openBrowserTab(args = {}, action) {
   const url = requireWebUrl(args.url);
-  const previousTabId = connectedTabId;
-  if (previousTabId) {
-    await sendControllerBridge(previousTabId, "bridge_show_tab_departure", {
-      searchText: tabTransitionSearchText(url),
-    }).catch(() => {});
+  const existingTab = await findExistingTabForUrl(url);
+  assertBrowserActionActive(action);
+  if (existingTab?.id) {
+    return switchBrowserTab({ tabId: existingTab.id }, action);
   }
-  const createdTab = await chrome.tabs.create({ url, active: true });
-  if (!createdTab.id) throw new Error("Chrome created the tab without an ID.");
-  await setConnectedTab(createdTab.id);
-  const tab = await waitForTabToSettle(createdTab.id);
-  const controllerReady = await ensureController(createdTab.id, 5);
-  return {
-    opened: true,
-    controllerReady,
-    ...serializeTab(tab),
-  };
+  const previousTab = await getActiveTab();
+  const previousTabId = previousTab?.id;
+  trackBrowserActionTab(action, previousTabId);
+  let createdTab = null;
+  let activated = false;
+  try {
+    if (!previousTabId || !isWebPage(previousTab?.url)) {
+      throw new Error("Lumi needs a controllable current page to show the required Google Search transition before opening a new tab.");
+    }
+    const departureReady = await ensureController(previousTabId, 3);
+    assertBrowserActionActive(action);
+    if (!departureReady) {
+      throw new Error("The current page could not prepare the required Google Search transition.");
+    }
+    await sendControllerBridge(previousTabId, "bridge_show_google_search_departure", {
+      searchText: tabTransitionSearchText(url),
+    });
+    assertBrowserActionActive(action);
+
+    createdTab = await chrome.tabs.create({ url, active: true });
+    if (!createdTab.id) throw new Error("Chrome created the tab without an ID.");
+    activated = true;
+    trackBrowserActionTab(action, createdTab.id);
+    void sendControllerBridge(previousTabId, "bridge_clear_tab_transition").catch(() => {});
+    await chrome.windows.update(createdTab.windowId, { focused: true });
+    await setConnectedTab(createdTab.id);
+    await waitForTabToSettle(createdTab.id, action);
+    const controllerReady = await ensureController(createdTab.id, 5);
+    assertBrowserActionActive(action);
+    if (!controllerReady) throw new Error("The new tab could not prepare Lumi's page controller.");
+    assertBrowserActionActive(action);
+    return {
+      opened: true,
+      controllerReady,
+      ...serializeTab(await chrome.tabs.get(createdTab.id)),
+    };
+  } catch (error) {
+    if (previousTabId) {
+      void sendControllerBridge(previousTabId, "bridge_clear_tab_transition").catch(() => {});
+    }
+    if (!activated && createdTab?.id) {
+      await chrome.tabs.remove(createdTab.id).catch(() => {});
+    }
+    throw error;
+  }
 }
 
-async function switchBrowserTab(args = {}) {
+async function switchBrowserTab(args = {}, action) {
   const tabId = Number(args.tabId);
   if (!Number.isInteger(tabId)) {
     throw new Error("browser_switch_tab requires a numeric tabId from browser_list_tabs.");
@@ -302,16 +384,60 @@ async function switchBrowserTab(args = {}) {
   }
   const tab = await chrome.tabs.get(tabId);
   if (!isWebPage(tab.url)) throw new Error("The selected tab is not a controllable http/https page.");
+  const previousTab = await getActiveTab(tab.windowId);
+  if (previousTab?.id === tabId) {
+    await setConnectedTab(tabId);
+    return {
+      switched: true,
+      controllerReady: await ensureController(tabId, 3),
+      ...serializeTab(tab),
+    };
+  }
+
+  trackBrowserActionTab(action, tabId);
+  const controllerReady = await ensureController(tabId, 5);
+  assertBrowserActionActive(action);
+  if (!controllerReady) throw new Error("The destination tab could not prepare Lumi's page controller.");
   await chrome.tabs.update(tabId, { active: true });
   await chrome.windows.update(tab.windowId, { focused: true });
   await setConnectedTab(tabId);
-  const controllerReady = await ensureController(tabId, 5);
+  assertBrowserActionActive(action);
   const activeTab = await chrome.tabs.get(tabId);
   return {
     switched: true,
     controllerReady,
     ...serializeTab(activeTab),
   };
+}
+
+async function executeBrowserTool(tool, args = {}) {
+  const action = { cancelled: false, tabIds: new Set() };
+  activeBrowserAction = action;
+  let timeoutId = null;
+  const execute = async () => {
+    if (tool === "browser_get_active_context") return getActivePageContext();
+    if (tool === "browser_list_tabs") return listBrowserTabs();
+    if (tool === "browser_open_tab") return openBrowserTab(args, action);
+    if (tool === "browser_switch_tab") return switchBrowserTab(args, action);
+    return sendBrowserTool(tool, args, action);
+  };
+  const timeoutMs = tool === "browser_open_tab" ? 20000 : 12000;
+  try {
+    return await Promise.race([
+      execute(),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          action.cancelled = true;
+          void Promise.all([...action.tabIds].map((tabId) =>
+            sendControllerBridge(tabId, "bridge_cancel_active_action").catch(() => null)));
+          reject(new Error(`${tool} timed out after ${Math.round(timeoutMs / 1000)} seconds. Page state was reset; observe the page again before retrying.`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+    if (activeBrowserAction === action) activeBrowserAction = null;
+  }
 }
 
 function fallbackMcpServerName(url) {
@@ -663,7 +789,13 @@ async function callMcpTool(serverId, tool, args, permissionGranted = false) {
   if (temporaryBlock) throw new Error(`This MCP tool is temporarily disabled: ${temporaryBlock.reason}`);
   const compatibility = prepareGeminiMcpTool(candidate);
   if (!compatibility.enabled) throw new Error(`This MCP tool has an incompatible schema: ${compatibility.errors.join(" ")}`);
-  return connection.client.callTool(tool, args || {});
+  const controller = new AbortController();
+  activeMcpCallControllers.add(controller);
+  try {
+    return await connection.client.callTool(tool, args || {}, { signal: controller.signal });
+  } finally {
+    activeMcpCallControllers.delete(controller);
+  }
 }
 
 async function handleMessage(message) {
@@ -682,12 +814,10 @@ async function handleMessage(message) {
     }
     return visualPreferences;
   }
+  if (message.command === "cancel_active_browser_action") return cancelActiveBrowserAction();
+  if (message.command === "cancel_active_mcp_calls") return cancelActiveMcpCalls();
   if (message.command === "browser_tool") {
-    if (message.tool === "browser_get_active_context") return getActivePageContext();
-    if (message.tool === "browser_list_tabs") return listBrowserTabs();
-    if (message.tool === "browser_open_tab") return openBrowserTab(message.args || {});
-    if (message.tool === "browser_switch_tab") return switchBrowserTab(message.args || {});
-    return sendBrowserTool(message.tool, message.args || {});
+    return executeBrowserTool(message.tool, message.args || {});
   }
   if (message.command === "mcp_list_servers") return listMcpServers();
   if (message.command === "mcp_add_server") return addMcpServer(message.url);

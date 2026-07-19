@@ -94,7 +94,10 @@
         <form id="messageForm" class="message-form">
           <label class="sr-only" for="messageInput">Message Lumi</label>
           <input id="messageInput" type="text" placeholder="Start voice to type a message…" disabled />
-          <button type="submit" aria-label="Send message" disabled>↑</button>
+          <button id="messageSubmit" type="submit" data-mode="send" aria-label="Send message" title="Send message" disabled>
+            <span class="message-send-icon" aria-hidden="true">↑</span>
+            <span class="message-cancel-icon" aria-hidden="true"></span>
+          </button>
         </form>
         <div class="status-row">
           <p id="statusLine" class="status-line">Open settings and save your Gemini API key.</p>

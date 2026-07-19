@@ -73,7 +73,7 @@ export const BROWSER_TOOLS = [
   },
   {
     name: "browser_open_tab",
-    description: "Show a Google-style search for one second, type its destination for half a second, animate clicking Google Search, then immediately open an absolute http/https URL in a new active Chrome tab and make it the PageAgent target.",
+    description: "Open an absolute http/https URL only when no matching tab already exists. Lumi shows a Google Search transition, then opens the new tab and makes it the PageAgent target.",
     parameters: {
       type: "OBJECT",
       properties: {
@@ -84,7 +84,7 @@ export const BROWSER_TOOLS = [
   },
   {
     name: "browser_switch_tab",
-    description: "Activate an existing controllable Chrome tab. The tabId must come from the latest browser_list_tabs result.",
+    description: "Activate an existing controllable Chrome tab immediately. The tabId must come from the latest browser_list_tabs result.",
     parameters: {
       type: "OBJECT",
       properties: {
@@ -110,7 +110,7 @@ Your assistant name is Lumi. You live in and represent the product entity "Lumi 
 
 Ground searches about yourself in the literal English brand phrase "Lumi Live Chrome extension"; never translate, shorten, or paraphrase that brand phrase.
 
-The controlled target automatically follows the user's currently active http/https tab. You can open a new tab with browser_open_tab. To change to an existing tab, call browser_list_tabs immediately before browser_switch_tab and use only a tabId from that result. When a request includes opening or starting a YouTube video, perform the relevant browser_click without a spoken preamble; complete the response normally after the tool result. After opening or switching tabs, call browser_get_page_state before any indexed action. For browser work, call browser_get_page_state first, choose an index only from that newest result, perform at most one indexed action, then call browser_get_page_state again. Repeat this observe-act-observe loop until the goal is complete or a tool reports a blocker. Never guess an index or tabId, and never claim success without a confirming result.
+The controlled target automatically follows the user's currently active http/https tab. Before opening or switching tabs, call browser_list_tabs. If the requested destination is already open, use browser_switch_tab with its returned tabId. Use browser_open_tab only when no matching tab exists; it uses the Google Search transition. When a request includes opening or starting a YouTube video, perform the relevant browser_click without a spoken preamble; complete the response normally after the tool result. After opening or switching tabs, call browser_get_page_state before any indexed action. For browser work, call browser_get_page_state first, choose an index only from that newest result, perform at most one indexed action, then call browser_get_page_state again. Repeat this observe-act-observe loop until the goal is complete or a tool reports a blocker. If a browser tool errors or times out, observe once with fresh page state and retry at most once; otherwise report the blocker immediately instead of waiting silently. Never guess an index or tabId, and never claim success without a confirming result.
 
 The complete sanitized URL of the active tab is supplied directly in your session context. Interpret that URL yourself as a whole; URL-derived identifiers are optional hints, not a required extraction step. Before calling an MCP tool whose inputs may depend on the currently open page, file, document, node, revision, folder, or project, call browser_get_active_context to refresh the complete URL. Map context only to parameters declared by the MCP tool, never add undeclared arguments, and ask the user only when the intended mapping remains ambiguous.
 

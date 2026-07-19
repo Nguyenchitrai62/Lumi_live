@@ -89,9 +89,16 @@ export class McpHttpClient {
     this.nextRequestId = 1;
   }
 
-  async post(payload, expectedId) {
+  async post(payload, expectedId, externalSignal) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, REQUEST_TIMEOUT_MS);
+    const abortFromCaller = () => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    else externalSignal?.addEventListener("abort", abortFromCaller, { once: true });
     const headers = {
       Accept: "application/json, text/event-stream",
       "Content-Type": "application/json",
@@ -130,17 +137,20 @@ export class McpHttpClient {
       return message.result;
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
-        throw new Error("The MCP server did not respond within 20 seconds.");
+        throw new Error(timedOut
+          ? "The MCP server did not respond within 20 seconds."
+          : "The MCP request was cancelled by the user.");
       }
       throw error;
     } finally {
       clearTimeout(timeoutId);
+      externalSignal?.removeEventListener("abort", abortFromCaller);
     }
   }
 
-  async request(method, params = {}) {
+  async request(method, params = {}, options = {}) {
     const id = this.nextRequestId++;
-    return this.post({ jsonrpc: "2.0", id, method, params }, id);
+    return this.post({ jsonrpc: "2.0", id, method, params }, id, options.signal);
   }
 
   async notify(method, params = {}) {
@@ -165,7 +175,7 @@ export class McpHttpClient {
     return Array.isArray(result?.tools) ? result.tools : [];
   }
 
-  async callTool(name, args = {}) {
-    return this.request("tools/call", { name, arguments: args });
+  async callTool(name, args = {}, options = {}) {
+    return this.request("tools/call", { name, arguments: args }, options);
   }
 }

@@ -76,10 +76,18 @@ const elements = {
 let sessionStatus = "idle";
 let intentionalClose = false;
 let isMuted = false;
+let agentTurnActive = false;
+let turnCancellationPending = false;
+let turnExecutionSequence = 0;
+let turnCancellationDrainTimeoutId = null;
+let turnCancellationWatchdogTimeoutId = null;
+let turnRuntimeResetPromise = Promise.resolve();
+let suppressServerOutputUntilNextUserTurn = false;
 let browserToolRunning = false;
 let activeMcpTools = new Map();
 const cancelledToolCallIds = new Set();
 const pendingToolCallIds = new Set();
+const pendingToolCallNames = new Map();
 const mcpActivityCards = new Map();
 const promptedMcpToolFailures = new Set();
 const pendingMcpPermissionPrompts = new Map();
@@ -128,8 +136,91 @@ function sendRuntime(command, payload = {}) {
   });
 }
 
+function syncMessageComposer() {
+  const ready = sessionStatus === "ready";
+  const cancelMode = ready && agentTurnActive;
+  elements.messageInput.disabled = !ready || cancelMode || turnCancellationPending;
+  elements.messageInput.placeholder = !ready
+    ? "Start voice to type a message…"
+    : turnCancellationPending ? "Cancelling current action…"
+      : cancelMode ? "Lumi is working…" : "Type a message to Lumi…";
+  elements.messageSubmit.dataset.mode = cancelMode ? "cancel" : "send";
+  elements.messageSubmit.setAttribute("aria-label", cancelMode ? "Cancel current action" : "Send message");
+  elements.messageSubmit.title = cancelMode ? "Cancel current action" : "Send message";
+  elements.messageSubmit.disabled = !ready
+    || turnCancellationPending
+    || (!cancelMode && !elements.messageInput.value.trim());
+}
+
+function setAgentTurnActive(active) {
+  if (active === true && (turnCancellationPending || suppressServerOutputUntilNextUserTurn)) return;
+  agentTurnActive = sessionStatus === "ready" && active === true;
+  syncMessageComposer();
+}
+
+function clearTurnCancellationTimers() {
+  clearTimeout(turnCancellationDrainTimeoutId);
+  clearTimeout(turnCancellationWatchdogTimeoutId);
+  turnCancellationDrainTimeoutId = null;
+  turnCancellationWatchdogTimeoutId = null;
+}
+
+function rememberCancelledToolCall(callId) {
+  if (!callId) return;
+  cancelledToolCallIds.add(callId);
+  setTimeout(() => cancelledToolCallIds.delete(callId), 60000);
+}
+
+function resetPendingTurnExecution(message = "Cancelled by the user.") {
+  cancelPendingMcpPermissionPrompts();
+  const cancelledResponses = [];
+  for (const callId of pendingToolCallIds) {
+    rememberCancelledToolCall(callId);
+    finishMcpActivity(callId, "cancelled", message);
+    const name = pendingToolCallNames.get(callId);
+    if (name) {
+      cancelledResponses.push({
+        id: callId,
+        name,
+        response: { error: "Cancelled by the user before this tool could finish." },
+      });
+    }
+  }
+  pendingToolCallIds.clear();
+  pendingToolCallNames.clear();
+  browserToolRunning = false;
+  stopPlayback();
+  responseAudioGate.reset();
+  finalizeTranscript("user");
+  finalizeTranscript("lumi");
+  return cancelledResponses;
+}
+
+async function completeTurnCancellation() {
+  if (!turnCancellationPending) return;
+  await Promise.race([
+    turnRuntimeResetPromise,
+    new Promise((resolve) => setTimeout(resolve, 500)),
+  ]);
+  if (!turnCancellationPending) return;
+  clearTurnCancellationTimers();
+  resetPendingTurnExecution();
+  turnCancellationPending = false;
+  setAgentTurnActive(false);
+  elements.statusLine.textContent = "Current action cancelled and reset. Lumi is ready for your next request.";
+  avatarController.syncState();
+  syncMessageComposer();
+}
+
+function scheduleTurnCancellationCompletion() {
+  clearTimeout(turnCancellationDrainTimeoutId);
+  turnCancellationDrainTimeoutId = setTimeout(completeTurnCancellation, 120);
+}
+
 function setSessionStatus(nextStatus, message) {
   sessionStatus = nextStatus;
+  if (nextStatus !== "ready") agentTurnActive = false;
+  if (nextStatus !== "ready") turnCancellationPending = false;
   if (nextStatus !== "error") elements.microphoneHelpButton.hidden = true;
   elements.liveBadge.className = `badge badge-${nextStatus === "ready" ? "live" : nextStatus === "connecting" ? "joining" : nextStatus === "error" ? "error" : "offline"}`;
   elements.liveBadge.textContent = nextStatus === "ready" ? "Live" : nextStatus === "connecting" ? "Joining" : nextStatus === "error" ? "Retry" : "Offline";
@@ -138,9 +229,7 @@ function setSessionStatus(nextStatus, message) {
   elements.startButton.classList.toggle("live", nextStatus === "ready");
   elements.startButton.querySelector("span:last-child").textContent = nextStatus === "ready" ? "End voice" : nextStatus === "connecting" ? "Connecting…" : "Start voice";
   elements.muteButton.disabled = nextStatus !== "ready";
-  elements.messageInput.disabled = nextStatus !== "ready";
-  elements.messageSubmit.disabled = nextStatus !== "ready" || !elements.messageInput.value.trim();
-  elements.messageInput.placeholder = nextStatus === "ready" ? "Type a message to Lumi…" : "Start voice to type a message…";
+  syncMessageComposer();
   avatarController.syncState();
 }
 
@@ -474,8 +563,16 @@ async function setupMicrophone(stream) {
     channelCountMode: "explicit",
   });
   micProcessor.port.onmessage = (event) => {
-    if (sessionStatus !== "ready" || isMuted || websocket?.readyState !== WebSocket.OPEN) return;
+    if (sessionStatus !== "ready" || isMuted || turnCancellationPending || websocket?.readyState !== WebSocket.OPEN) return;
     const mono = event.data;
+    if (suppressServerOutputUntilNextUserTurn) {
+      let energy = 0;
+      for (const sample of mono) energy += sample * sample;
+      if (Math.sqrt(energy / mono.length) < 0.012) return;
+      suppressServerOutputUntilNextUserTurn = false;
+      finalizeTranscript("user");
+      finalizeTranscript("lumi");
+    }
     const pcm = floatToPcm16(resampleTo16k(mono, audioContext.sampleRate));
     sendJson({
       realtimeInput: {
@@ -748,7 +845,7 @@ function finishMcpActivity(callId, state, value) {
 
 function cancelPendingMcpActivities(message = "Gemini cancelled this tool call because the current turn was interrupted.") {
   for (const id of pendingToolCallIds) {
-    cancelledToolCallIds.add(id);
+    rememberCancelledToolCall(id);
     finishMcpActivity(id, "cancelled", message);
   }
 }
@@ -759,17 +856,65 @@ async function handleServerMessage(event, sourceSocket) {
   if (sourceSocket !== websocket) return;
 
   for (const id of response.toolCallCancellation?.ids || []) {
-    cancelledToolCallIds.add(id);
+    rememberCancelledToolCall(id);
     finishMcpActivity(id, "cancelled", "Gemini cancelled this tool call because the conversation turn was interrupted.");
-    setTimeout(() => cancelledToolCallIds.delete(id), 60000);
   }
   if (response.setupComplete) {
     clearSetupTimeout();
+    clearTurnCancellationTimers();
+    turnCancellationPending = false;
+    suppressServerOutputUntilNextUserTurn = false;
     setSessionStatus("ready", "Lumi is listening. PageAgent automatically follows your active web tab.");
+    setAgentTurnActive(true);
     sendJson({ realtimeInput: { text: "Greet the user warmly in one short sentence and say you are ready." } }, sourceSocket);
   }
 
   const serverContent = response.serverContent;
+  const functionCalls = response.toolCall?.functionCalls || [];
+  const hasTurnPayload = Boolean(
+    serverContent?.modelTurn?.parts?.length
+    || serverContent?.inputTranscription?.text
+    || serverContent?.outputTranscription?.text
+    || functionCalls.length
+  );
+  if (turnCancellationPending) {
+    if (hasTurnPayload) clearTimeout(turnCancellationDrainTimeoutId);
+    for (const functionCall of functionCalls) rememberCancelledToolCall(functionCall.id);
+    const cancelledResponses = functionCalls
+      .filter((functionCall) => functionCall.id && functionCall.name)
+      .map((functionCall) => ({
+        id: functionCall.id,
+        name: functionCall.name,
+        response: { error: "Cancelled by the user before this tool could run." },
+      }));
+    if (cancelledResponses.length && sourceSocket === websocket) {
+      sendJson({ toolResponse: { functionResponses: cancelledResponses } }, sourceSocket);
+    }
+    if (serverContent?.interrupted) resetPendingTurnExecution();
+    if (serverContent?.turnComplete) scheduleTurnCancellationCompletion();
+    return;
+  }
+  if (suppressServerOutputUntilNextUserTurn) {
+    const cancelledResponses = functionCalls
+      .filter((functionCall) => functionCall.id && functionCall.name)
+      .map((functionCall) => ({
+        id: functionCall.id,
+        name: functionCall.name,
+        response: { error: "Ignored because the previous turn was cancelled." },
+      }));
+    for (const functionCall of functionCalls) rememberCancelledToolCall(functionCall.id);
+    if (cancelledResponses.length && sourceSocket === websocket) {
+      sendJson({ toolResponse: { functionResponses: cancelledResponses } }, sourceSocket);
+    }
+    if (serverContent?.interrupted || serverContent?.turnComplete) setAgentTurnActive(false);
+    return;
+  }
+  if (
+    serverContent?.modelTurn?.parts?.length
+    || serverContent?.inputTranscription?.text
+    || serverContent?.outputTranscription?.text
+    || functionCalls.length
+  ) setAgentTurnActive(true);
   for (const part of serverContent?.modelTurn?.parts || []) {
     if (part.inlineData?.data && responseAudioGate.shouldPlay()) {
       playPcmChunk(part.inlineData.data);
@@ -778,23 +923,37 @@ async function handleServerMessage(event, sourceSocket) {
   if (serverContent?.inputTranscription?.text) updateTranscript("user", serverContent.inputTranscription.text);
   if (serverContent?.outputTranscription?.text) updateTranscript("lumi", serverContent.outputTranscription.text);
   if (serverContent?.interrupted) {
+    const wasUserCancellation = turnCancellationPending;
+    turnCancellationPending = false;
     cancelPendingMcpActivities();
     stopPlayback();
     responseAudioGate.reset();
     finalizeTranscript("lumi");
+    setAgentTurnActive(false);
+    if (wasUserCancellation) {
+      elements.statusLine.textContent = "Current action cancelled. Lumi is ready for your next request.";
+    }
   }
   if (serverContent?.turnComplete) {
+    const wasUserCancellation = turnCancellationPending;
+    turnCancellationPending = false;
     finalizeTranscript("user");
     finalizeTranscript("lumi");
+    setAgentTurnActive(false);
+    if (wasUserCancellation) {
+      elements.statusLine.textContent = "Current action cancelled. Lumi is ready for your next request.";
+    }
   }
 
-  const functionCalls = response.toolCall?.functionCalls || [];
   if (functionCalls.length) {
+    const executionSequence = turnExecutionSequence;
     const functionResponses = [];
     for (const functionCall of functionCalls) {
+      if (executionSequence !== turnExecutionSequence || turnCancellationPending) break;
       const callId = functionCall.id;
       if (!callId || cancelledToolCallIds.has(callId)) continue;
       pendingToolCallIds.add(callId);
+      pendingToolCallNames.set(callId, functionCall.name);
       let mcpTool = null;
       try {
         const isBrowserTool = BROWSER_TOOLS.some((tool) => tool.name === functionCall.name);
@@ -810,7 +969,12 @@ async function handleServerMessage(event, sourceSocket) {
           result = consumed.result;
           if (consumed.suppressForTurn) responseAudioGate.suppress();
         }
-        if (cancelledToolCallIds.has(callId) || sourceSocket !== websocket) {
+        if (
+          cancelledToolCallIds.has(callId)
+          || executionSequence !== turnExecutionSequence
+          || turnCancellationPending
+          || sourceSocket !== websocket
+        ) {
           if (mcpTool) finishMcpActivity(callId, "cancelled", "The session ended before Lumi could use this MCP result.");
           continue;
         }
@@ -821,7 +985,12 @@ async function handleServerMessage(event, sourceSocket) {
           response: { result },
         });
       } catch (error) {
-        if (cancelledToolCallIds.has(callId) || sourceSocket !== websocket) {
+        if (
+          cancelledToolCallIds.has(callId)
+          || executionSequence !== turnExecutionSequence
+          || turnCancellationPending
+          || sourceSocket !== websocket
+        ) {
           if (mcpTool) finishMcpActivity(callId, "cancelled", "The MCP call was cancelled before it completed.");
           continue;
         }
@@ -836,10 +1005,15 @@ async function handleServerMessage(event, sourceSocket) {
         });
       } finally {
         pendingToolCallIds.delete(callId);
-        if (cancelledToolCallIds.has(callId)) cancelledToolCallIds.delete(callId);
+        pendingToolCallNames.delete(callId);
       }
     }
-    if (functionResponses.length && sourceSocket === websocket) {
+    if (
+      functionResponses.length
+      && executionSequence === turnExecutionSequence
+      && !turnCancellationPending
+      && sourceSocket === websocket
+    ) {
       sendJson({ toolResponse: { functionResponses } }, sourceSocket);
     }
   }
@@ -1014,9 +1188,12 @@ async function startSession() {
 
 function cleanupMedia() {
   clearSetupTimeout();
+  clearTurnCancellationTimers();
+  turnExecutionSequence += 1;
   cancelPendingMcpPermissionPrompts();
   cancelPendingMcpActivities("The voice session ended before this MCP tool call completed.");
   pendingToolCallIds.clear();
+  pendingToolCallNames.clear();
   stopPlayback();
   responseAudioGate.reset();
   websocket = null;
@@ -1031,6 +1208,9 @@ function cleanupMedia() {
   audioContext = null;
   analyser = null;
   isMuted = false;
+  agentTurnActive = false;
+  turnCancellationPending = false;
+  suppressServerOutputUntilNextUserTurn = false;
   elements.muteButton.textContent = "Mute";
   finalizeTranscript("user");
   finalizeTranscript("lumi");
@@ -1055,15 +1235,45 @@ function toggleMute() {
 
 function sendText(text) {
   const clean = text.trim();
-  if (!clean || sessionStatus !== "ready") return;
+  if (!clean || sessionStatus !== "ready" || agentTurnActive || turnCancellationPending) return;
+  turnExecutionSequence += 1;
+  suppressServerOutputUntilNextUserTurn = false;
   responseAudioGate.reset();
   finalizeTranscript("user");
   finalizeTranscript("lumi");
   createMessage("user", clean);
   avatarController.transitionState("thinking");
+  turnCancellationPending = false;
+  setAgentTurnActive(true);
   sendJson({ realtimeInput: { text: clean } });
   elements.messageInput.value = "";
-  elements.messageSubmit.disabled = true;
+  syncMessageComposer();
+}
+
+function cancelCurrentTurn() {
+  if (sessionStatus !== "ready" || !agentTurnActive) return;
+  clearTurnCancellationTimers();
+  turnCancellationPending = true;
+  suppressServerOutputUntilNextUserTurn = true;
+  turnExecutionSequence += 1;
+  const cancelledResponses = resetPendingTurnExecution("Cancelled by the user.");
+  if (cancelledResponses.length) {
+    sendJson({ toolResponse: { functionResponses: cancelledResponses } });
+  }
+  sendJson({ realtimeInput: { audioStreamEnd: true } });
+  sendJson({
+    realtimeInput: {
+      text: "The user pressed Cancel. Stop the previous task immediately, do not call any tools, and acknowledge cancellation briefly.",
+    },
+  });
+  turnRuntimeResetPromise = Promise.allSettled([
+    sendRuntime("cancel_active_browser_action"),
+    sendRuntime("cancel_active_mcp_calls"),
+  ]).then(() => undefined);
+  setAgentTurnActive(false);
+  elements.statusLine.textContent = "Cancelling the current action…";
+  avatarController.syncState();
+  turnCancellationWatchdogTimeoutId = setTimeout(completeTurnCancellation, 1200);
 }
 
 function toggleVtuberSize() {
@@ -1112,11 +1322,12 @@ elements.mcpToolNoticePrimary.addEventListener("click", () => void handleMcpTool
 elements.mcpToolNoticeSecondary.addEventListener("click", () => void handleMcpToolNoticeAction("secondary"));
 elements.mcpToolNoticeTertiary.addEventListener("click", () => void handleMcpToolNoticeAction("tertiary"));
 elements.messageInput.addEventListener("input", () => {
-  elements.messageSubmit.disabled = sessionStatus !== "ready" || !elements.messageInput.value.trim();
+  syncMessageComposer();
 });
 elements.messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  sendText(elements.messageInput.value);
+  if (agentTurnActive) cancelCurrentTurn();
+  else sendText(elements.messageInput.value);
 });
 window.addEventListener("unload", () => {
   intentionalClose = true;

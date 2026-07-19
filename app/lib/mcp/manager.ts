@@ -354,7 +354,11 @@ export class McpManager {
     return { ...tool, permission: mode };
   }
 
-  async callFunction(functionName: string, args: JsonRecord = {}) {
+  async callFunction(
+    functionName: string,
+    args: JsonRecord = {},
+    options: { signal?: AbortSignal } = {},
+  ) {
     const tool = this.getActiveTool(functionName);
     if (!tool) throw new Error(`Unsupported MCP tool: ${functionName}`);
     if (tool.permission === "block") {
@@ -370,7 +374,7 @@ export class McpManager {
     if (!compatibility.enabled) {
       throw new Error(`This MCP tool has an incompatible schema: ${compatibility.errors.join(" ")}`);
     }
-    return connection.client.callTool(tool.toolName, args);
+    return connection.client.callTool(tool.toolName, args, options);
   }
 
   buildSessionGuidance(servers = this.views) {
