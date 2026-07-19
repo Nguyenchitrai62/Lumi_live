@@ -56,10 +56,17 @@ body.petals-off .petal-field { opacity: 0; }
 .brand > span { font-size: 16px; font-weight: 800; letter-spacing: -0.04em; }
 .brand strong { color: var(--lavender); }
 .badge { padding: 5px 8px; border-radius: 999px; font-size: 9px; font-weight: 900; letter-spacing: .06em; }
+.badge[hidden] { display: none; }
 .badge-offline { color: #746d80; background: rgba(119, 112, 134, .11); }
 .badge-live { color: #24765d; background: #dff5ed; }
 .badge-joining { color: #95651e; background: #fff0cf; }
 .badge-error { color: #a94057; background: #ffe5eb; }
+.badge-translate { color: #24765d; border: 1px solid rgba(75,181,146,.22); background: #dff5ed; }
+.badge-translate::before { content: ""; display: inline-block; width: 5px; height: 5px; margin-right: 5px; border-radius: 50%; background: currentColor; animation: translate-badge-pulse 1.35s ease-in-out infinite; }
+.badge-translate.translate-connecting, .badge-translate.translate-reconnecting { color: #95651e; border-color: rgba(149,101,30,.2); background: #fff0cf; }
+.badge-translate.translate-error { color: #a94057; border-color: rgba(169,64,87,.2); background: #ffe5eb; }
+.badge-translate.translate-error::before { animation: none; }
+@keyframes translate-badge-pulse { 50% { opacity: .4; transform: scale(.72); } }
 .icon-button { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); cursor: pointer; }
 .avatar-mode-button { color: #7058bd; transition: color .2s ease, border-color .2s ease, background .2s ease, transform .2s ease, box-shadow .2s ease; }
 .avatar-mode-button:hover { transform: translateY(-1px); }

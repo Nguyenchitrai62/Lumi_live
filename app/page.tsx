@@ -39,8 +39,23 @@ import {
   describeMicrophoneError,
   describeVideoError,
   getLiveAuth,
+  getLiveTranslationSocketUrl,
   requestVideoStream,
 } from "./lib/live/media";
+import { LiveTranslationController, type LiveTranslationState } from "./lib/live/translation-client";
+import {
+  getLiveTranslationLanguageLabel,
+  LIVE_TRANSLATE_TOOL_DECLARATION,
+  LIVE_TRANSLATE_TOOL_NAME,
+  LIVE_TRANSLATION_GUIDANCE,
+  normalizeLiveTranslationLanguageCode,
+} from "./lib/live/translation-config";
+import {
+  StudioPageAgent,
+  STUDIO_PAGE_AGENT_GUIDANCE,
+  STUDIO_PAGE_AGENT_TOOL_DECLARATIONS,
+  STUDIO_PAGE_AGENT_TOOL_NAMES,
+} from "./lib/live/studio-page-agent";
 import { playGeminiVoicePreview } from "./lib/live/voice-preview";
 import type {
   ChatMessage,
@@ -94,6 +109,8 @@ export default function Home() {
   const [mcpAvatarState, setMcpAvatarState] = useState<PixelAvatarState | null>(null);
   const [agentTurnActive, setAgentTurnActive] = useState(false);
   const [turnCancellationPending, setTurnCancellationPending] = useState(false);
+  const [liveTranslationState, setLiveTranslationState] = useState<LiveTranslationState>("off");
+  const [liveTranslationTarget, setLiveTranslationTarget] = useState("");
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -110,12 +127,16 @@ export default function Home() {
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const micProcessorRef = useRef<AudioWorkletNode | null>(null);
   const videoStreamRef = useRef<MediaStream | null>(null);
+  const sharedAudioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const sharedAudioGainRef = useRef<GainNode | null>(null);
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const videoCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoFrameTimerRef = useRef<number | null>(null);
   const activeVideoModeRef = useRef<VideoMode>("none");
   const videoNoticeRef = useRef("");
   const playbackSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const liveTranslationControllerRef = useRef<LiveTranslationController | null>(null);
+  const suppressAgentAudioForTurnRef = useRef(false);
   const nextPlaybackTimeRef = useRef(0);
   const intentionalCloseRef = useRef(false);
   const readyRef = useRef(false);
@@ -142,8 +163,12 @@ export default function Home() {
   const turnCancellationDrainTimerRef = useRef<number | null>(null);
   const turnCancellationWatchdogTimerRef = useRef<number | null>(null);
   const suppressServerOutputUntilNextUserTurnRef = useRef(false);
+  const cancelledTurnBoundarySeenRef = useRef(false);
+  const freshUserInputStartedRef = useRef(false);
+  const studioPageAgentRef = useRef<StudioPageAgent | null>(null);
   const mcpToolCallSequenceRef = useRef(0);
   if (mcpManagerRef.current == null) mcpManagerRef.current = new McpManager();
+  if (studioPageAgentRef.current == null) studioPageAgentRef.current = new StudioPageAgent();
 
   const updateTurnCancellationPending = (pending: boolean) => {
     turnCancellationPendingRef.current = pending;
@@ -153,11 +178,31 @@ export default function Home() {
   const updateAgentTurnActive = (active: boolean) => {
     if (
       active
-      && (turnCancellationPendingRef.current || suppressServerOutputUntilNextUserTurnRef.current)
+      && (
+        turnCancellationPendingRef.current
+        || (suppressServerOutputUntilNextUserTurnRef.current && !freshUserInputStartedRef.current)
+      )
     ) return;
     const nextActive = readyRef.current && active;
     agentTurnActiveRef.current = nextActive;
     setAgentTurnActive(nextActive);
+  };
+
+  const markFreshUserInputStarted = () => {
+    freshUserInputStartedRef.current = true;
+    if (!cancelledTurnBoundarySeenRef.current) return;
+    suppressServerOutputUntilNextUserTurnRef.current = false;
+    cancelledTurnBoundarySeenRef.current = false;
+    freshUserInputStartedRef.current = false;
+  };
+
+  const markCancelledTurnBoundarySeen = () => {
+    cancelledTurnBoundarySeenRef.current = true;
+    if (!freshUserInputStartedRef.current) return;
+    suppressServerOutputUntilNextUserTurnRef.current = false;
+    cancelledTurnBoundarySeenRef.current = false;
+    freshUserInputStartedRef.current = false;
+    updateAgentTurnActive(true);
   };
 
   const setTransientMcpAvatarState = useCallback((nextState: PixelAvatarState, duration = 0) => {
@@ -376,6 +421,9 @@ export default function Home() {
       pendingToolCallIds.clear();
       pendingToolCallNames.clear();
       mcpApprovalRef.current = null;
+      studioPageAgentRef.current?.dispose();
+      liveTranslationControllerRef.current?.stop();
+      liveTranslationControllerRef.current = null;
       videoStreamRef.current?.getTracks().forEach((track) => track.stop());
       audioContextRef.current?.close();
     };
@@ -480,6 +528,11 @@ export default function Home() {
       videoFrameTimerRef.current = null;
     }
 
+    sharedAudioSourceRef.current?.disconnect();
+    sharedAudioGainRef.current?.disconnect();
+    sharedAudioSourceRef.current = null;
+    sharedAudioGainRef.current = null;
+
     const stream = videoStreamRef.current;
     videoStreamRef.current = null;
     stream?.getTracks().forEach((track) => {
@@ -493,6 +546,15 @@ export default function Home() {
       video.srcObject = null;
     }
     activeVideoModeRef.current = "none";
+  };
+
+  const setSharedAudioVolume = (volume: number) => {
+    const gain = sharedAudioGainRef.current?.gain;
+    const context = audioContextRef.current;
+    if (!gain || !context) return false;
+    gain.cancelScheduledValues(context.currentTime);
+    gain.setTargetAtTime(Math.min(1, Math.max(0, volume)), context.currentTime, 0.025);
+    return true;
   };
 
   const sendVideoFrame = () => {
@@ -546,6 +608,26 @@ export default function Home() {
     video.srcObject = stream;
     await video.play();
 
+    const audioTrack = stream.getAudioTracks()[0];
+    const audioContext = audioContextRef.current;
+    const audioSettings = audioTrack?.getSettings() as (MediaTrackSettings & {
+      suppressLocalAudioPlayback?: boolean;
+    }) | undefined;
+    const audioConstraints = audioTrack?.getConstraints() as (MediaTrackConstraints & {
+      suppressLocalAudioPlayback?: boolean;
+    }) | undefined;
+    const sourceAudioIsSuppressed = audioSettings?.suppressLocalAudioPlayback === true
+      || audioConstraints?.suppressLocalAudioPlayback === true;
+    if (mode === "screen" && audioTrack && audioContext && sourceAudioIsSuppressed) {
+      const source = audioContext.createMediaStreamSource(new MediaStream([audioTrack]));
+      const gain = audioContext.createGain();
+      gain.gain.value = 1;
+      source.connect(gain);
+      gain.connect(audioContext.destination);
+      sharedAudioSourceRef.current = source;
+      sharedAudioGainRef.current = gain;
+    }
+
     const track = stream.getVideoTracks()[0];
     if (track) {
       track.onended = () => {
@@ -595,12 +677,17 @@ export default function Home() {
 
       if (readyRef.current && !mutedRef.current && awaitingNewUserTurnRef.current && rms >= 0.012) {
         awaitingNewUserTurnRef.current = false;
-        suppressServerOutputUntilNextUserTurnRef.current = false;
+        if (suppressServerOutputUntilNextUserTurnRef.current) markFreshUserInputStarted();
+        suppressAgentAudioForTurnRef.current = false;
         finalizeTranscript("user");
         finalizeTranscript("lumi");
       }
 
       if (!readyRef.current || mutedRef.current || turnCancellationPendingRef.current) return;
+      if (
+        suppressServerOutputUntilNextUserTurnRef.current
+        && !freshUserInputStartedRef.current
+      ) return;
       const websocket = websocketRef.current;
       if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
 
@@ -652,6 +739,7 @@ export default function Home() {
   };
 
   const resetPendingTurnExecution = (message = "Cancelled by the user.") => {
+    void studioPageAgentRef.current?.cancel();
     const cancelledResponses: Array<{
       id: string;
       name: string;
@@ -701,7 +789,7 @@ export default function Home() {
     updateTurnCancellationPending(false);
     updateAgentTurnActive(false);
     awaitingNewUserTurnRef.current = true;
-    setStatusMessage("Current action cancelled and reset — Lumi is ready for your next request");
+    setStatusMessage("Current action stopped — waiting silently for your next instruction");
     setTransientMcpAvatarState("listening", 600);
   };
 
@@ -710,6 +798,82 @@ export default function Home() {
       window.clearTimeout(turnCancellationDrainTimerRef.current);
     }
     turnCancellationDrainTimerRef.current = window.setTimeout(completeTurnCancellation, 120);
+  };
+
+  const runLiveTranslationTool = async (
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) => {
+    const action = String(args.action ?? "").trim().toLowerCase();
+    const controller = liveTranslationControllerRef.current;
+    if (!controller) throw new Error("Start the Lumi voice session before using Live Translate.");
+
+    if (action === "status") {
+      const targetLanguageCode = controller.getTargetLanguageCode();
+      return {
+        state: controller.isActive() ? "active" : "off",
+        ...(targetLanguageCode ? { targetLanguageCode } : {}),
+      };
+    }
+
+    if (action === "stop") {
+      const wasActive = controller.isActive();
+      controller.stop();
+      setSharedAudioVolume(1);
+      setLiveTranslationState("off");
+      setLiveTranslationTarget("");
+      setStatusMessage(wasActive
+        ? "Live translation stopped — Lumi is still listening"
+        : "Live translation was already off");
+      return { success: true, state: "off", wasActive };
+    }
+
+    if (action !== "start") {
+      throw new Error("Live Translate action must be start, stop, or status.");
+    }
+    const targetLanguageCode = normalizeLiveTranslationLanguageCode(args.targetLanguageCode);
+    if (!targetLanguageCode) {
+      throw new Error("Choose one of the supported Live Translate target languages.");
+    }
+    if (activeVideoModeRef.current !== "screen") {
+      throw new Error("Live Translate needs the Screen source. End voice, choose Screen, start again, and select the Chrome tab playing the video.");
+    }
+    const inputStream = videoStreamRef.current;
+    if (!inputStream?.getAudioTracks().length) {
+      throw new Error("The shared Chrome tab has no audio track. End voice, reconnect with Screen, and enable Share tab audio in Chrome's picker.");
+    }
+    if (controller.isActive() && controller.getTargetLanguageCode() === targetLanguageCode) {
+      const sourceAudioDucked = setSharedAudioVolume(0.06);
+      suppressAgentAudioForTurnRef.current = true;
+      stopPlayback();
+      return {
+        success: true,
+        state: "active",
+        targetLanguageCode,
+        alreadyActive: true,
+        sourcePlaybackVolume: sourceAudioDucked ? 0.06 : null,
+        sourceAudioDucked,
+      };
+    }
+
+    await controller.start({ inputStream, targetLanguageCode, signal });
+    const sourceAudioDucked = setSharedAudioVolume(0.06);
+    const languageLabel = getLiveTranslationLanguageLabel(targetLanguageCode);
+    suppressAgentAudioForTurnRef.current = true;
+    stopPlayback();
+    setLiveTranslationTarget(targetLanguageCode);
+    setStatusMessage(sourceAudioDucked
+      ? `Live translating the shared video to ${languageLabel} · source audio at 6%`
+      : `Live translating the shared video to ${languageLabel} · Chrome did not expose source-volume control`);
+    return {
+      success: true,
+      state: "active",
+      targetLanguageCode,
+      source: "shared Chrome tab audio",
+      audioOwner: "Gemini Live Translate tool",
+      sourcePlaybackVolume: sourceAudioDucked ? 0.06 : null,
+      sourceAudioDucked,
+    };
   };
 
   const handleServerMessage = async (event: MessageEvent) => {
@@ -732,6 +896,8 @@ export default function Home() {
     if (response.setupComplete) {
       clearTurnCancellationTimers();
       suppressServerOutputUntilNextUserTurnRef.current = false;
+      cancelledTurnBoundarySeenRef.current = false;
+      freshUserInputStartedRef.current = false;
       readyRef.current = true;
       awaitingNewUserTurnRef.current = false;
       updateTurnCancellationPending(false);
@@ -784,6 +950,9 @@ export default function Home() {
       if (cancelledResponses.length > 0) {
         sendJson({ toolResponse: { functionResponses: cancelledResponses } });
       }
+      if (serverContent?.interrupted || serverContent?.turnComplete) {
+        markCancelledTurnBoundarySeen();
+      }
       if (serverContent?.interrupted) resetPendingTurnExecution();
       if (serverContent?.turnComplete) scheduleTurnCancellationCompletion();
       return;
@@ -806,7 +975,14 @@ export default function Home() {
       if (cancelledResponses.length > 0) {
         sendJson({ toolResponse: { functionResponses: cancelledResponses } });
       }
-      if (serverContent?.interrupted || serverContent?.turnComplete) updateAgentTurnActive(false);
+      if (
+        serverContent?.interrupted
+        || serverContent?.turnComplete
+        || (freshUserInputStartedRef.current && serverContent?.inputTranscription?.text)
+      ) {
+        markCancelledTurnBoundarySeen();
+        if (suppressServerOutputUntilNextUserTurnRef.current) updateAgentTurnActive(false);
+      }
       return;
     }
     if (
@@ -816,7 +992,9 @@ export default function Home() {
       || functionCalls.length > 0
     ) updateAgentTurnActive(true);
     for (const part of parts) {
-      if (part.inlineData?.data) playPcmChunk(part.inlineData.data);
+      if (part.inlineData?.data && !suppressAgentAudioForTurnRef.current) {
+        playPcmChunk(part.inlineData.data);
+      }
     }
 
     if (serverContent?.inputTranscription?.text) {
@@ -862,33 +1040,40 @@ export default function Home() {
         if (cancelledToolCallIdsRef.current.has(callId)) continue;
         pendingToolCallIdsRef.current.add(callId);
         pendingToolCallNamesRef.current.set(callId, functionCall.name);
+        const isLiveTranslationTool = functionCall.name === LIVE_TRANSLATE_TOOL_NAME;
+        const isStudioPageAgentTool = STUDIO_PAGE_AGENT_TOOL_NAMES.has(functionCall.name);
         const mcpTool = mcpManagerRef.current!.getActiveTool(functionCall.name);
         const activityId = `mcp-${callId}`;
         let mcpCallController: AbortController | null = null;
         try {
-          if (!mcpTool) {
+          if (!isLiveTranslationTool && !isStudioPageAgentTool && !mcpTool) {
             throw new Error(`Unsupported tool: ${functionCall.name}`);
           }
           const args = functionCall.args && typeof functionCall.args === "object"
             ? functionCall.args as Record<string, unknown>
             : {};
 
-          if (mcpTool) {
+          if (isLiveTranslationTool || isStudioPageAgentTool || mcpTool) {
             setTransientMcpAvatarState("tool_call");
             setMessages((current) => [
               ...current,
               {
                 id: activityId,
                 role: "tool",
-                title: mcpTool.toolName,
-                serverName: mcpTool.serverName,
+                title: isLiveTranslationTool
+                  ? "live_translate"
+                  : isStudioPageAgentTool ? functionCall.name : mcpTool!.toolName,
+                activityLabel: mcpTool ? "MCP TOOL" : "BUILT-IN TOOL",
+                serverName: isLiveTranslationTool
+                  ? "Gemini Live Translate"
+                  : isStudioPageAgentTool ? "Lumi Web Studio · PageAgent" : mcpTool!.serverName,
                 args: formatMcpValue(args, 24000),
                 text: "No result yet.",
                 state: "running",
                 ...createMcpActivityTiming(),
               },
             ]);
-            if (mcpTool.permission === "ask") {
+            if (mcpTool?.permission === "ask") {
               const allowed = await requestMcpPermission(mcpTool, args, callId);
               if (!allowed) throw new Error("MCP tool permission was denied or timed out.");
             }
@@ -896,22 +1081,26 @@ export default function Home() {
 
           mcpCallController = new AbortController();
           activeMcpCallControllersRef.current.set(callId, mcpCallController);
-          const result = normalizeMcpToolResult(
-            await mcpManagerRef.current!.callFunction(functionCall.name, args, {
-              signal: mcpCallController.signal,
-            }),
-          );
+          const result = isLiveTranslationTool
+            ? await runLiveTranslationTool(args, mcpCallController.signal)
+            : isStudioPageAgentTool
+              ? await studioPageAgentRef.current!.run(functionCall.name, args, mcpCallController.signal)
+              : normalizeMcpToolResult(
+              await mcpManagerRef.current!.callFunction(functionCall.name, args, {
+                signal: mcpCallController.signal,
+              }),
+            );
 
           if (
             cancelledToolCallIdsRef.current.has(callId)
             || cancellationSequence !== turnCancellationSequenceRef.current
           ) {
-            if (mcpTool) {
-              updateToolMessage(activityId, "cancelled", "The MCP result arrived after this turn was cancelled.");
+            if (isLiveTranslationTool || isStudioPageAgentTool || mcpTool) {
+              updateToolMessage(activityId, "cancelled", "The tool result arrived after this turn was cancelled.");
             }
             continue;
           }
-          if (mcpTool) {
+          if (isLiveTranslationTool || isStudioPageAgentTool || mcpTool) {
             updateToolMessage(activityId, "completed", formatMcpValue(result, 24000));
             setTransientMcpAvatarState("success", 1760);
           }
@@ -924,9 +1113,14 @@ export default function Home() {
           if (
             cancelledToolCallIdsRef.current.has(callId)
             || cancellationSequence !== turnCancellationSequenceRef.current
-          ) continue;
-          if (mcpTool) {
-            const message = error instanceof Error ? error.message : "The MCP tool failed.";
+          ) {
+            if (isLiveTranslationTool || isStudioPageAgentTool || mcpTool) {
+              updateToolMessage(activityId, "cancelled", "The tool was cancelled before it completed.");
+            }
+            continue;
+          }
+          if (isLiveTranslationTool || isStudioPageAgentTool || mcpTool) {
+            const message = error instanceof Error ? error.message : "The tool failed.";
             updateToolMessage(activityId, "failed", message);
             setTransientMcpAvatarState("error", 2080);
           }
@@ -954,11 +1148,17 @@ export default function Home() {
         && !turnCancellationPendingRef.current
       ) sendJson({ toolResponse: { functionResponses } });
     }
+    if (serverContent?.turnComplete && functionCalls.length === 0) {
+      suppressAgentAudioForTurnRef.current = false;
+    }
   };
 
   const stopSession = (showIdle = true) => {
     clearTurnCancellationTimers();
     suppressServerOutputUntilNextUserTurnRef.current = false;
+    cancelledTurnBoundarySeenRef.current = false;
+    freshUserInputStartedRef.current = false;
+    suppressAgentAudioForTurnRef.current = false;
     intentionalCloseRef.current = true;
     readyRef.current = false;
     awaitingNewUserTurnRef.current = false;
@@ -987,6 +1187,7 @@ export default function Home() {
     setMcpApproval(null);
     activeMcpCallControllersRef.current.forEach((controller) => controller.abort());
     activeMcpCallControllersRef.current.clear();
+    void studioPageAgentRef.current?.cancel();
     pendingToolCallIdsRef.current.clear();
     pendingToolCallNamesRef.current.clear();
     if (mcpAvatarTimerRef.current !== null) window.clearTimeout(mcpAvatarTimerRef.current);
@@ -995,6 +1196,10 @@ export default function Home() {
     cancelledToolCallIdsRef.current.clear();
     finalizeTranscript("user");
     finalizeTranscript("lumi");
+    liveTranslationControllerRef.current?.stop();
+    liveTranslationControllerRef.current = null;
+    setLiveTranslationState("off");
+    setLiveTranslationTarget("");
     stopPlayback();
     websocketRef.current?.close();
     websocketRef.current = null;
@@ -1025,6 +1230,9 @@ export default function Home() {
     const requestedVideoMode = videoMode;
     clearTurnCancellationTimers();
     suppressServerOutputUntilNextUserTurnRef.current = false;
+    cancelledTurnBoundarySeenRef.current = false;
+    freshUserInputStartedRef.current = false;
+    suppressAgentAudioForTurnRef.current = false;
     setStatus("connecting");
     updateTurnCancellationPending(false);
     updateAgentTurnActive(false);
@@ -1042,7 +1250,7 @@ export default function Home() {
         throw new Error("Microphone access requires HTTPS or localhost in a supported browser.");
       }
 
-      const context = new AudioContext();
+      const context = new AudioContext({ latencyHint: "interactive" });
       audioContextRef.current = context;
       const analyser = context.createAnalyser();
       analyser.fftSize = 256;
@@ -1094,14 +1302,36 @@ export default function Home() {
         // The active stream can still be used if device labels are unavailable.
       }
       await setupMicrophone(context, stream);
+      liveTranslationControllerRef.current = new LiveTranslationController({
+        audioContext: context,
+        createSocketUrl: getLiveTranslationSocketUrl,
+        onStateChange: (nextState, detail) => {
+          setLiveTranslationState(nextState);
+          if (nextState === "off") {
+            setLiveTranslationTarget("");
+            setSharedAudioVolume(1);
+          }
+          else {
+            const languageCode = normalizeLiveTranslationLanguageCode(detail);
+            if (languageCode) setLiveTranslationTarget(languageCode);
+          }
+          if (nextState === "error" && detail) setStatusMessage(detail);
+        },
+        onError: (error) => setStatusMessage(error.message),
+      });
 
       const websocketUrl = liveAuth.kind === "apiKey"
         ? `${DIRECT_WS_ENDPOINT}?key=${encodeURIComponent(liveAuth.credential)}`
         : `${WS_ENDPOINT}?access_token=${encodeURIComponent(liveAuth.credential)}`;
-      const functionDeclarations =
-        mcpManagerRef.current!.buildFunctionDeclarations(activeMcpServers);
+      const functionDeclarations = [
+        LIVE_TRANSLATE_TOOL_DECLARATION,
+        ...STUDIO_PAGE_AGENT_TOOL_DECLARATIONS,
+        ...mcpManagerRef.current!.buildFunctionDeclarations(activeMcpServers),
+      ];
       const sessionInstruction = [
         BASE_SYSTEM_INSTRUCTION,
+        LIVE_TRANSLATION_GUIDANCE,
+        STUDIO_PAGE_AGENT_GUIDANCE,
         mcpManagerRef.current!.buildSessionGuidance(activeMcpServers),
       ].filter(Boolean).join("\n\n");
       const websocket = new WebSocket(websocketUrl);
@@ -1176,7 +1406,7 @@ export default function Home() {
       || turnCancellationPendingRef.current
     ) return;
     turnCancellationSequenceRef.current += 1;
-    suppressServerOutputUntilNextUserTurnRef.current = false;
+    if (suppressServerOutputUntilNextUserTurnRef.current) markFreshUserInputStarted();
     awaitingNewUserTurnRef.current = false;
     finalizeTranscript("user");
     finalizeTranscript("lumi");
@@ -1195,6 +1425,8 @@ export default function Home() {
     clearTurnCancellationTimers();
     updateTurnCancellationPending(true);
     suppressServerOutputUntilNextUserTurnRef.current = true;
+    cancelledTurnBoundarySeenRef.current = false;
+    freshUserInputStartedRef.current = false;
     turnCancellationSequenceRef.current += 1;
     awaitingNewUserTurnRef.current = false;
     const cancelledResponses = resetPendingTurnExecution("Cancelled by the user.");
@@ -1202,15 +1434,10 @@ export default function Home() {
       sendJson({ toolResponse: { functionResponses: cancelledResponses } });
     }
     sendJson({ realtimeInput: { audioStreamEnd: true } });
-    sendJson({
-      realtimeInput: {
-        text: "The user pressed Cancel. Stop the previous task immediately, do not call any tools, and acknowledge cancellation briefly.",
-      },
-    });
     updateAgentTurnActive(false);
-    setStatusMessage("Cancelling and resetting the current action…");
+    setStatusMessage("Stopping the current action…");
     setTransientMcpAvatarState("listening", 600);
-    turnCancellationWatchdogTimerRef.current = window.setTimeout(completeTurnCancellation, 1200);
+    turnCancellationWatchdogTimerRef.current = window.setTimeout(completeTurnCancellation, 80);
   };
 
   const submitText = (event: FormEvent) => {
@@ -1367,6 +1594,15 @@ export default function Home() {
           <span>Lumi <strong>Live</strong></span>
         </div>
         <div className="header-status">
+          {liveTranslationState !== "off" && (
+            <div
+              className={`mcp-pill translate-pill translate-${liveTranslationState}`}
+              title="Gemini Live Translate is playing the translated video audio"
+            >
+              <span className={liveTranslationState === "active" ? "connected" : ""} aria-hidden="true" />
+              Translate {liveTranslationTarget || "…"}
+            </div>
+          )}
           <div className="mcp-pill" title={`${enabledMcpToolCount} MCP tools available`}>
             <span className={connectedMcpCount ? "connected" : ""} aria-hidden="true" />
             MCP {connectedMcpCount}/{mcpServers.length}
@@ -1476,7 +1712,7 @@ export default function Home() {
             <div className="settings-choice">
               <span>
                 <strong>Vision source</strong>
-                <small>Optional · one frame/second</small>
+                <small>Screen also enables video-audio translation</small>
               </span>
               <div className="segmented-control" role="group" aria-label="Vision source">
                 {videoModes.map((mode) => (
@@ -1586,7 +1822,11 @@ export default function Home() {
             )}
             <button className={`voice-button voice-button-${status}`} type="button" onClick={startSession} disabled={status === "connecting"}>
               <span className={status === "ready" ? "stop-symbol" : "mic-icon"} aria-hidden="true" />
-              <span>{status === "ready" ? "End live chat" : status === "connecting" ? "Connecting live chat…" : "Start live chat"}</span>
+              <span>{status === "ready"
+                ? liveTranslationState === "active" || liveTranslationState === "connecting" || liveTranslationState === "reconnecting"
+                  ? "End live chat + translate"
+                  : "End live chat"
+                : status === "connecting" ? "Connecting live chat…" : "Start live chat"}</span>
             </button>
           </div>
         </section>
@@ -1630,7 +1870,7 @@ export default function Home() {
                 <summary>
                   <span className="mcp-activity-icon" aria-hidden="true" />
                   <span>
-                    <small>MCP TOOL</small>
+                    <small>{message.activityLabel || "MCP TOOL"}</small>
                     <strong>{message.title}</strong>
                   </span>
                   <span className="mcp-activity-status" role="status">

@@ -5,6 +5,7 @@ import {
 import { EXTENSION_EVENTS, STORAGE_KEYS } from "./extension-config.js";
 import {
   BROWSER_TOOLS,
+  BUILTIN_TOOLS,
   BROWSER_UI_ACTION_TOOLS,
   buildSessionInstruction,
   configureMcpTools,
@@ -14,6 +15,11 @@ import {
   MODEL,
   WS_ENDPOINT,
 } from "./live-session-config.js";
+import {
+  getLiveTranslationLanguageLabel,
+  LIVE_TRANSLATE_TOOL_NAME,
+  normalizeLiveTranslationLanguageCode,
+} from "./live-translate.js";
 import {
   base64ToInt16,
   bytesToBase64,
@@ -25,6 +31,7 @@ import { createPetalEmitter } from "./petal-emitter.js";
 import {
   consumeResponseAudioDirective,
   createTurnAudioGate,
+  RESPONSE_AUDIO_DIRECTIVE_KEY,
 } from "./response-audio-policy.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
@@ -35,8 +42,10 @@ const PETALS_STORAGE_KEY = STORAGE_KEYS.fallingPetals;
 const AVATAR_MODE_STORAGE_KEY = STORAGE_KEYS.avatarMode;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
 const PANEL_LIFECYCLE_MESSAGE = EXTENSION_EVENTS.lifecycle;
+const sidePanelLifecyclePort = chrome.runtime.connect({ name: "lumi_live_side_panel" });
 const elements = {
   liveBadge: document.querySelector("#liveBadge"),
+  translateBadge: document.querySelector("#translateBadge"),
   settingsButton: document.querySelector("#settingsButton"),
   avatarModeButton: document.querySelector("#avatarModeButton"),
   petalsButton: document.querySelector("#petalsButton"),
@@ -81,8 +90,9 @@ let turnCancellationPending = false;
 let turnExecutionSequence = 0;
 let turnCancellationDrainTimeoutId = null;
 let turnCancellationWatchdogTimeoutId = null;
-let turnRuntimeResetPromise = Promise.resolve();
 let suppressServerOutputUntilNextUserTurn = false;
+let cancelledTurnBoundarySeen = false;
+let freshUserInputStarted = false;
 let browserToolRunning = false;
 let activeMcpTools = new Map();
 const cancelledToolCallIds = new Set();
@@ -95,6 +105,9 @@ const mcpToolNoticeQueue = [];
 const mcpToolNoticeKeys = new Set();
 let currentMcpToolNotice = null;
 let websocket = null;
+let activeApiKey = "";
+let pendingLiveTranslationStart = false;
+let liveTranslationTargetLanguageCode = "";
 let audioContext = null;
 let analyser = null;
 let micStream = null;
@@ -153,7 +166,10 @@ function syncMessageComposer() {
 }
 
 function setAgentTurnActive(active) {
-  if (active === true && (turnCancellationPending || suppressServerOutputUntilNextUserTurn)) return;
+  if (active === true && (
+    turnCancellationPending
+    || (suppressServerOutputUntilNextUserTurn && !freshUserInputStarted)
+  )) return;
   agentTurnActive = sessionStatus === "ready" && active === true;
   syncMessageComposer();
 }
@@ -165,6 +181,23 @@ function clearTurnCancellationTimers() {
   turnCancellationWatchdogTimeoutId = null;
 }
 
+function markFreshUserInputStarted() {
+  freshUserInputStarted = true;
+  if (!cancelledTurnBoundarySeen) return;
+  suppressServerOutputUntilNextUserTurn = false;
+  cancelledTurnBoundarySeen = false;
+  freshUserInputStarted = false;
+}
+
+function markCancelledTurnBoundarySeen() {
+  cancelledTurnBoundarySeen = true;
+  if (!freshUserInputStarted) return;
+  suppressServerOutputUntilNextUserTurn = false;
+  cancelledTurnBoundarySeen = false;
+  freshUserInputStarted = false;
+  setAgentTurnActive(true);
+}
+
 function rememberCancelledToolCall(callId) {
   if (!callId) return;
   cancelledToolCallIds.add(callId);
@@ -173,6 +206,10 @@ function rememberCancelledToolCall(callId) {
 
 function resetPendingTurnExecution(message = "Cancelled by the user.") {
   cancelPendingMcpPermissionPrompts();
+  if (pendingLiveTranslationStart) {
+    pendingLiveTranslationStart = false;
+    void sendRuntime("stop_live_translation").catch(() => {});
+  }
   const cancelledResponses = [];
   for (const callId of pendingToolCallIds) {
     rememberCancelledToolCall(callId);
@@ -196,18 +233,13 @@ function resetPendingTurnExecution(message = "Cancelled by the user.") {
   return cancelledResponses;
 }
 
-async function completeTurnCancellation() {
-  if (!turnCancellationPending) return;
-  await Promise.race([
-    turnRuntimeResetPromise,
-    new Promise((resolve) => setTimeout(resolve, 500)),
-  ]);
+function completeTurnCancellation() {
   if (!turnCancellationPending) return;
   clearTurnCancellationTimers();
   resetPendingTurnExecution();
   turnCancellationPending = false;
   setAgentTurnActive(false);
-  elements.statusLine.textContent = "Current action cancelled and reset. Lumi is ready for your next request.";
+  elements.statusLine.textContent = "Current action stopped. Waiting silently for your next instruction.";
   avatarController.syncState();
   syncMessageComposer();
 }
@@ -565,11 +597,11 @@ async function setupMicrophone(stream) {
   micProcessor.port.onmessage = (event) => {
     if (sessionStatus !== "ready" || isMuted || turnCancellationPending || websocket?.readyState !== WebSocket.OPEN) return;
     const mono = event.data;
-    if (suppressServerOutputUntilNextUserTurn) {
+    if (suppressServerOutputUntilNextUserTurn && !freshUserInputStarted) {
       let energy = 0;
       for (const sample of mono) energy += sample * sample;
       if (Math.sqrt(energy / mono.length) < 0.012) return;
-      suppressServerOutputUntilNextUserTurn = false;
+      markFreshUserInputStarted();
       finalizeTranscript("user");
       finalizeTranscript("lumi");
     }
@@ -670,6 +702,90 @@ function animateMouth() {
   mouthAnimationId = requestAnimationFrame(draw);
 }
 
+function setLiveTranslationBadge(state, detail = "") {
+  const languageCode = normalizeLiveTranslationLanguageCode(detail)
+    || liveTranslationTargetLanguageCode
+    || "";
+  if (languageCode) liveTranslationTargetLanguageCode = languageCode;
+  if (state === "off") liveTranslationTargetLanguageCode = "";
+  elements.translateBadge.hidden = state === "off";
+  elements.translateBadge.className = `badge badge-translate translate-${state}`;
+  elements.translateBadge.textContent = state === "active"
+    ? `Translate · ${languageCode}`
+    : state === "reconnecting"
+      ? `Translate · reconnecting`
+      : state === "error"
+        ? "Translate · error"
+        : "Translate · joining";
+  if (sessionStatus === "ready") {
+    elements.startButton.querySelector("span:last-child").textContent =
+      state === "active" || state === "connecting" || state === "reconnecting"
+        ? "End voice + translate"
+        : "End voice";
+  }
+}
+
+async function runLiveTranslationTool(args = {}) {
+  const action = String(args.action || "").trim().toLowerCase();
+  if (!activeApiKey) {
+    throw new Error("Start the Lumi voice session before using Live Translate.");
+  }
+  if (action === "status") {
+    return sendRuntime("live_translation_status");
+  }
+  if (action === "stop") {
+    const result = await sendRuntime("stop_live_translation");
+    setLiveTranslationBadge("off");
+    elements.statusLine.textContent = result.wasActive
+      ? "Live translation stopped. Lumi is still listening."
+      : "Live translation was already off.";
+    return { success: true, ...result };
+  }
+  if (action !== "start") {
+    throw new Error("Live Translate action must be start, stop, or status.");
+  }
+  const targetLanguageCode = normalizeLiveTranslationLanguageCode(args.targetLanguageCode);
+  if (!targetLanguageCode) {
+    throw new Error("Choose one of the supported Live Translate target languages.");
+  }
+  avatarController.transitionState("tool_call");
+  pendingLiveTranslationStart = true;
+  let result;
+  try {
+    result = await sendRuntime("start_live_translation", {
+      apiKey: activeApiKey,
+      targetLanguageCode,
+    });
+    if (!pendingLiveTranslationStart) {
+      await sendRuntime("stop_live_translation").catch(() => {});
+      throw new DOMException("Live translation was cancelled.", "AbortError");
+    }
+  } catch (error) {
+    avatarController.transitionState("error", { forMs: 2080 });
+    throw error;
+  } finally {
+    pendingLiveTranslationStart = false;
+  }
+  liveTranslationTargetLanguageCode = targetLanguageCode;
+  const languageLabel = result.languageLabel || getLiveTranslationLanguageLabel(targetLanguageCode);
+  const captureLabel = result.captureMode === "mediaElement"
+    ? "direct video audio"
+    : "authorized tab audio";
+  elements.statusLine.textContent = `Live translating ${result.source?.title || "the active video"} to ${languageLabel} · ${captureLabel} · source audio at 6%.`;
+  avatarController.transitionState("success", { forMs: 1760 });
+  return {
+    success: true,
+    state: "active",
+    targetLanguageCode,
+    sourceTabId: result.source?.tabId,
+    sourceTitle: result.source?.title,
+    captureMode: result.captureMode || result.source?.mode || "tabCapture",
+    audioOwner: "Gemini Live Translate tool",
+    sourcePlaybackVolume: 0.06,
+    [RESPONSE_AUDIO_DIRECTIVE_KEY]: { suppressForTurn: true },
+  };
+}
+
 async function runBrowserTool(tool, args) {
   browserToolRunning = true;
   const isUiAction = BROWSER_UI_ACTION_TOOLS.has(tool);
@@ -768,7 +884,7 @@ function createMcpActivityCard(callId, tool, args) {
   const copy = document.createElement("span");
   copy.className = "mcp-activity-copy";
   const label = document.createElement("small");
-  label.textContent = "MCP TOOL";
+  label.textContent = tool.activityLabel || "MCP TOOL";
   const name = document.createElement("strong");
   name.textContent = tool.toolName;
   copy.append(label, name);
@@ -856,6 +972,10 @@ async function handleServerMessage(event, sourceSocket) {
   if (sourceSocket !== websocket) return;
 
   for (const id of response.toolCallCancellation?.ids || []) {
+    if (pendingToolCallNames.get(id) === LIVE_TRANSLATE_TOOL_NAME && pendingLiveTranslationStart) {
+      pendingLiveTranslationStart = false;
+      void sendRuntime("stop_live_translation").catch(() => {});
+    }
     rememberCancelledToolCall(id);
     finishMcpActivity(id, "cancelled", "Gemini cancelled this tool call because the conversation turn was interrupted.");
   }
@@ -864,6 +984,8 @@ async function handleServerMessage(event, sourceSocket) {
     clearTurnCancellationTimers();
     turnCancellationPending = false;
     suppressServerOutputUntilNextUserTurn = false;
+    cancelledTurnBoundarySeen = false;
+    freshUserInputStarted = false;
     setSessionStatus("ready", "Lumi is listening. PageAgent automatically follows your active web tab.");
     setAgentTurnActive(true);
     sendJson({ realtimeInput: { text: "Greet the user warmly in one short sentence and say you are ready." } }, sourceSocket);
@@ -890,6 +1012,9 @@ async function handleServerMessage(event, sourceSocket) {
     if (cancelledResponses.length && sourceSocket === websocket) {
       sendJson({ toolResponse: { functionResponses: cancelledResponses } }, sourceSocket);
     }
+    if (serverContent?.interrupted || serverContent?.turnComplete) {
+      markCancelledTurnBoundarySeen();
+    }
     if (serverContent?.interrupted) resetPendingTurnExecution();
     if (serverContent?.turnComplete) scheduleTurnCancellationCompletion();
     return;
@@ -906,7 +1031,14 @@ async function handleServerMessage(event, sourceSocket) {
     if (cancelledResponses.length && sourceSocket === websocket) {
       sendJson({ toolResponse: { functionResponses: cancelledResponses } }, sourceSocket);
     }
-    if (serverContent?.interrupted || serverContent?.turnComplete) setAgentTurnActive(false);
+    if (
+      serverContent?.interrupted
+      || serverContent?.turnComplete
+      || (freshUserInputStarted && serverContent?.inputTranscription?.text)
+    ) {
+      markCancelledTurnBoundarySeen();
+      if (suppressServerOutputUntilNextUserTurn) setAgentTurnActive(false);
+    }
     return;
   }
   if (
@@ -955,16 +1087,29 @@ async function handleServerMessage(event, sourceSocket) {
       pendingToolCallIds.add(callId);
       pendingToolCallNames.set(callId, functionCall.name);
       let mcpTool = null;
+      let activityTool = null;
       try {
         const isBrowserTool = BROWSER_TOOLS.some((tool) => tool.name === functionCall.name);
+        const isLiveTranslationTool = functionCall.name === LIVE_TRANSLATE_TOOL_NAME;
         mcpTool = activeMcpTools.get(functionCall.name) || null;
-        if (!isBrowserTool && !mcpTool) throw new Error(`Unsupported tool: ${functionCall.name}`);
+        if (!isBrowserTool && !isLiveTranslationTool && !mcpTool) {
+          throw new Error(`Unsupported tool: ${functionCall.name}`);
+        }
         if (mcpTool?.disabled) throw new Error("This MCP tool is disabled for the rest of this session.");
-        if (mcpTool) createMcpActivityCard(callId, mcpTool, functionCall.args || {});
-        let result = isBrowserTool
-          ? await runBrowserTool(functionCall.name, functionCall.args || {})
-          : normalizeMcpToolResult(await runMcpTool(mcpTool, functionCall.args || {}, callId));
-        if (isBrowserTool) {
+        activityTool = isLiveTranslationTool
+          ? {
+              activityLabel: "BUILT-IN TOOL",
+              toolName: LIVE_TRANSLATE_TOOL_NAME,
+              serverName: "Gemini Live Translate",
+            }
+          : mcpTool;
+        if (activityTool) createMcpActivityCard(callId, activityTool, functionCall.args || {});
+        let result = isLiveTranslationTool
+          ? await runLiveTranslationTool(functionCall.args || {})
+          : isBrowserTool
+            ? await runBrowserTool(functionCall.name, functionCall.args || {})
+            : normalizeMcpToolResult(await runMcpTool(mcpTool, functionCall.args || {}, callId));
+        if (isBrowserTool || isLiveTranslationTool) {
           const consumed = consumeResponseAudioDirective(result);
           result = consumed.result;
           if (consumed.suppressForTurn) responseAudioGate.suppress();
@@ -975,10 +1120,10 @@ async function handleServerMessage(event, sourceSocket) {
           || turnCancellationPending
           || sourceSocket !== websocket
         ) {
-          if (mcpTool) finishMcpActivity(callId, "cancelled", "The session ended before Lumi could use this MCP result.");
+          if (activityTool) finishMcpActivity(callId, "cancelled", "The session ended before Lumi could use this tool result.");
           continue;
         }
-        if (mcpTool) finishMcpActivity(callId, "completed", result);
+        if (activityTool) finishMcpActivity(callId, "completed", result);
         functionResponses.push({
           id: callId,
           name: functionCall.name,
@@ -991,13 +1136,13 @@ async function handleServerMessage(event, sourceSocket) {
           || turnCancellationPending
           || sourceSocket !== websocket
         ) {
-          if (mcpTool) finishMcpActivity(callId, "cancelled", "The MCP call was cancelled before it completed.");
+          if (activityTool) finishMcpActivity(callId, "cancelled", "The tool call was cancelled before it completed.");
           continue;
         }
-        if (mcpTool) {
-          finishMcpActivity(callId, "failed", error instanceof Error ? error.message : "MCP tool call failed.");
-          promptToDisableFailedMcpTool(mcpTool, error);
+        if (activityTool) {
+          finishMcpActivity(callId, "failed", error instanceof Error ? error.message : "Tool call failed.");
         }
+        if (mcpTool) promptToDisableFailedMcpTool(mcpTool, error);
         functionResponses.push({
           id: callId,
           name: functionCall.name,
@@ -1017,12 +1162,12 @@ async function handleServerMessage(event, sourceSocket) {
       sendJson({ toolResponse: { functionResponses } }, sourceSocket);
     }
   }
-  if (serverContent?.turnComplete) responseAudioGate.reset();
+  if (serverContent?.turnComplete && !functionCalls.length) responseAudioGate.reset();
 }
 
 function openGeminiSocket({ apiKey, voiceName, mcpInfo, mcpFunctionDeclarations, activeTabContext }) {
   setSessionStatus("connecting", "Microphone is ready. Opening Gemini Live...");
-  const functionDeclarations = [...BROWSER_TOOLS, ...mcpFunctionDeclarations];
+  const functionDeclarations = [...BUILTIN_TOOLS, ...mcpFunctionDeclarations];
   websocket = new WebSocket(`${WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`);
   const sessionSocket = websocket;
   setupTimeoutId = setTimeout(() => {
@@ -1168,6 +1313,7 @@ async function startSession() {
     setSessionStatus("connecting", "Microphone is ready. Checking the Gemini API key…");
     await validateGeminiApiKey(apiKey);
     await setupMicrophone(micStream);
+    activeApiKey = apiKey;
 
     const activeTabContext = await sendRuntime("browser_tool", {
       tool: "browser_get_active_context",
@@ -1192,8 +1338,13 @@ function cleanupMedia() {
   turnExecutionSequence += 1;
   cancelPendingMcpPermissionPrompts();
   cancelPendingMcpActivities("The voice session ended before this MCP tool call completed.");
+  void sendRuntime("release_tab_audio").catch(() => {});
   pendingToolCallIds.clear();
   pendingToolCallNames.clear();
+  activeApiKey = "";
+  pendingLiveTranslationStart = false;
+  liveTranslationTargetLanguageCode = "";
+  setLiveTranslationBadge("off");
   stopPlayback();
   responseAudioGate.reset();
   websocket = null;
@@ -1211,6 +1362,8 @@ function cleanupMedia() {
   agentTurnActive = false;
   turnCancellationPending = false;
   suppressServerOutputUntilNextUserTurn = false;
+  cancelledTurnBoundarySeen = false;
+  freshUserInputStarted = false;
   elements.muteButton.textContent = "Mute";
   finalizeTranscript("user");
   finalizeTranscript("lumi");
@@ -1237,7 +1390,7 @@ function sendText(text) {
   const clean = text.trim();
   if (!clean || sessionStatus !== "ready" || agentTurnActive || turnCancellationPending) return;
   turnExecutionSequence += 1;
-  suppressServerOutputUntilNextUserTurn = false;
+  if (suppressServerOutputUntilNextUserTurn) markFreshUserInputStarted();
   responseAudioGate.reset();
   finalizeTranscript("user");
   finalizeTranscript("lumi");
@@ -1255,25 +1408,22 @@ function cancelCurrentTurn() {
   clearTurnCancellationTimers();
   turnCancellationPending = true;
   suppressServerOutputUntilNextUserTurn = true;
+  cancelledTurnBoundarySeen = false;
+  freshUserInputStarted = false;
   turnExecutionSequence += 1;
   const cancelledResponses = resetPendingTurnExecution("Cancelled by the user.");
   if (cancelledResponses.length) {
     sendJson({ toolResponse: { functionResponses: cancelledResponses } });
   }
   sendJson({ realtimeInput: { audioStreamEnd: true } });
-  sendJson({
-    realtimeInput: {
-      text: "The user pressed Cancel. Stop the previous task immediately, do not call any tools, and acknowledge cancellation briefly.",
-    },
-  });
-  turnRuntimeResetPromise = Promise.allSettled([
+  void Promise.allSettled([
     sendRuntime("cancel_active_browser_action"),
     sendRuntime("cancel_active_mcp_calls"),
-  ]).then(() => undefined);
+  ]);
   setAgentTurnActive(false);
-  elements.statusLine.textContent = "Cancelling the current action…";
+  elements.statusLine.textContent = "Stopping the current action…";
   avatarController.syncState();
-  turnCancellationWatchdogTimeoutId = setTimeout(completeTurnCancellation, 1200);
+  turnCancellationWatchdogTimeoutId = setTimeout(completeTurnCancellation, 80);
 }
 
 function toggleVtuberSize() {
@@ -1331,6 +1481,7 @@ elements.messageForm.addEventListener("submit", (event) => {
 });
 window.addEventListener("unload", () => {
   intentionalClose = true;
+  sidePanelLifecyclePort.disconnect();
   petalEmitter.stop();
   websocket?.close();
   cleanupMedia();
@@ -1363,6 +1514,16 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === EXTENSION_EVENTS.translationState) {
+    setLiveTranslationBadge(message.state || "off", message.targetLanguageCode || message.detail || "");
+    if (message.state === "error" && message.detail) {
+      elements.statusLine.textContent = message.detail;
+      avatarController.transitionState("error", { forMs: 2080 });
+    } else if (message.detail === "Tab audio authorized" && sessionStatus !== "ready") {
+      elements.statusLine.textContent = "Active tab audio authorized. Start voice when you are ready.";
+    }
+    return;
+  }
   if (message?.type === PANEL_LIFECYCLE_MESSAGE) {
     if (message.state === "opened") petalEmitter.restart();
     else if (message.state === "closed") petalEmitter.stop();
@@ -1384,6 +1545,11 @@ async function initialize() {
   else setSessionStatus("idle", "Ready. PageAgent will follow whichever web tab you open.");
   await refreshMicrophonePermission();
   await refreshTarget();
+  const translationStatus = await sendRuntime("live_translation_status").catch(() => null);
+  if (translationStatus?.prepared) {
+    setLiveTranslationBadge(translationStatus.state || "off", translationStatus.targetLanguageCode || "");
+    elements.statusLine.textContent = "Active tab audio authorized. Start voice when you are ready.";
+  }
   scheduleBlink();
   animateMouth();
   setInterval(refreshTarget, 2800);

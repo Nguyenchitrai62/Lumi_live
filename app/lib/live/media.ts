@@ -1,4 +1,8 @@
-import { EXTENSION_API_KEY_STORAGE_KEY } from "./config";
+import {
+  DIRECT_WS_ENDPOINT,
+  EXTENSION_API_KEY_STORAGE_KEY,
+  WS_ENDPOINT,
+} from "./config";
 import type { LiveAuth, VideoMode } from "./types";
 
 export async function requestVideoStream(mode: VideoMode) {
@@ -8,12 +12,18 @@ export async function requestVideoStream(mode: VideoMode) {
     if (!navigator.mediaDevices?.getDisplayMedia) {
       return Promise.reject(new Error("Screen sharing is not supported by this browser."));
     }
+    const supportedConstraints = navigator.mediaDevices.getSupportedConstraints?.() as MediaTrackSupportedConstraints & {
+      suppressLocalAudioPlayback?: boolean;
+    };
+    const audio = supportedConstraints?.suppressLocalAudioPlayback === true
+      ? ({ suppressLocalAudioPlayback: true } as MediaTrackConstraints & { suppressLocalAudioPlayback: boolean })
+      : true;
     const stream = await navigator.mediaDevices.getDisplayMedia({
       video: {
         frameRate: { ideal: 1, max: 1 },
         displaySurface: "browser",
       },
-      audio: false,
+      audio,
       preferCurrentTab: false,
       selfBrowserSurface: "exclude",
       surfaceSwitching: "exclude",
@@ -39,6 +49,32 @@ export async function requestVideoStream(mode: VideoMode) {
     },
     audio: false,
   });
+}
+
+export async function getLiveTranslationSocketUrl(
+  targetLanguageCode: string,
+  signal?: AbortSignal,
+) {
+  if (window.location.protocol === "chrome-extension:") {
+    const apiKey = localStorage.getItem(EXTENSION_API_KEY_STORAGE_KEY)?.trim();
+    if (!apiKey) throw new Error("Open Lumi Live settings and save a Gemini API key first.");
+    return `${DIRECT_WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`;
+  }
+
+  const response = await fetch("/api/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ purpose: "live-translate", targetLanguageCode }),
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || "The live translation token could not be created.");
+  }
+  const { token } = await response.json();
+  if (!token) throw new Error("The live translation token response was empty.");
+  return `${WS_ENDPOINT}?access_token=${encodeURIComponent(token)}`;
 }
 
 export async function getLiveAuth(): Promise<LiveAuth> {

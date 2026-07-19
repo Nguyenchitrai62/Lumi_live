@@ -1,4 +1,5 @@
-const FRAME_SIZE = 4096;
+const CHUNK_DURATION_SECONDS = 0.1;
+const FRAME_SIZE = Math.max(128, Math.round(sampleRate * CHUNK_DURATION_SECONDS));
 
 class LumiPcmCaptureProcessor extends AudioWorkletProcessor {
   constructor() {

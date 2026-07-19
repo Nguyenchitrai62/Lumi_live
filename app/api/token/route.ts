@@ -1,4 +1,8 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Modality } from "@google/genai";
+import {
+  LIVE_TRANSLATION_MODEL,
+  normalizeLiveTranslationLanguageCode,
+} from "../../lib/live/translation-config";
 
 export const runtime = "edge";
 
@@ -19,17 +23,41 @@ export async function POST(request: Request) {
   }
 
   try {
+    const body = await request.json().catch(() => ({}));
+    const wantsLiveTranslation = body?.purpose === "live-translate";
+    const targetLanguageCode = wantsLiveTranslation
+      ? normalizeLiveTranslationLanguageCode(body?.targetLanguageCode)
+      : null;
+    if (wantsLiveTranslation && !targetLanguageCode) {
+      return Response.json(
+        { error: "Choose a supported Live Translate target language code." },
+        { status: 400 },
+      );
+    }
     const client = new GoogleGenAI({
       apiKey,
       httpOptions: { apiVersion: "v1alpha" },
     });
     const now = Date.now();
     const expireTime = new Date(now + 30 * 60 * 1000).toISOString();
+    const liveTranslationConstraints = targetLanguageCode ? {
+      liveConnectConstraints: {
+        model: LIVE_TRANSLATION_MODEL,
+        config: {
+          responseModalities: [Modality.AUDIO],
+          translationConfig: {
+            targetLanguageCode,
+            echoTargetLanguage: false,
+          },
+        },
+      },
+    } : {};
     const token = await client.authTokens.create({
       config: {
         uses: 1,
         expireTime,
         newSessionExpireTime: new Date(now + 60 * 1000).toISOString(),
+        ...liveTranslationConstraints,
         httpOptions: { apiVersion: "v1alpha" },
       },
     });

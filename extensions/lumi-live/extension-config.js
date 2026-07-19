@@ -2,6 +2,7 @@ export const EXTENSION_EVENTS = Object.freeze({
   lifecycle: "lumi_live_lifecycle",
   request: "lumi_live_request",
   targetChanged: "lumi_live_target_changed",
+  translationState: "lumi_live_translation_state",
 });
 
 export const STORAGE_KEYS = Object.freeze({

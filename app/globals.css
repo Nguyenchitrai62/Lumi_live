@@ -100,6 +100,11 @@ button { -webkit-tap-highlight-color: transparent; }
 .mcp-pill { height: 35px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; padding: 0 10px; color: var(--muted); background: var(--surface-glass); font-size: 9px; font-weight: 850; box-shadow: 0 8px 26px rgba(82,71,122,.06); backdrop-filter: blur(14px); }
 .mcp-pill > span { width: 6px; height: 6px; border-radius: 50%; background: #aaa3b7; }
 .mcp-pill > span.connected { background: #53c59d; box-shadow: 0 0 0 3px rgba(83,197,157,.13); }
+.translate-pill { color: #2f7b69; border-color: rgba(83,197,157,.28); background: color-mix(in srgb, #53c59d 11%, var(--surface-glass)); }
+.translate-pill > span { animation: translate-live-pulse 1.35s ease-in-out infinite; }
+.translate-connecting > span, .translate-reconnecting > span { background: #d3a049; box-shadow: 0 0 0 3px rgba(211,160,73,.13); }
+.translate-error > span { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 14%, transparent); animation: none; }
+@keyframes translate-live-pulse { 50% { opacity: .42; transform: scale(.78); } }
 
 .top-actions { min-width: 0; flex: 1; display: flex; align-items: center; justify-content: flex-end; gap: 7px; overflow-x: auto; scrollbar-width: none; }
 .top-actions::-webkit-scrollbar { display: none; }

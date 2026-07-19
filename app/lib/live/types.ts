@@ -11,6 +11,7 @@ export type ChatMessage = {
   role: Role | "tool";
   text: string;
   title?: string;
+  activityLabel?: string;
   serverName?: string;
   args?: string;
   startedAt?: number;

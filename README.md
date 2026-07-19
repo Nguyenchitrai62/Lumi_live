@@ -21,9 +21,10 @@ Lumi has two reactive avatar types:
 ## Highlights
 
 - Real-time voice and text conversation with `gemini-3.1-flash-live-preview`.
+- Agent-triggered speech-to-speech translation into Google's documented 70+ languages with `gemini-3.5-live-translate-preview`; the translation tool owns audio playback, preserves the video's speaking voices, ducks the source audio to 6%, and uses a small jitter buffer without changing video or translated-audio playback speed.
 - 30 selectable voices with audio preview.
 - Automatic active-tab targeting in the Lumi Live Chrome extension.
-- PageAgent DOM tools for reading, clicking, typing, selecting, and scrolling.
+- PageAgent DOM tools for reading, clicking, typing, selecting, and scrolling: self-scoped in the web Studio and active-tab aware in the extension.
 - User-configured Streamable HTTP MCP servers.
 - Per-tool permissions: **Always allow**, **Ask every time**, or **Block**.
 - Expandable activity cards for tool arguments, results, failures, and cancellations.
@@ -125,6 +126,8 @@ Then:
 
 The Pixel Companion starts in `idle` immediately. Use the avatar button in the toolbar to switch to the VTuber.
 
+To translate a playing video, activate its tab, click the Lumi toolbar icon, and name any supported target language, for example **“Translate this video to Japanese.”** The action click immediately authorizes that exact tab and an offscreen runtime holds the stream, so the later `live_translate` tool call does not open a Share Screen dialog. It lowers the original audio to 6% and plays the translated voice. Say **“Stop live translation”** to keep the authorized stream but restore full source volume, or press **End voice** to release capture and stop the agent session. After switching tabs, click the Lumi icon once on the new tab because Chrome does not grant permanent audio access to arbitrary tabs.
+
 After changing extension source or avatar assets, run `npm run build:extension` and press **Reload** on `chrome://extensions`.
 
 ## Connect MCP tools
@@ -145,7 +148,9 @@ npm install
 npm run dev
 ```
 
-Set `GEMINI_API_KEY` in `.env`, then open [http://localhost:3000](http://localhost:3000). Voice, vision, chat, scenes, outfits, themes, and remote MCP tools run directly on the web. PageAgent UI control is exclusive to the Lumi Live extension.
+Set `GEMINI_API_KEY` in `.env`, then open [http://localhost:3000](http://localhost:3000). Voice, vision, chat, scenes, outfits, themes, remote MCP tools, and PageAgent control of the Lumi Studio interface run directly on the web. The hosted Studio needs no personal Gemini key from its visitors. Installing the Lumi Live extension and providing a personal key upgrades PageAgent from the current Studio document to the user's active Chrome tab.
+
+For live video translation on the web, choose **Screen**, press **Start voice**, select the Chrome tab playing the video, and keep **Share tab audio** enabled. Then ask Lumi to translate it to any supported target language. While translation is active, Lumi suppresses direct playback from the shared tab and locally replays it at 6%, restoring normal playback when translation stops. The web server issues a separate constrained, single-use ephemeral token for the translation session; the server API key is never sent to the browser.
 
 ## Commands
 

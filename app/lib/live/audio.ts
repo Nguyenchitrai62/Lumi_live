@@ -15,6 +15,26 @@ export function base64ToInt16(base64: string) {
   return new Int16Array(bytes.buffer);
 }
 
+export const MAX_LIVE_AUDIO_SOCKET_BACKLOG_BYTES = 48 * 1024;
+export const LIVE_TRANSLATION_JITTER_BUFFER_SECONDS = 0.32;
+export const LIVE_TRANSLATION_MIN_SCHEDULE_LEAD_SECONDS = 0.06;
+
+export function canSendLiveAudio(bufferedAmount: number) {
+  return Number.isFinite(bufferedAmount)
+    && bufferedAmount <= MAX_LIVE_AUDIO_SOCKET_BACKLOG_BYTES;
+}
+
+export function getLiveTranslationChunkStartTime(currentTime: number, nextOutputTime: number) {
+  const safeCurrentTime = Number.isFinite(currentTime) ? currentTime : 0;
+  if (
+    !Number.isFinite(nextOutputTime)
+    || nextOutputTime <= safeCurrentTime + LIVE_TRANSLATION_MIN_SCHEDULE_LEAD_SECONDS
+  ) {
+    return safeCurrentTime + LIVE_TRANSLATION_JITTER_BUFFER_SECONDS;
+  }
+  return nextOutputTime;
+}
+
 export function resampleTo16k(input: Float32Array, inputRate: number) {
   if (inputRate === 16000) return input;
   const ratio = inputRate / 16000;

@@ -8,7 +8,7 @@ extensions/
 └── lumi-live/         Standalone Gemini Live agent
 ```
 
-[`lumi-live`](./lumi-live) includes voice and chat, Pixel Companion and VTuber avatars, automatic active-tab targeting, PageAgent tools, and MCP connections.
+[`lumi-live`](./lumi-live) includes voice and chat, live video translation, Pixel Companion and VTuber avatars, automatic active-tab targeting, PageAgent tools, and MCP connections.
 
 Build it from the project root:
 
