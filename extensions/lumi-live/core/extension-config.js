@@ -12,6 +12,7 @@ export const STORAGE_KEYS = Object.freeze({
   fallingPetals: "lumiFallingPetals",
   legacyMcpUrl: "lumiMcpServerUrl",
   mcpDisabledTools: "lumiDisabledMcpTools",
+  mcpConnectorCredentials: "lumiMcpConnectorCredentials",
   mcpServers: "lumiMcpServers",
   mcpToolPolicies: "lumiMcpToolPolicies",
   microphoneGrantedAt: "lumiMicrophoneGrantedAt",

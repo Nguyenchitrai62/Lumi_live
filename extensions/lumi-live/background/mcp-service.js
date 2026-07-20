@@ -1,6 +1,9 @@
 import { STORAGE_KEYS } from "../core/extension-config.js";
+import { getMcpConnector } from "../core/mcp-connectors.js";
 import { prepareGeminiMcpTool } from "../mcp/gemini-tool-schema.js";
 import { McpHttpClient, normalizeMcpUrl } from "../mcp/client.js";
+import { createMcpConnectorAuth } from "./mcp-connector-auth.js";
+import { normalizeRedmineBaseUrl, RedmineMcpClient } from "./redmine-mcp-client.js";
 
 const MCP_URL_STORAGE_KEY = STORAGE_KEYS.legacyMcpUrl;
 const MCP_SERVERS_STORAGE_KEY = STORAGE_KEYS.mcpServers;
@@ -11,6 +14,7 @@ const DEFAULT_MCP_TOOL_POLICY = "allow";
 export function createMcpService() {
   const mcpConnections = new Map();
   const activeMcpCallControllers = new Set();
+  const connectorAuth = createMcpConnectorAuth();
 
 function cancelActiveMcpCalls() {
   const controllers = [...activeMcpCallControllers];
@@ -28,15 +32,22 @@ function fallbackMcpServerName(url) {
 
 function normalizeMcpServerRecord(value) {
   if (!value || typeof value !== "object") return null;
+  const connectorId = typeof value.connectorId === "string" && getMcpConnector(value.connectorId)
+    ? value.connectorId
+    : "";
   let url;
   try {
-    url = normalizeMcpUrl(value.url);
+    url = connectorId === "redmine"
+      ? normalizeRedmineBaseUrl(value.url)
+      : normalizeMcpUrl(value.url);
   } catch {
     return null;
   }
   return {
     id: typeof value.id === "string" && value.id ? value.id : crypto.randomUUID(),
     url,
+    connectorId,
+    enabled: value.enabled !== false,
     serverName: typeof value.serverName === "string" && value.serverName
       ? value.serverName.slice(0, 160)
       : fallbackMcpServerName(url),
@@ -85,6 +96,8 @@ function recordFromMcpConnection(connection) {
   return {
     id: connection.id,
     url: connection.url,
+    connectorId: connection.connectorId || "",
+    enabled: connection.enabled !== false,
     serverName: connection.client.serverInfo?.name || fallbackMcpServerName(connection.url),
     serverVersion: connection.client.serverInfo?.version || "",
     protocolVersion: connection.client.protocolVersion || "",
@@ -138,6 +151,9 @@ async function setMcpServerToolPolicy(serverId, mode) {
   const records = await loadMcpServerRecords();
   const record = records.find((item) => item.id === serverId);
   if (!record) throw new Error("That MCP server is no longer in your list.");
+  if (record.enabled === false) {
+    throw new Error("Enable this MCP server before changing its tool permissions.");
+  }
   const connection = await connectMcpRecord(record);
   const policies = await loadMcpToolPolicies();
   let updatedCount = 0;
@@ -249,6 +265,8 @@ function serializeMcpConnection(
   const result = {
     id: connection.id,
     url: connection.url,
+    connectorId: connection.connectorId || "",
+    enabled: connection.enabled !== false,
     serverName: connection.client.serverInfo?.name || "MCP server",
     serverVersion: connection.client.serverInfo?.version || "",
     protocolVersion: connection.client.protocolVersion || "",
@@ -265,10 +283,29 @@ async function connectMcpRecord(record, force = false) {
   const existing = mcpConnections.get(record.id);
   if (!force && existing?.url === record.url) return existing;
 
-  const client = new McpHttpClient(record.url);
+  let client;
+  const connector = record.connectorId ? getMcpConnector(record.connectorId) : null;
+  if (record.connectorId === "redmine") {
+    const credential = await connectorAuth.getCredential(record.id);
+    if (!credential?.apiKey) throw new Error("This Redmine connector is missing its API key. Remove it and connect again.");
+    client = new RedmineMcpClient(record.url, credential.apiKey);
+  } else if (connector?.auth === "oauth-dcr") {
+    client = new McpHttpClient(record.url, {
+      getAccessToken: (options) => connectorAuth.getAccessToken(record.id, options),
+    });
+  } else {
+    client = new McpHttpClient(record.url);
+  }
   await client.connect();
   const tools = await client.listTools();
-  const connection = { id: record.id, url: record.url, client, tools };
+  const connection = {
+    id: record.id,
+    url: record.url,
+    connectorId: record.connectorId || "",
+    enabled: record.enabled !== false,
+    client,
+    tools,
+  };
   mcpConnections.set(record.id, connection);
   return connection;
 }
@@ -279,11 +316,67 @@ async function addMcpServer(rawUrl) {
   if (records.some((record) => record.url === url)) {
     throw new Error("This MCP server is already in your list.");
   }
-  const draft = { id: crypto.randomUUID(), url };
+  const draft = { id: crypto.randomUUID(), url, enabled: true };
   const connection = await connectMcpRecord(draft, true);
   records.push(recordFromMcpConnection(connection));
   await saveMcpServerRecords(records);
   return serializeMcpConnection(connection, true);
+}
+
+function connectorToolShouldAskByDefault(toolName) {
+  return /(?:^|[._-])(?:add|archive|assign|create|delete|draft|invite|message|move|publish|remove|reply|send|set|update|write)(?:[._-]|$)/i
+    .test(String(toolName || ""));
+}
+
+async function applyConnectorDefaultPolicies(connection) {
+  const policies = await loadMcpToolPolicies();
+  let changed = false;
+  for (const tool of connection.tools) {
+    const toolName = typeof tool?.name === "string" ? tool.name : "";
+    if (!toolName || !connectorToolShouldAskByDefault(toolName)) continue;
+    const key = disabledMcpToolKey(connection.id, toolName);
+    if (policies.has(key)) continue;
+    policies.set(key, { serverId: connection.id, toolName, mode: "ask" });
+    changed = true;
+  }
+  if (changed) await saveMcpToolPolicies(policies);
+  return policies;
+}
+
+async function connectMcpConnector(connectorId, config = {}) {
+  const connector = getMcpConnector(connectorId);
+  if (!connector) throw new Error("That built-in MCP connector is not supported.");
+  const records = await loadMcpServerRecords();
+  if (records.some((record) => record.connectorId === connector.id)) {
+    throw new Error(`${connector.name} is already connected. Remove it before connecting another account.`);
+  }
+  const id = crypto.randomUUID();
+  let url;
+  try {
+    if (connector.id === "redmine") {
+      url = normalizeRedmineBaseUrl(config.baseUrl);
+      const apiKey = String(config.apiKey || "").trim();
+      if (!apiKey) throw new Error("Enter the Redmine API key before connecting.");
+      await connectorAuth.setCredential(id, {
+        connectorId: connector.id,
+        kind: "redmine-api-key",
+        apiKey,
+      });
+    } else {
+      url = connector.endpoint;
+      await connectorAuth.authorize(id, connector.id);
+    }
+    const draft = { id, url, connectorId: connector.id, enabled: true };
+    const connection = await connectMcpRecord(draft, true);
+    records.push(recordFromMcpConnection(connection));
+    await saveMcpServerRecords(records);
+    const policies = await applyConnectorDefaultPolicies(connection);
+    return serializeMcpConnection(connection, true, new Map(), policies);
+  } catch (error) {
+    mcpConnections.delete(id);
+    await connectorAuth.removeCredential(id).catch(() => {});
+    throw error;
+  }
 }
 
 async function listMcpServers() {
@@ -295,6 +388,9 @@ async function reconnectMcpServer(serverId) {
   const records = await loadMcpServerRecords();
   const index = records.findIndex((record) => record.id === serverId);
   if (index < 0) throw new Error("That MCP server is no longer in your list.");
+  if (records[index].enabled === false) {
+    throw new Error("Enable this MCP server before reconnecting it.");
+  }
   const connection = await connectMcpRecord(records[index], true);
   await clearDisabledMcpTools(serverId);
   records[index] = recordFromMcpConnection(connection);
@@ -302,11 +398,53 @@ async function reconnectMcpServer(serverId) {
   return serializeMcpConnection(connection, true, new Map(), await loadMcpToolPolicies());
 }
 
+async function setMcpServerEnabled(serverId, enabled) {
+  if (typeof serverId !== "string" || !serverId) {
+    throw new Error("A valid MCP server is required.");
+  }
+  const shouldEnable = enabled === true;
+  const records = await loadMcpServerRecords();
+  const index = records.findIndex((record) => record.id === serverId);
+  if (index < 0) throw new Error("That MCP server is no longer in your list.");
+
+  if (!shouldEnable) {
+    records[index] = { ...records[index], enabled: false };
+    mcpConnections.delete(serverId);
+    await saveMcpServerRecords(records);
+    return {
+      ...records[index],
+      enabledToolCount: 0,
+      disabledToolCount: records[index].toolCount,
+      tools: [],
+    };
+  }
+
+  records[index] = { ...records[index], enabled: true };
+  await saveMcpServerRecords(records);
+  try {
+    const connection = await connectMcpRecord(records[index], true);
+    records[index] = recordFromMcpConnection(connection);
+    await saveMcpServerRecords(records);
+    return serializeMcpConnection(
+      connection,
+      true,
+      await loadDisabledMcpTools(),
+      await loadMcpToolPolicies(),
+    );
+  } catch (error) {
+    records[index] = { ...records[index], enabled: false };
+    mcpConnections.delete(serverId);
+    await saveMcpServerRecords(records);
+    throw error;
+  }
+}
+
 async function removeMcpServer(serverId) {
   const records = await loadMcpServerRecords();
   const nextRecords = records.filter((record) => record.id !== serverId);
   if (nextRecords.length === records.length) throw new Error("That MCP server is no longer in your list.");
   mcpConnections.delete(serverId);
+  await connectorAuth.removeCredential(serverId);
   await clearDisabledMcpTools(serverId);
   await clearMcpToolPolicies(serverId);
   await saveMcpServerRecords(nextRecords);
@@ -318,6 +456,10 @@ async function getConfiguredMcps(includeTools = false, force = true) {
   if (!records.length) return { configured: false, serverCount: 0, connectedCount: 0, servers: [] };
 
   const states = await Promise.all(records.map(async (record) => {
+    if (record.enabled === false) {
+      mcpConnections.delete(record.id);
+      return { record, connection: null, error: "" };
+    }
     try {
       const connection = await connectMcpRecord(record, force);
       return { record: recordFromMcpConnection(connection), connection, error: "" };
@@ -343,7 +485,13 @@ async function getConfiguredMcps(includeTools = false, force = true) {
     connectedCount: states.filter((state) => state.connection).length,
     servers: states.map((state) => state.connection
       ? serializeMcpConnection(state.connection, includeTools, disabledTools, policies)
-      : { ...state.record, enabledToolCount: 0, disabledToolCount: 0, tools: [], error: state.error }),
+      : {
+          ...state.record,
+          enabledToolCount: 0,
+          disabledToolCount: state.record.enabled === false ? state.record.toolCount : 0,
+          tools: [],
+          error: state.error,
+        }),
   };
 }
 
@@ -351,6 +499,7 @@ async function callMcpTool(serverId, tool, args, permissionGranted = false) {
   const records = await loadMcpServerRecords();
   const record = records.find((candidate) => candidate.id === serverId);
   if (!record) throw new Error("The MCP server for this tool is no longer configured.");
+  if (record.enabled === false) throw new Error("This MCP server is temporarily disabled in Lumi Settings.");
   const connection = await connectMcpRecord(record);
   const candidate = connection.tools.find((item) => item.name === tool);
   if (!candidate) {
@@ -380,12 +529,14 @@ async function callMcpTool(serverId, tool, args, permissionGranted = false) {
     addMcpServer,
     callMcpTool,
     cancelActiveMcpCalls,
+    connectMcpConnector,
     disableMcpTool,
     enableMcpTool,
     getConfiguredMcps,
     listMcpServers,
     reconnectMcpServer,
     removeMcpServer,
+    setMcpServerEnabled,
     setMcpServerToolPolicy,
     setMcpToolPolicy,
   };

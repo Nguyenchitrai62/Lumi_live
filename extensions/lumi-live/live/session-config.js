@@ -134,7 +134,7 @@ export function configureMcpTools(mcpInfo, activeMcpTools) {
   const usedNames = new Set(BUILTIN_TOOLS.map((tool) => tool.name));
 
   for (const [serverIndex, server] of (mcpInfo?.servers || []).entries()) {
-    if (server?.error) continue;
+    if (server?.enabled === false || server?.error) continue;
     const serverName = String(server?.serverName || `MCP server ${serverIndex + 1}`);
     const serverSlug = serverName.replace(/[^a-zA-Z0-9_]/g, "_").replace(/^_+|_+$/g, "")
       || `server_${serverIndex + 1}`;
@@ -197,7 +197,8 @@ export function buildSessionInstruction(mcpInfo, activeTabContext) {
   const baseInstruction = `${SYSTEM_INSTRUCTION}
 
 ${formatActiveTabSessionContext(activeTabContext)}`;
-  const servers = (mcpInfo?.servers || []).filter((server) => !server?.error && server?.tools?.length);
+  const servers = (mcpInfo?.servers || [])
+    .filter((server) => server?.enabled !== false && !server?.error && server?.tools?.length);
   if (!servers.length) return baseInstruction;
   const serverNames = servers.map((server) => server.serverName || "MCP server").join(", ");
   const serverInstructions = servers.map((server) => {

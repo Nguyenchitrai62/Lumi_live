@@ -1,3 +1,5 @@
+import { MCP_CONNECTORS } from "../core/mcp-connectors.js";
+
 export function createMcpSettingsController({
   elements,
   sendRuntime,
@@ -8,12 +10,23 @@ let mcpServers = [];
 let selectedMcpServerId = null;
 let currentMcpToolAlertSignature = "";
 let dismissedMcpToolAlertSignature = "";
+let connectorModalReturnFocus = null;
 
 const MCP_PERMISSION_OPTIONS = [
   { mode: "allow", label: "Always allow", icon: "\u2713" },
   { mode: "ask", label: "Ask every time", icon: "?" },
   { mode: "block", label: "Block", icon: "\u00d7" },
 ];
+const DEFAULT_MCP_ICON = "../icons/connectors/mcp.svg";
+
+function setMcpIcon(container, src = DEFAULT_MCP_ICON) {
+  const image = document.createElement("img");
+  image.src = src;
+  image.alt = "";
+  image.loading = "eager";
+  image.decoding = "async";
+  container.replaceChildren(image);
+}
 
 function setMcpStatus(state, message) {
   elements.mcpStatus.dataset.state = state;
@@ -41,7 +54,134 @@ function createMcpMeta(text, className = "") {
   return item;
 }
 
+function createMcpEnableToggle(server) {
+  const label = document.createElement("label");
+  label.className = "toggle-switch mcp-enable-toggle";
+  label.title = server.enabled === false
+    ? "Enable without reconnecting"
+    : "Temporarily exclude from new agent sessions";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = server.enabled !== false;
+  input.dataset.action = "toggle-server";
+  input.dataset.serverId = server.id;
+  input.setAttribute("aria-label", `${input.checked ? "Disable" : "Enable"} ${server.serverName || "MCP server"}`);
+  const track = document.createElement("span");
+  track.setAttribute("aria-hidden", "true");
+  const accessible = document.createElement("span");
+  accessible.className = "sr-only";
+  accessible.textContent = input.checked ? "Enabled" : "Disabled";
+  label.append(input, track, accessible);
+  return label;
+}
+
+function renderMcpConnectors() {
+  const availableConnectors = MCP_CONNECTORS.filter((connector) =>
+    !mcpServers.some((server) => server.connectorId === connector.id));
+  elements.mcpConnectorCatalog.hidden = availableConnectors.length === 0;
+  const rows = availableConnectors.map((connector) => {
+    const row = document.createElement("article");
+    row.className = "mcp-connector";
+
+    const mark = document.createElement("span");
+    mark.className = "mcp-connector-mark";
+    mark.setAttribute("aria-hidden", "true");
+    setMcpIcon(mark, connector.icon);
+
+    const copy = document.createElement("div");
+    copy.className = "mcp-connector-copy";
+    const heading = document.createElement("div");
+    heading.className = "mcp-connector-heading";
+    const name = document.createElement("strong");
+    name.textContent = connector.name;
+    const badge = document.createElement("span");
+    badge.className = "mcp-connector-badge";
+    badge.textContent = connector.id === "redmine" ? "URL + API key" : "Secure sign-in";
+    heading.append(name, badge);
+
+    const description = document.createElement("p");
+    description.className = "mcp-connector-description";
+    description.textContent = connector.description;
+    copy.append(heading, description);
+
+    const actions = document.createElement("div");
+    actions.className = "mcp-connector-actions";
+    const connect = document.createElement("button");
+    connect.type = "button";
+    connect.className = "primary mcp-connector-action";
+    connect.dataset.action = "open-connector";
+    connect.dataset.connectorId = connector.id;
+    connect.textContent = "Connect";
+    actions.append(connect);
+    row.append(mark, copy, actions);
+    return row;
+  });
+  elements.mcpConnectorList.replaceChildren(...rows);
+}
+
+function setConnectorModalStatus(state, message) {
+  elements.mcpConnectorModalStatus.dataset.state = state;
+  elements.mcpConnectorModalStatus.textContent = message;
+}
+
+function setConnectorRowStatus(row, state, message) {
+  let status = row.querySelector(".mcp-connector-status");
+  if (!status) {
+    status = document.createElement("p");
+    status.className = "mcp-connector-status";
+    status.setAttribute("role", "status");
+    row.querySelector(".mcp-connector-copy")?.append(status);
+  }
+  status.dataset.state = state;
+  status.textContent = message;
+}
+
+function closeConnectorModal({ restoreFocus = true } = {}) {
+  if (elements.confirmConnectorButton.dataset.busy === "true") return;
+  elements.mcpConnectorModal.hidden = true;
+  document.body.classList.remove("is-mcp-connector-modal-open");
+  elements.settingsShell.inert = false;
+  elements.mcpConnectorModalFields.replaceChildren();
+  setConnectorModalStatus("", "");
+  if (restoreFocus) connectorModalReturnFocus?.focus();
+  connectorModalReturnFocus = null;
+}
+
+function openRedmineModal(returnFocus) {
+  const connector = MCP_CONNECTORS.find((item) => item.id === "redmine");
+  if (!connector || mcpServers.some((server) => server.connectorId === connector.id)) return;
+  connectorModalReturnFocus = returnFocus || document.activeElement;
+  elements.mcpConnectorModalFields.replaceChildren();
+
+  for (const field of connector.fields) {
+    const label = document.createElement("label");
+    label.textContent = field.label;
+    const input = document.createElement("input");
+    input.type = field.type;
+    input.placeholder = field.placeholder;
+    input.autocomplete = field.autocomplete;
+    input.spellcheck = false;
+    input.required = true;
+    input.name = field.name;
+    label.append(input);
+    elements.mcpConnectorModalFields.append(label);
+  }
+
+  elements.confirmConnectorButton.disabled = false;
+  elements.cancelConnectorModalButton.disabled = false;
+  elements.confirmConnectorButton.dataset.busy = "";
+  setConnectorModalStatus("", "");
+  elements.mcpConnectorModal.hidden = false;
+  document.body.classList.add("is-mcp-connector-modal-open");
+  elements.settingsShell.inert = true;
+  requestAnimationFrame(() => {
+    const firstInput = elements.mcpConnectorModalFields.querySelector("input");
+    (firstInput || elements.confirmConnectorButton).focus();
+  });
+}
+
 function getMcpServerUiState(server) {
+  if (server.enabled === false) return "disabled";
   if (server.error || server.uiError) return "error";
   if ((server.tools || []).some((tool) => !tool.gemini?.enabled)) return "warning";
   return "connected";
@@ -177,7 +317,7 @@ function renderMcpToolsView() {
 }
 
 function openMcpToolsView(serverId) {
-  if (!mcpServers.some((server) => server.id === serverId)) return;
+  if (!mcpServers.some((server) => server.id === serverId && server.enabled !== false)) return;
   selectedMcpServerId = serverId;
   renderMcpToolsView();
   elements.mcpToolsView.scrollTop = 0;
@@ -206,8 +346,11 @@ function closeMcpToolsView() {
 
 function renderMcpServers() {
   const count = mcpServers.length;
-  const toolCount = mcpServers.reduce((total, server) => total + (Number(server.toolCount) || 0), 0);
-  elements.mcpServerCount.textContent = `${count} ${count === 1 ? "server" : "servers"} · ${toolCount} tools`;
+  const enabledCount = mcpServers.filter((server) => server.enabled !== false).length;
+  const toolCount = mcpServers
+    .filter((server) => server.enabled !== false)
+    .reduce((total, server) => total + (Number(server.toolCount) || 0), 0);
+  elements.mcpServerCount.textContent = `${enabledCount}/${count} enabled · ${toolCount} active tools`;
   elements.mcpEmptyState.hidden = count > 0;
   elements.mcpServerList.replaceChildren();
 
@@ -219,12 +362,15 @@ function renderMcpServers() {
     item.dataset.state = state;
     item.setAttribute("role", "listitem");
     item.tabIndex = 0;
-    item.setAttribute("aria-label", `Open tool permissions for ${server.serverName || "MCP server"}`);
+    item.setAttribute("aria-label", server.enabled === false
+      ? `${server.serverName || "MCP server"} is temporarily disabled`
+      : `Open tool permissions for ${server.serverName || "MCP server"}`);
 
     const icon = document.createElement("span");
     icon.className = "mcp-server-icon";
     icon.setAttribute("aria-hidden", "true");
-    icon.textContent = "MCP";
+    const connector = MCP_CONNECTORS.find((candidate) => candidate.id === server.connectorId);
+    setMcpIcon(icon, connector?.icon || DEFAULT_MCP_ICON);
 
     const main = document.createElement("div");
     main.className = "mcp-server-main";
@@ -236,7 +382,9 @@ function renderMcpServers() {
     status.className = "mcp-server-status";
     status.textContent = state === "connected"
       ? "Connected"
-      : state === "warning" ? "Tool warning" : state === "error" ? "Error" : "Saved";
+      : state === "warning"
+        ? "Tool warning"
+        : state === "error" ? "Error" : state === "disabled" ? "Disabled" : "Saved";
     title.append(name, status);
 
     const url = document.createElement("code");
@@ -251,7 +399,11 @@ function renderMcpServers() {
     const disabledToolCount = tools.filter((tool) => !tool.gemini?.enabled).length;
     const blockedToolCount = tools.filter((tool) => tool.permission === "block").length;
     metadata.append(createMcpMeta(`${Number(server.toolCount) || 0} tools`, "mcp-meta-count"));
-    if (tools.length) metadata.append(createMcpMeta(`${enabledToolCount} available`, "mcp-meta-available"));
+    if (server.enabled === false) {
+      metadata.append(createMcpMeta("Excluded from new agent sessions", "mcp-meta-disabled"));
+    } else if (tools.length) {
+      metadata.append(createMcpMeta(`${enabledToolCount} available`, "mcp-meta-available"));
+    }
     if (blockedToolCount) metadata.append(createMcpMeta(`${blockedToolCount} blocked`, "mcp-meta-warning"));
     if (disabledToolCount) metadata.append(createMcpMeta(`${disabledToolCount} unavailable`, "mcp-meta-warning"));
 
@@ -261,15 +413,19 @@ function renderMcpServers() {
     error.textContent = server.uiError || "";
     const permissionHint = document.createElement("span");
     permissionHint.className = "mcp-server-permission-hint";
-    permissionHint.textContent = "Tool permissions \u2192";
+    permissionHint.textContent = server.enabled === false
+      ? "Credentials kept · enable anytime"
+      : "Tool permissions \u2192";
     main.append(title, url, metadata, error, permissionHint);
 
     const actions = document.createElement("div");
     actions.className = "mcp-server-actions";
+    actions.append(createMcpEnableToggle(server));
     const reconnect = document.createElement("button");
     reconnect.type = "button";
     reconnect.dataset.action = "reconnect";
     reconnect.dataset.serverId = server.id;
+    reconnect.disabled = server.enabled === false;
     reconnect.textContent = "Reconnect";
     const remove = document.createElement("button");
     remove.type = "button";
@@ -283,6 +439,7 @@ function renderMcpServers() {
   }
   updateMcpToolAlert();
   renderMcpToolsView();
+  renderMcpConnectors();
 }
 
 function setMcpServerUiState(serverId, state, error = "") {
@@ -293,6 +450,7 @@ function setMcpServerUiState(serverId, state, error = "") {
   renderMcpServers();
   const row = elements.mcpServerList.querySelector(`[data-server-id="${CSS.escape(serverId)}"]`);
   for (const button of row?.querySelectorAll("button") || []) button.disabled = state === "connecting";
+  for (const input of row?.querySelectorAll("input") || []) input.disabled = state === "connecting";
   if (state === "connecting") row.querySelector(".mcp-server-status").textContent = "Connecting";
 }
 
@@ -322,6 +480,42 @@ async function connectMcp(event) {
     elements.connectMcpButton.dataset.busy = "";
     elements.connectMcpButton.textContent = "Connect server";
     elements.connectMcpButton.disabled = !elements.mcpUrlInput.value.trim();
+  }
+}
+
+async function connectRedmine(event) {
+  event.preventDefault();
+  const connector = MCP_CONNECTORS.find((item) => item.id === "redmine");
+  if (!connector) return;
+  const config = Object.fromEntries(
+    [...new FormData(elements.mcpConnectorModalForm)]
+      .map(([name, value]) => [name, String(value).trim()]),
+  );
+  elements.confirmConnectorButton.disabled = true;
+  elements.cancelConnectorModalButton.disabled = true;
+  elements.confirmConnectorButton.dataset.busy = "true";
+  elements.confirmConnectorButton.textContent = "Checking Redmine...";
+  setConnectorModalStatus("", "Validating the URL and API key...");
+  try {
+    const result = await sendRuntime("mcp_connect_connector", {
+      connectorId: connector.id,
+      config,
+    });
+    const server = { ...result, uiError: "" };
+    server.uiState = getMcpServerUiState(server);
+    mcpServers.push(server);
+    renderMcpServers();
+    elements.confirmConnectorButton.dataset.busy = "";
+    closeConnectorModal({ restoreFocus: false });
+  } catch (error) {
+    elements.confirmConnectorButton.disabled = false;
+    elements.cancelConnectorModalButton.disabled = false;
+    elements.confirmConnectorButton.dataset.busy = "";
+    elements.confirmConnectorButton.textContent = "Connect Redmine";
+    setConnectorModalStatus(
+      "error",
+      error instanceof Error ? error.message : `Could not connect ${connector.name}.`,
+    );
   }
 }
 
@@ -357,6 +551,58 @@ async function removeMcp(serverId) {
       "error",
       error instanceof Error ? error.message : "Could not remove this MCP server.",
     );
+  }
+}
+
+async function connectNotion(button) {
+  const connector = MCP_CONNECTORS.find((item) => item.id === "notion");
+  const row = button.closest(".mcp-connector");
+  if (!connector || !row) return;
+  button.disabled = true;
+  button.dataset.busy = "true";
+  button.textContent = "Opening sign in...";
+  row.dataset.state = "connecting";
+  setConnectorRowStatus(row, "", `Sign in to ${connector.name} in the secure Chrome window.`);
+  try {
+    const result = await sendRuntime("mcp_connect_connector", { connectorId: connector.id });
+    const server = { ...result, uiError: "" };
+    server.uiState = getMcpServerUiState(server);
+    mcpServers.push(server);
+    renderMcpServers();
+  } catch (error) {
+    button.disabled = false;
+    button.dataset.busy = "";
+    button.textContent = "Connect";
+    row.dataset.state = "error";
+    setConnectorRowStatus(
+      row,
+      "error",
+      error instanceof Error ? error.message : `Could not connect ${connector.name}.`,
+    );
+  }
+}
+
+async function toggleMcpServer(serverId, enabled, control) {
+  const current = mcpServers.find((server) => server.id === serverId);
+  if (!current) return;
+  const previousEnabled = current.enabled !== false;
+  control.disabled = true;
+  try {
+    const result = await sendRuntime("mcp_set_server_enabled", { serverId, enabled });
+    const index = mcpServers.findIndex((server) => server.id === serverId);
+    if (index >= 0) {
+      const server = { ...result, uiError: "" };
+      server.uiState = getMcpServerUiState(server);
+      mcpServers[index] = server;
+    }
+    renderMcpServers();
+  } catch (error) {
+    current.enabled = enabled ? false : previousEnabled;
+    current.uiState = getMcpServerUiState(current);
+    current.uiError = error instanceof Error
+      ? error.message
+      : "Could not change this MCP server state.";
+    renderMcpServers();
   }
 }
 
@@ -419,7 +665,32 @@ elements.mcpUrlInput.addEventListener("input", () => {
   if (elements.mcpStatus.dataset.state === "error") setMcpStatus("", "");
 });
 elements.mcpAddForm.addEventListener("submit", (event) => void connectMcp(event));
+elements.mcpConnectorList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button || button.disabled) return;
+  if (button.dataset.action === "open-connector") {
+    const connector = MCP_CONNECTORS.find((item) => item.id === button.dataset.connectorId);
+    if (connector?.id === "redmine") openRedmineModal(button);
+    else if (connector?.id === "notion") void connectNotion(button);
+  }
+});
+elements.mcpConnectorModalForm.addEventListener("input", () => {
+  if (elements.mcpConnectorModalStatus.dataset.state === "error") {
+    setConnectorModalStatus("", "");
+  }
+});
+elements.mcpConnectorModalForm.addEventListener("submit", (event) => void connectRedmine(event));
+elements.cancelConnectorModalButton.addEventListener("click", () => closeConnectorModal());
+elements.mcpConnectorModal.addEventListener("click", (event) => {
+  if (event.target === elements.mcpConnectorModal) closeConnectorModal();
+});
+elements.mcpServerList.addEventListener("change", (event) => {
+  const input = event.target.closest("input[data-action='toggle-server']");
+  if (!input) return;
+  void toggleMcpServer(input.dataset.serverId, input.checked, input);
+});
 elements.mcpServerList.addEventListener("click", (event) => {
+  if (event.target.closest(".mcp-enable-toggle")) return;
   const button = event.target.closest("button[data-action]");
   if (button) {
     if (button.disabled) return;
@@ -428,18 +699,23 @@ elements.mcpServerList.addEventListener("click", (event) => {
     return;
   }
   const serverRow = event.target.closest(".mcp-server[data-server-id]");
-  if (serverRow) openMcpToolsView(serverRow.dataset.serverId);
+  const server = mcpServers.find((item) => item.id === serverRow?.dataset.serverId);
+  if (server?.enabled !== false) openMcpToolsView(server.id);
 });
 elements.mcpServerList.addEventListener("keydown", (event) => {
-  if (event.target.closest("button")) return;
+  if (event.target.closest("button, .mcp-enable-toggle")) return;
   const serverRow = event.target.closest(".mcp-server[data-server-id]");
   if (!serverRow || !["Enter", " "].includes(event.key)) return;
+  const server = mcpServers.find((item) => item.id === serverRow.dataset.serverId);
+  if (server?.enabled === false) return;
   event.preventDefault();
   openMcpToolsView(serverRow.dataset.serverId);
 });
 elements.backToMcpServersButton.addEventListener("click", closeMcpToolsView);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && selectedMcpServerId) closeMcpToolsView();
+  if (event.key !== "Escape") return;
+  if (!elements.mcpConnectorModal.hidden) closeConnectorModal();
+  else if (selectedMcpServerId) closeMcpToolsView();
 });
 elements.mcpToolsView.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");

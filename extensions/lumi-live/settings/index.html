@@ -121,6 +121,17 @@
             </button>
           </div>
 
+          <section id="mcpConnectorCatalog" class="mcp-connector-catalog" aria-labelledby="mcpConnectorCatalogTitle">
+            <div class="mcp-connector-catalog-head">
+              <div>
+                <span class="eyebrow">QUICK CONNECT</span>
+                <h3 id="mcpConnectorCatalogTitle">Popular work tools</h3>
+              </div>
+              <p>Authorize each service once. Lumi reuses the same tool permission controls below.</p>
+            </div>
+            <div id="mcpConnectorList" class="mcp-connector-list"></div>
+          </section>
+
           <div id="mcpToolAlert" class="mcp-tool-alert" role="status" hidden>
             <div>
               <strong>MCP tool warning</strong>
@@ -146,7 +157,9 @@
           </form>
 
           <div id="mcpEmptyState" class="mcp-empty-state">
-            <span class="mcp-empty-icon" aria-hidden="true">M</span>
+            <span class="mcp-empty-icon" aria-hidden="true">
+              <img src="../icons/connectors/mcp.svg" alt="" />
+            </span>
             <div>
               <strong>No tools connected</strong>
               <p>Add a server when you want Lumi to use external tools.</p>
@@ -158,6 +171,28 @@
         </article>
       </section>
     </main>
+
+    <div id="mcpConnectorModal" class="mcp-connector-modal-backdrop" hidden>
+      <form id="mcpConnectorModalForm" class="mcp-connector-modal" role="dialog" aria-modal="true" aria-labelledby="mcpConnectorModalTitle">
+        <div class="mcp-connector-modal-head">
+          <span class="mcp-connector-mark" aria-hidden="true">
+            <img src="../icons/connectors/redmine.svg" alt="" />
+          </span>
+          <div>
+            <span class="eyebrow">CONNECT WORK TOOL</span>
+            <h2 id="mcpConnectorModalTitle">Connect Redmine</h2>
+          </div>
+        </div>
+        <p class="mcp-connector-modal-description">Enter the address of your Redmine server and the API key from My account.</p>
+        <div id="mcpConnectorModalFields" class="mcp-connector-modal-fields"></div>
+        <p class="mcp-connector-modal-note">The URL may include a custom Redmine base path. REST API must be enabled.</p>
+        <p id="mcpConnectorModalStatus" class="mcp-connector-modal-status" role="status"></p>
+        <div class="mcp-connector-modal-actions">
+          <button id="cancelConnectorModalButton" class="secondary" type="button">Cancel</button>
+          <button id="confirmConnectorButton" class="primary" type="submit">Continue</button>
+        </div>
+      </form>
+    </div>
 
     <section id="mcpToolsView" class="mcp-tools-view" aria-hidden="true" inert>
       <div class="mcp-tools-page-shell">

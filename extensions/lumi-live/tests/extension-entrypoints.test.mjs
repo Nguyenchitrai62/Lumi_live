@@ -31,6 +31,8 @@ async function collectLocalModules(entryPath, visited = new Set()) {
 
 test("manifest and HTML entrypoints keep their stable unpacked-extension paths", async () => {
   const manifest = JSON.parse(await readFile(new URL("manifest.json", extensionRoot), "utf8"));
+  assert.ok(manifest.permissions.includes("identity"));
+  assert.equal(Object.hasOwn(manifest, "oauth2"), false);
   const entrypoints = [
     manifest.background.service_worker,
     manifest.side_panel.default_path,
@@ -66,4 +68,39 @@ test("every local import reachable from a Chrome runtime entrypoint resolves", a
   ];
   const graphs = await Promise.all(moduleEntrypoints.map((entry) => collectLocalModules(entry)));
   assert.ok(graphs.every((graph) => graph.size > 0));
+});
+
+test("settings ships Notion OAuth, a Redmine popup, app icons, and a temporary server toggle", async () => {
+  const html = await readFile(new URL("settings/index.html", extensionRoot), "utf8");
+  const controller = await readFile(
+    new URL("settings/mcp-settings-controller.js", extensionRoot),
+    "utf8",
+  );
+  const styles = await readFile(new URL("settings/styles.css", extensionRoot), "utf8");
+  assert.match(html, /id="mcpConnectorModal"/);
+  assert.match(html, /id="mcpConnectorModalFields"/);
+  assert.match(html, /id="mcpConnectorCatalog"/);
+  assert.match(html, /icons\/connectors\/mcp\.svg/);
+  assert.match(controller, /mcp_set_server_enabled/);
+  assert.match(controller, /connectNotion/);
+  assert.match(controller, /connector\.id === "redmine"/);
+  assert.match(controller, /availableConnectors[\s\S]*!mcpServers\.some/);
+  assert.match(controller, /connector\?\.icon \|\| DEFAULT_MCP_ICON/);
+  assert.match(styles, /\.mcp-connector-mark img/);
+});
+
+test("connector OAuth stays inside the extension and never calls a Lumi broker", async () => {
+  const auth = await readFile(
+    new URL("background/mcp-connector-auth.js", extensionRoot),
+    "utf8",
+  );
+  const connectors = await readFile(
+    new URL("core/mcp-connectors.js", extensionRoot),
+    "utf8",
+  );
+  assert.match(auth, /chrome\.identity\.launchWebAuthFlow/);
+  assert.match(auth, /chrome\.storage\.local/);
+  assert.match(auth, /registration_endpoint/);
+  assert.doesNotMatch(`${auth}\n${connectors}`, /oauth.?broker/i);
+  assert.doesNotMatch(`${auth}\n${connectors}`, /\/api\/oauth\//);
 });

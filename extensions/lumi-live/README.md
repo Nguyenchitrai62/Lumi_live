@@ -84,9 +84,36 @@ The build copies the source atlas from `public/avatars/pixel` and the layered VT
 - Invalid or rejected tools are isolated so voice, chat, and other tools remain available.
 - Tool activity cards expose arguments, status, duration, result, failure, or cancellation.
 
+## Quick Connect integrations
+
+Lumi Settings includes two extension-only connector rows in addition to the existing custom MCP URL form. Redmine opens a focused URL/API-key popup, while Notion starts secure OAuth immediately:
+
+| Connector | Transport and authentication |
+| --- | --- |
+| Notion | Official `https://mcp.notion.com/mcp` endpoint with OAuth, PKCE, and dynamic client registration |
+| Redmine | Built-in REST adapter using a custom Redmine base URL and `X-Redmine-API-Key` |
+
+For Notion, Lumi discovers the provider's OAuth metadata, dynamically registers this installed extension as a public client, creates the PKCE verifier and state locally, and opens the provider's authorization page with `chrome.identity.launchWebAuthFlow`. The single-use code is exchanged directly with the provider and the resulting values are saved only in `chrome.storage.local`. No Lumi backend participates in authorization or refresh.
+
+Notion and Redmine use their recognizable app icons throughout Settings. Generic custom URL servers use the official Model Context Protocol icon. A built-in connector disappears from **Popular work tools** as soon as it is connected, keeping Quick Connect focused only on available choices; it remains in **Connected tools** until the user removes it.
+
+Redmine setup:
+
+1. Enable REST API in **Administration → Settings → API**.
+2. Copy the API key from **My account**.
+3. Enter the installation's full base URL, including a custom path such as `https://work.example.com/redmine`, and the API key.
+
+The built-in Redmine adapter exposes project and issue tools plus `redmine_get_spent_time`, which totals the connected user's time entries for today or a requested `YYYY-MM-DD` date.
+
+Write-style connector tools default to **Ask every time**. Users can change each tool to **Always allow**, **Ask every time**, or **Block** in the existing permission screen.
+
+Each connected server also has an enable switch. Turning it off keeps the saved OAuth token or Redmine API key and all permission choices, but skips connection and tool-schema loading for new Gemini sessions. Turning it back on reconnects with the saved credential, so no new authorization is required unless the provider session itself has expired.
+
 ## Local data and permissions
 
-The Gemini key, selected voice, avatar preference, MCP servers, and tool policies are stored in `chrome.storage.local`.
+The Gemini key, selected voice, avatar preference, MCP servers, dynamically registered OAuth client metadata, OAuth tokens, Redmine API keys, and tool policies are stored in `chrome.storage.local`, which is isolated to the extension's Chrome profile and is not synchronized through `chrome.storage.sync`. Removing a connector deletes its saved connector identity and tokens. Connector authorization codes, tokens, OAuth credentials, and API keys are never sent to a Lumi-owned backend; they are sent only to the relevant provider or authorized MCP/Redmine endpoint.
+
+This local-only boundary means the extension author does not receive connector credentials or maintain user accounts. It does not mean no third party processes connector content: Notion, Redmine, or a user-configured MCP server serves the requested data, and MCP tool inputs/results needed for the agent task can be sent to the user's configured Gemini service. `chrome.storage.local` is browser-profile storage, not an operating-system encrypted credential vault, so users must still protect their Chrome profile and device.
 
 The first voice session opens a dedicated microphone permission page. If access was previously denied, use **Fix access** in Settings.
 

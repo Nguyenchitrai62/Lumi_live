@@ -80,8 +80,11 @@ async function readSseMessage(response, expectedId, controller) {
 }
 
 export class McpHttpClient {
-  constructor(rawUrl) {
+  constructor(rawUrl, options = {}) {
     this.url = normalizeMcpUrl(rawUrl);
+    this.getAccessToken = typeof options.getAccessToken === "function"
+      ? options.getAccessToken
+      : null;
     this.protocolVersion = null;
     this.sessionId = null;
     this.serverInfo = null;
@@ -99,21 +102,30 @@ export class McpHttpClient {
     const abortFromCaller = () => controller.abort();
     if (externalSignal?.aborted) controller.abort();
     else externalSignal?.addEventListener("abort", abortFromCaller, { once: true });
-    const headers = {
-      Accept: "application/json, text/event-stream",
-      "Content-Type": "application/json",
-    };
-    if (this.protocolVersion) headers["MCP-Protocol-Version"] = this.protocolVersion;
-    if (this.sessionId) headers["Mcp-Session-Id"] = this.sessionId;
-
     try {
-      const response = await fetch(this.url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        redirect: "follow",
-        signal: controller.signal,
-      });
+      let response;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const headers = {
+          Accept: "application/json, text/event-stream",
+          "Content-Type": "application/json",
+        };
+        if (this.protocolVersion) headers["MCP-Protocol-Version"] = this.protocolVersion;
+        if (this.sessionId) headers["Mcp-Session-Id"] = this.sessionId;
+        if (this.getAccessToken) {
+          const accessToken = await this.getAccessToken({ forceRefresh: attempt > 0 });
+          if (!accessToken) throw new Error("The MCP connector did not provide an OAuth access token.");
+          headers.Authorization = `Bearer ${accessToken}`;
+        }
+        response = await fetch(this.url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+          redirect: "follow",
+          signal: controller.signal,
+        });
+        if (response.status !== 401 || !this.getAccessToken || attempt > 0) break;
+        await response.body?.cancel().catch(() => {});
+      }
       const sessionId = response.headers.get("Mcp-Session-Id");
       if (sessionId) this.sessionId = sessionId;
 

@@ -25,12 +25,14 @@ const {
   addMcpServer,
   callMcpTool,
   cancelActiveMcpCalls,
+  connectMcpConnector,
   disableMcpTool,
   enableMcpTool,
   getConfiguredMcps,
   listMcpServers,
   reconnectMcpServer,
   removeMcpServer,
+  setMcpServerEnabled,
   setMcpServerToolPolicy,
   setMcpToolPolicy,
 } = createMcpService();
@@ -631,7 +633,13 @@ async function handleMessage(message) {
   }
   if (message.command === "mcp_list_servers") return listMcpServers();
   if (message.command === "mcp_add_server") return addMcpServer(message.url);
+  if (message.command === "mcp_connect_connector") {
+    return connectMcpConnector(message.connectorId, message.config || {});
+  }
   if (message.command === "mcp_reconnect_server") return reconnectMcpServer(message.serverId);
+  if (message.command === "mcp_set_server_enabled") {
+    return setMcpServerEnabled(message.serverId, message.enabled);
+  }
   if (message.command === "mcp_remove_server") return removeMcpServer(message.serverId);
   if (message.command === "mcp_get_tools") return getConfiguredMcps(true);
   if (message.command === "mcp_inspect_tools") return getConfiguredMcps(true, false);

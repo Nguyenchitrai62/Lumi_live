@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Lumi Live",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "minimum_chrome_version": "120",
   "description": "A Gemini Live voice agent with live video translation, reactive avatars, PageAgent browser controls, and MCP tools.",
-  "permissions": ["activeTab", "offscreen", "scripting", "sidePanel", "storage", "tabs"],
+  "permissions": ["activeTab", "identity", "offscreen", "scripting", "sidePanel", "storage", "tabs"],
   "host_permissions": [
     "http://*/*",
     "https://*/*"

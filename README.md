@@ -26,6 +26,7 @@ Lumi has two reactive avatar types:
 - Automatic active-tab targeting in the Lumi Live Chrome extension.
 - PageAgent DOM tools for reading, clicking, typing, selecting, and scrolling, including content-text targets and exact normalized positions from `0` (top) to `1` (bottom): self-scoped in the web Studio and active-tab aware in the extension.
 - User-configured Streamable HTTP MCP servers.
+- Extension-only quick connectors for Notion and custom Redmine installations.
 - Per-tool permissions: **Always allow**, **Ask every time**, or **Block**.
 - Expandable activity cards for tool arguments, results, failures, and cancellations.
 - Reactive Pixel Companion states for conversation, browser control, MCP calls, success, and errors.
@@ -141,6 +142,13 @@ Open **Settings → Connected tools → Add server** and enter a Streamable HTTP
 - A failed or incompatible tool is isolated so voice, chat, and other tools keep working.
 - The extension upgrades remote HTTP URLs to HTTPS and allows localhost HTTP for development.
 - The hosted web app accepts public HTTPS endpoints only. Its same-origin proxy blocks local/private networks, redirects, oversized responses, credentials in URLs, and unsupported JSON-RPC methods.
+
+The Chrome extension also has **Quick Connect** rows for:
+
+- **Notion** — one-click OAuth against Notion's hosted MCP server.
+- **Redmine** — a built-in REST-to-MCP adapter that accepts a custom Redmine base URL and API key.
+
+Connected items disappear from Quick Connect and remain in **Connected tools**, where they can be temporarily disabled without deleting credentials or permission choices. Connector credentials stay in the user's Chrome profile. These connectors are extension-only; the web Studio continues to accept public HTTPS MCP URLs.
 
 ## Run the web app
 
