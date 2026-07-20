@@ -74,7 +74,7 @@ async function handleMcpToolNoticeAction(action) {
     if (callback) await callback();
     dismissCurrentMcpToolNotice();
   } catch (error) {
-    notice.title = "Could not update MCP tool";
+    notice.title = notice.errorTitle || "Could not complete action";
     notice.message = error instanceof Error ? error.message : "The tool state could not be changed.";
     notice.primaryLabel = "OK";
     notice.secondaryLabel = "";
@@ -355,6 +355,8 @@ function cancelPendingMcpActivities(message = "Gemini cancelled this tool call b
     normalizeMcpToolResult,
     notifyInvalidMcpSchemas,
     promptToDisableFailedMcpTool,
+    queueMcpToolNotice,
+    removeMcpToolNotice,
     requestMcpToolPermission,
     resetSessionFailures: () => promptedMcpToolFailures.clear(),
   };

@@ -44,9 +44,9 @@ async function loadTarget() {
 
 const ready = loadTarget();
 
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 chrome.runtime.onInstalled.addListener(() => {
-  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 });
 
 async function hasOffscreenDocument() {
@@ -63,8 +63,8 @@ async function ensureOffscreenDocument() {
   if (!creatingOffscreenDocument) {
     creatingOffscreenDocument = chrome.offscreen.createDocument({
       url: OFFSCREEN_DOCUMENT_PATH,
-      reasons: ["USER_MEDIA", "AUDIO_PLAYBACK"],
-      justification: "Translate active-video audio or authorized tab audio and play the translated speech.",
+      reasons: ["AUDIO_PLAYBACK"],
+      justification: "Process active-video audio and play the translated speech.",
     }).finally(() => {
       creatingOffscreenDocument = null;
     });
@@ -78,7 +78,7 @@ async function sendOffscreenCommand(command, payload = {}, create = false) {
     if (command === "translation_status") {
       return { prepared: false, state: "off", targetLanguageCode: "", source: null };
     }
-    throw new Error("Tab audio is not authorized. Activate the video tab and click the Lumi toolbar icon once.");
+    throw new Error("Video audio is not prepared. Activate a web tab with a playing video and try again.");
   }
   const response = await chrome.runtime.sendMessage({
     target: OFFSCREEN_TARGET,
@@ -87,31 +87,6 @@ async function sendOffscreenCommand(command, payload = {}, create = false) {
   });
   if (!response?.ok) throw new Error(response?.error || "The offscreen tab-audio runtime did not respond.");
   return response.result;
-}
-
-async function prepareAuthorizedTabAudio(tab) {
-  if (!tab?.id || !isWebPage(tab.url)) {
-    throw new Error("Open a normal web tab playing a video before clicking Lumi.");
-  }
-  await releaseTranslationCapture();
-  await ensureOffscreenDocument();
-  const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
-  if (!streamId) throw new Error("Chrome did not authorize audio for the active tab.");
-  const result = await sendOffscreenCommand("prepare_capture", {
-    streamId,
-    tabId: tab.id,
-    title: tab.title || "Active video tab",
-    url: sanitizeActiveContextUrl(tab.url || ""),
-  });
-  await setConnectedTab(tab.id);
-  chrome.runtime.sendMessage({
-    type: EXTENSION_EVENTS.translationState,
-    state: "off",
-    detail: "Tab audio authorized",
-    targetLanguageCode: "",
-    tabId: tab.id,
-  }).catch(() => {});
-  return result;
 }
 
 async function releaseTranslationCapture(expectedTabId = null) {
@@ -126,6 +101,7 @@ async function releaseTranslationCapture(expectedTabId = null) {
 
 async function releaseCaptureForDifferentTab(tabId) {
   const status = await sendOffscreenCommand("translation_status");
+  if (status.source?.mode === "sharedTab") return status;
   if (!status.source?.tabId || status.source.tabId === tabId) return status;
   return releaseTranslationCapture(status.source.tabId);
 }
@@ -160,7 +136,7 @@ async function startPreparedTranslation(status, tab, message) {
       const started = await sendControllerBridge(tab.id, "bridge_start_media_element_audio");
       if (started?.success === false) {
         const detail = started.error || started.message || "Direct video audio capture could not start.";
-        throw new Error(`${detail} Click the Lumi toolbar icon on this video tab, then ask to translate again.`);
+        throw new Error(`${detail} Keep the video tab active and try Live Translate again.`);
       }
       result = {
         ...result,
@@ -174,21 +150,6 @@ async function startPreparedTranslation(status, tab, message) {
     throw error;
   }
 }
-
-chrome.action.onClicked.addListener((tab) => {
-  if (Number.isInteger(tab.windowId)) {
-    void chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
-  }
-  void prepareAuthorizedTabAudio(tab).catch((error) => {
-    chrome.runtime.sendMessage({
-      type: EXTENSION_EVENTS.translationState,
-      state: "error",
-      detail: error instanceof Error ? error.message : String(error),
-      targetLanguageCode: "",
-      tabId: tab?.id ?? null,
-    }).catch(() => {});
-  });
-});
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "lumi_live_side_panel") return;
@@ -609,11 +570,27 @@ async function handleMessage(message) {
   if (message.command === "live_translation_status") {
     return sendOffscreenCommand("translation_status");
   }
+  if (message.command === "prepare_shared_tab_audio") {
+    await releaseTranslationCapture();
+    return sendOffscreenCommand("prepare_external_capture", {
+      mode: "sharedTab",
+      tabId: null,
+      title: String(message.title || "Shared Chrome tab").slice(0, 240),
+      url: "",
+      sourcePlaybackVolume: Number(message.sourcePlaybackVolume) === 0.06 ? 0.06 : 1,
+    }, true);
+  }
   if (message.command === "start_live_translation") {
     let status = await sendOffscreenCommand("translation_status");
     const tab = await getActiveTab();
+    if (status.prepared && status.source?.mode === "sharedTab") {
+      return startPreparedTranslation(status, tab || {}, message);
+    }
     if (!tab?.id || !isWebPage(tab.url)) {
-      throw new Error("Activate a normal web tab playing the video, then click the Lumi toolbar icon once.");
+      return {
+        requiresSharedTabAudio: true,
+        reason: "No active web video could be captured automatically.",
+      };
     }
     if (status.source?.tabId && status.source.tabId !== tab.id) {
       await releaseTranslationCapture(status.source.tabId);
@@ -624,7 +601,10 @@ async function handleMessage(message) {
         status = await prepareDirectMediaElementAudio(tab);
       } catch (fallbackError) {
         const detail = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-        throw new Error(`Chrome requires one click on the Lumi toolbar icon for this tab. Automatic video-element capture was unavailable: ${detail}`);
+        return {
+          requiresSharedTabAudio: true,
+          reason: `Automatic video audio capture was unavailable: ${detail}`,
+        };
       }
     }
     const activeTab = await getActiveTab();
@@ -636,7 +616,7 @@ async function handleMessage(message) {
   }
   if (message.command === "stop_live_translation") {
     const status = await sendOffscreenCommand("translation_status");
-    if (status.source?.mode === "mediaElement") {
+    if (status.source?.mode === "mediaElement" || status.source?.mode === "sharedTab") {
       const wasActive = status.state !== "off";
       await releaseTranslationCapture(status.source.tabId);
       return { prepared: false, state: "off", source: null, wasActive };

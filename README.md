@@ -128,7 +128,7 @@ Then:
 
 The Pixel Companion starts in `idle` immediately. Use the avatar button in the toolbar to switch to the VTuber.
 
-To translate a playing video, activate its tab, click the Lumi toolbar icon, and name any supported target language, for example **“Translate this video to Japanese.”** The action click immediately authorizes that exact tab and an offscreen runtime holds the stream, so the later `live_translate` tool call does not open a Share Screen dialog. It lowers the original audio to 6% and plays the translated voice. Say **“Stop live translation”** to keep the authorized stream but restore full source volume, or press **End voice** to release capture and stop the agent session. After switching tabs, click the Lumi icon once on the new tab because Chrome does not grant permanent audio access to arbitrary tabs.
+To translate a playing video, activate its tab and name any supported target language, for example **“Translate this video to Japanese.”** Lumi first captures audio automatically from the active HTML video or audio element. If the player does not expose readable audio, the side panel shows **Share tab audio**; choose **Chrome Tab** and enable audio in Chrome's picker to continue. Lumi lowers the original audio when Chrome supports local-playback suppression and plays the translated voice. Say **“Stop live translation”** to restore normal playback, or press **End voice** to stop the agent session. The Lumi toolbar icon only toggles the side panel.
 
 After changing extension source or avatar assets, run `npm run build:extension` and press **Reload** on `chrome://extensions`.
 

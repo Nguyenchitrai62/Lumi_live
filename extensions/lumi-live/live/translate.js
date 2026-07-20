@@ -101,7 +101,7 @@ export class LiveTranslationController {
     this.handleInputEnded = () => {
       if (!this.desired) return;
       this.stop();
-      this.onError?.(new Error("The tab audio source ended, so live translation stopped."));
+      this.onError?.(new Error("The video audio source ended, so live translation stopped."));
     };
   }
 

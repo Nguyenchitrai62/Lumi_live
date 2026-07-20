@@ -1,5 +1,6 @@
 import { createPanelAudioController } from "./panel-audio-controller.js";
 import { createMcpPanelController } from "./mcp-panel-controller.js";
+import { createSharedTabAudioController } from "./shared-tab-audio-controller.js";
 import {
   createAvatarController,
   normalizeAvatarMode,
@@ -97,6 +98,7 @@ let websocket = null;
 let activeApiKey = "";
 let pendingLiveTranslationStart = false;
 let liveTranslationTargetLanguageCode = "";
+let cancelPendingSharedTabAudioPrompt = null;
 
 let petalsEnabled = true;
 
@@ -138,6 +140,14 @@ const panelAudio = createPanelAudioController({
   },
   sendJson,
 });
+const sharedTabAudio = createSharedTabAudioController({
+  onEnded: () => {
+    void sendRuntime("release_tab_audio").catch(() => {});
+    setLiveTranslationBadge("error");
+    elements.statusLine.textContent = "Tab sharing stopped. Share the tab again to continue Live Translate.";
+    avatarController.transitionState("error", { forMs: 2080 });
+  },
+});
 const responseAudioGate = createTurnAudioGate(() => panelAudio.stopPlayback());
 
 function sendRuntime(command, payload = {}) {
@@ -161,6 +171,8 @@ const {
   normalizeMcpToolResult,
   notifyInvalidMcpSchemas,
   promptToDisableFailedMcpTool,
+  queueMcpToolNotice,
+  removeMcpToolNotice,
   requestMcpToolPermission,
   resetSessionFailures: resetMcpSessionFailures,
 } = createMcpPanelController({
@@ -171,6 +183,73 @@ const {
   rememberCancelledToolCall,
   sendRuntime,
 });
+
+function requestSharedTabAudio(targetLanguageCode, failureReason = "") {
+  const noticeKey = "live-translate-share-tab-audio";
+  if (cancelPendingSharedTabAudioPrompt) {
+    cancelPendingSharedTabAudioPrompt();
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value, fromAction = false) => {
+      if (settled) return;
+      settled = true;
+      cancelPendingSharedTabAudioPrompt = null;
+      if (!fromAction) removeMcpToolNotice(noticeKey);
+      callback(value);
+    };
+    cancelPendingSharedTabAudioPrompt = () => {
+      sharedTabAudio.stop();
+      finish(
+        reject,
+        new DOMException("Tab sharing was cancelled.", "AbortError"),
+      );
+    };
+    queueMcpToolNotice({
+      key: noticeKey,
+      title: "Share tab audio to continue",
+      message: `${String(failureReason || "Lumi could not read this video directly.").slice(0, 220)} Choose Chrome Tab in the picker and enable Share tab audio.`,
+      primaryLabel: "Share tab audio",
+      secondaryLabel: "Cancel",
+      errorTitle: "Could not share tab audio",
+      onPrimary: async () => {
+        try {
+          const sharedSource = await sharedTabAudio.requestAndPrepare();
+          if (!pendingLiveTranslationStart) {
+            throw new DOMException("Live translation was cancelled.", "AbortError");
+          }
+          await sendRuntime("prepare_shared_tab_audio", sharedSource);
+          const result = await sendRuntime("start_live_translation", {
+            apiKey: activeApiKey,
+            targetLanguageCode,
+          });
+          if (result?.requiresSharedTabAudio) {
+            throw new Error(result.reason || "The shared tab audio could not be prepared.");
+          }
+          sharedTabAudio.startForwarding();
+          finish(resolve, {
+            ...result,
+            captureMode: "sharedTab",
+            sourcePlaybackVolume: sharedSource.sourcePlaybackVolume,
+          }, true);
+        } catch (error) {
+          sharedTabAudio.stop();
+          await sendRuntime("release_tab_audio").catch(() => {});
+          finish(reject, error, true);
+          throw error;
+        }
+      },
+      onSecondary: () => {
+        sharedTabAudio.stop();
+        finish(
+          reject,
+          new DOMException("Tab sharing was cancelled.", "AbortError"),
+          true,
+        );
+      },
+    });
+  });
+}
 
 function syncMessageComposer() {
   const ready = sessionStatus === "ready";
@@ -186,6 +265,11 @@ function syncMessageComposer() {
   elements.messageSubmit.disabled = !ready
     || turnCancellationPending
     || (!cancelMode && !elements.messageInput.value.trim());
+}
+
+function resizeMessageInput() {
+  elements.messageInput.style.height = "auto";
+  elements.messageInput.style.height = `${Math.min(elements.messageInput.scrollHeight, 132)}px`;
 }
 
 function setAgentTurnActive(active) {
@@ -230,6 +314,8 @@ function rememberCancelledToolCall(callId) {
 function resetPendingTurnExecution(message = "Cancelled by the user.") {
   cancelPendingMcpPermissionPrompts();
   if (pendingLiveTranslationStart) {
+    cancelPendingSharedTabAudioPrompt?.();
+    sharedTabAudio.stop();
     pendingLiveTranslationStart = false;
     void sendRuntime("stop_live_translation").catch(() => {});
   }
@@ -440,7 +526,12 @@ async function runLiveTranslationTool(args = {}) {
     return sendRuntime("live_translation_status");
   }
   if (action === "stop") {
-    const result = await sendRuntime("stop_live_translation");
+    let result;
+    try {
+      result = await sendRuntime("stop_live_translation");
+    } finally {
+      sharedTabAudio.stop();
+    }
     setLiveTranslationBadge("off");
     elements.statusLine.textContent = result.wasActive
       ? "Live translation stopped. Lumi is still listening."
@@ -462,6 +553,10 @@ async function runLiveTranslationTool(args = {}) {
       apiKey: activeApiKey,
       targetLanguageCode,
     });
+    if (result?.requiresSharedTabAudio) {
+      elements.statusLine.textContent = "Lumi needs you to share this tab's audio to continue.";
+      result = await requestSharedTabAudio(targetLanguageCode, result.reason);
+    }
     if (!pendingLiveTranslationStart) {
       await sendRuntime("stop_live_translation").catch(() => {});
       throw new DOMException("Live translation was cancelled.", "AbortError");
@@ -476,8 +571,11 @@ async function runLiveTranslationTool(args = {}) {
   const languageLabel = result.languageLabel || getLiveTranslationLanguageLabel(targetLanguageCode);
   const captureLabel = result.captureMode === "mediaElement"
     ? "direct video audio"
-    : "authorized tab audio";
-  elements.statusLine.textContent = `Live translating ${result.source?.title || "the active video"} to ${languageLabel} · ${captureLabel} · source audio at 6%.`;
+    : result.captureMode === "sharedTab" ? "shared tab audio" : "prepared video audio";
+  const sourcePlaybackVolume = Number.isFinite(result.sourcePlaybackVolume)
+    ? result.sourcePlaybackVolume
+    : 0.06;
+  elements.statusLine.textContent = `Live translating ${result.source?.title || "the active video"} to ${languageLabel} · ${captureLabel} · source audio at ${Math.round(sourcePlaybackVolume * 100)}%.`;
   avatarController.transitionState("success", { forMs: 1760 });
   return {
     success: true,
@@ -485,9 +583,9 @@ async function runLiveTranslationTool(args = {}) {
     targetLanguageCode,
     sourceTabId: result.source?.tabId,
     sourceTitle: result.source?.title,
-    captureMode: result.captureMode || result.source?.mode || "tabCapture",
+    captureMode: result.captureMode || result.source?.mode || "mediaElement",
     audioOwner: "Gemini Live Translate tool",
-    sourcePlaybackVolume: 0.06,
+    sourcePlaybackVolume,
     [RESPONSE_AUDIO_DIRECTIVE_KEY]: { suppressForTurn: true },
   };
 }
@@ -902,6 +1000,8 @@ function cleanupMedia() {
   clearTurnCancellationTimers();
   turnExecutionSequence += 1;
   cancelPendingMcpPermissionPrompts();
+  cancelPendingSharedTabAudioPrompt?.();
+  sharedTabAudio.stop();
   cancelPendingMcpActivities("The voice session ended before this MCP tool call completed.");
   void sendRuntime("release_tab_audio").catch(() => {});
   pendingToolCallIds.clear();
@@ -955,6 +1055,7 @@ function sendText(text) {
   setAgentTurnActive(true);
   sendJson({ realtimeInput: { text: clean } });
   elements.messageInput.value = "";
+  resizeMessageInput();
   syncMessageComposer();
 }
 
@@ -1027,7 +1128,13 @@ elements.mcpToolNoticePrimary.addEventListener("click", () => void handleMcpTool
 elements.mcpToolNoticeSecondary.addEventListener("click", () => void handleMcpToolNoticeAction("secondary"));
 elements.mcpToolNoticeTertiary.addEventListener("click", () => void handleMcpToolNoticeAction("tertiary"));
 elements.messageInput.addEventListener("input", () => {
+  resizeMessageInput();
   syncMessageComposer();
+});
+elements.messageInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  if (!elements.messageSubmit.disabled) elements.messageForm.requestSubmit();
 });
 elements.messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1071,10 +1178,10 @@ chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === EXTENSION_EVENTS.translationState) {
     setLiveTranslationBadge(message.state || "off", message.targetLanguageCode || message.detail || "");
     if (message.state === "error" && message.detail) {
+      sharedTabAudio.stop();
+      void sendRuntime("release_tab_audio").catch(() => {});
       elements.statusLine.textContent = message.detail;
       avatarController.transitionState("error", { forMs: 2080 });
-    } else if (message.detail === "Tab audio authorized" && sessionStatus !== "ready") {
-      elements.statusLine.textContent = "Active tab audio authorized. Start voice when you are ready.";
     }
     return;
   }
@@ -1102,7 +1209,7 @@ async function initialize() {
   const translationStatus = await sendRuntime("live_translation_status").catch(() => null);
   if (translationStatus?.prepared) {
     setLiveTranslationBadge(translationStatus.state || "off", translationStatus.targetLanguageCode || "");
-    elements.statusLine.textContent = "Active tab audio authorized. Start voice when you are ready.";
+    elements.statusLine.textContent = "Video audio is prepared. Start voice when you are ready.";
   }
   panelAudio.startAnimations();
   setInterval(refreshTarget, 2800);

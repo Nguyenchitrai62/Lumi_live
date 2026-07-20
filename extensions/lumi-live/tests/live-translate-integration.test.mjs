@@ -2,20 +2,26 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("extension pre-authorizes the exact action tab without a share picker", async () => {
+test("toolbar action only toggles the side panel while video audio capture stays automatic", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   const worker = await readFile(new URL("../background/index.js", import.meta.url), "utf8");
   const app = await readFile(new URL("../side-panel/index.js", import.meta.url), "utf8");
   const offscreen = await readFile(new URL("../offscreen/index.js", import.meta.url), "utf8");
 
-  assert.ok(manifest.permissions.includes("tabCapture"));
+  assert.ok(!manifest.permissions.includes("tabCapture"));
   assert.ok(manifest.permissions.includes("offscreen"));
   assert.ok(!manifest.permissions.includes("desktopCapture"));
-  assert.match(worker, /chrome\.action\.onClicked\.addListener/);
-  assert.match(worker, /chrome\.tabCapture\.getMediaStreamId\(\{ targetTabId: tab\.id \}\)/);
+  assert.equal(manifest.action.default_title, "Toggle Lumi Live");
+  assert.match(worker, /setPanelBehavior\(\{ openPanelOnActionClick: true \}\)/);
+  assert.doesNotMatch(worker, /chrome\.action\.onClicked\.addListener/);
+  assert.doesNotMatch(worker, /chrome\.tabCapture\.getMediaStreamId/);
   assert.match(worker, /chrome\.offscreen\.createDocument/);
-  assert.match(offscreen, /chromeMediaSource: "tab"/);
-  assert.match(offscreen, /video: false/);
+  assert.doesNotMatch(offscreen, /chromeMediaSource: "tab"/);
+  assert.match(offscreen, /prepareExternalCapture/);
+  assert.match(worker, /requiresSharedTabAudio: true/);
+  assert.match(app, /Share tab audio to continue/);
+  assert.match(app, /requestSharedTabAudio/);
+  assert.match(offscreen, /sourceInfo\?\.mode === "sharedTab"/);
   assert.match(worker, /releaseCaptureForDifferentTab\(tabId\)/);
   assert.match(worker, /chrome\.windows\.onFocusChanged\.addListener/);
   assert.match(worker, /releaseCaptureForDifferentTab\(tab\?\.id \?\? null\)/);
@@ -24,7 +30,7 @@ test("extension pre-authorizes the exact action tab without a share picker", asy
   assert.doesNotMatch(app, /chooseDesktopMedia|desktopCapture/);
 });
 
-test("extension automatically falls back to the active HTML media element", async () => {
+test("extension automatically captures the active HTML media element", async () => {
   const worker = await readFile(new URL("../background/index.js", import.meta.url), "utf8");
   const pageController = await Promise.all([
     readFile(new URL("../browser/controller.js", import.meta.url), "utf8"),
@@ -61,9 +67,8 @@ test("live translation ducks captured source audio and restores it on stop", asy
   assert.match(controller, /suppressLocalAudioPlayback: true/);
   assert.match(controller, /suppressLocalAudioPlayback: false/);
   assert.match(controller, /gain\.gain\.value/);
-  assert.match(app, /sourcePlaybackVolume: 0\.06/);
-  assert.match(offscreen, /setSourceVolume\(0\.06\)/);
-  assert.match(offscreen, /setSourceVolume\(1\)/);
+  assert.match(app, /const sourcePlaybackVolume =/);
+  assert.doesNotMatch(offscreen, /setSourceVolume/);
   assert.match(webMedia, /suppressLocalAudioPlayback: true/);
   assert.match(webPage, /setSharedAudioVolume\(0\.06\)/);
   assert.match(webPage, /setSharedAudioVolume\(1\)/);

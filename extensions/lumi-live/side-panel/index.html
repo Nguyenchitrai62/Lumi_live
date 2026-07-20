@@ -19,11 +19,15 @@
           <img src="../icons/lumi-live.png" alt="" />
           <span>Lumi <strong>Live</strong></span>
         </div>
-        <div class="top-actions">
+        <div class="top-actions" role="group" aria-label="Lumi controls">
           <span id="translateBadge" class="badge badge-translate" hidden>Translate</span>
           <span id="liveBadge" class="badge badge-offline">Offline</span>
           <button id="avatarModeButton" class="icon-button avatar-mode-button" type="button" aria-pressed="true" aria-label="Switch to Lumi VTuber" title="Switch to Lumi VTuber">
-            <span class="avatar-mode-icon" aria-hidden="true"></span>
+            <span class="avatar-mode-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M5 7.5h13m0 0-3-3m3 3-3 3M19 16.5H6m0 0 3 3m-3-3 3-3" />
+              </svg>
+            </span>
           </button>
           <button id="petalsButton" class="icon-button background-effect-button" type="button" aria-pressed="true" aria-label="Turn off falling petals" title="Turn off falling petals">
             <span class="petal-icon" aria-hidden="true"></span>
@@ -33,7 +37,7 @@
       </header>
 
       <section class="target-card" aria-live="polite">
-        <span id="targetDot" class="target-dot"></span>
+        <span id="targetDot" class="target-dot" aria-hidden="true"></span>
         <div class="target-copy">
           <small>PAGEAGENT TARGET</small>
           <strong id="targetTitle">No tab connected</strong>
@@ -88,20 +92,28 @@
       </section>
 
       <footer class="composer-area">
-        <div class="voice-controls">
+        <div class="voice-controls" role="group" aria-label="Voice controls">
           <button id="startButton" class="primary" type="button"><span class="mic-mark"></span><span>Start voice</span></button>
           <button id="muteButton" class="secondary" type="button" disabled>Mute</button>
         </div>
         <form id="messageForm" class="message-form">
           <label class="sr-only" for="messageInput">Message Lumi</label>
-          <input id="messageInput" type="text" placeholder="Start voice to type a message…" disabled />
+          <div class="message-input-wrap">
+            <textarea
+              id="messageInput"
+              rows="1"
+              maxlength="4000"
+              placeholder="Start voice to type a message…"
+              disabled
+            ></textarea>
+          </div>
           <button id="messageSubmit" type="submit" data-mode="send" aria-label="Send message" title="Send message" disabled>
             <span class="message-send-icon" aria-hidden="true">↑</span>
             <span class="message-cancel-icon" aria-hidden="true"></span>
           </button>
         </form>
         <div class="status-row">
-          <p id="statusLine" class="status-line">Open settings and save your Gemini API key.</p>
+          <p id="statusLine" class="status-line" role="status" aria-live="polite" aria-atomic="true">Open settings and save your Gemini API key.</p>
           <button id="microphoneHelpButton" class="status-help" type="button" hidden>Enable microphone</button>
         </div>
       </footer>
