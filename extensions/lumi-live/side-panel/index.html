@@ -93,8 +93,36 @@
 
       <footer class="composer-area">
         <div class="voice-controls" role="group" aria-label="Voice controls">
-          <button id="startButton" class="primary" type="button"><span class="mic-mark"></span><span>Start voice</span></button>
-          <button id="muteButton" class="secondary" type="button" disabled>Mute</button>
+          <button id="startButton" class="primary" type="button"><span class="mic-mark"></span><span>Connect</span></button>
+          <button
+            id="muteButton"
+            class="secondary mute-control"
+            type="button"
+            aria-label="Mute microphone"
+            aria-pressed="false"
+            title="Mute microphone"
+            disabled
+          >
+            <svg class="mute-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M8.5 10.5V6a3.5 3.5 0 0 1 7 0v4.5a3.5 3.5 0 0 1-7 0Z" />
+              <path d="M5.5 10.5a6.5 6.5 0 0 0 13 0M12 17v3M9 20h6" />
+              <path class="mute-control-slash" d="m5 4 14 16" />
+            </svg>
+          </button>
+        </div>
+        <div id="messageQueue" class="message-queue" aria-live="polite" hidden>
+          <span class="message-queue-mark" aria-hidden="true"></span>
+          <p id="messageQueuePreview" class="message-queue-preview"></p>
+          <span id="messageQueueCount" class="message-queue-count"></span>
+          <button id="messageQueueSteer" class="message-queue-steer" type="button" title="Interrupt the current turn and send this now">
+            <span aria-hidden="true">↪</span>
+            <span>Steer</span>
+          </button>
+          <button id="messageQueueRemove" class="message-queue-remove" type="button" aria-label="Remove queued message" title="Remove queued message">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" />
+            </svg>
+          </button>
         </div>
         <form id="messageForm" class="message-form">
           <label class="sr-only" for="messageInput">Message Lumi</label>
@@ -103,8 +131,7 @@
               id="messageInput"
               rows="1"
               maxlength="4000"
-              placeholder="Start voice to type a message…"
-              disabled
+              placeholder="Type a message to Lumi…"
             ></textarea>
           </div>
           <button id="messageSubmit" type="submit" data-mode="send" aria-label="Send message" title="Send message" disabled>
@@ -115,8 +142,51 @@
         <div class="status-row">
           <p id="statusLine" class="status-line" role="status" aria-live="polite" aria-atomic="true">Open settings and save your Gemini API key.</p>
           <button id="microphoneHelpButton" class="status-help" type="button" hidden>Enable microphone</button>
+          <div id="thinkingPicker" class="thinking-picker">
+            <button
+              id="thinkingButton"
+              class="thinking-button"
+              type="button"
+              aria-haspopup="listbox"
+              aria-expanded="false"
+              aria-controls="thinkingMenu"
+              title="Choose how deeply Gemini reasons"
+            >
+              <span class="thinking-mark" aria-hidden="true"></span>
+              <span>Thinking</span>
+              <strong id="thinkingLevelLabel">Minimal</strong>
+              <span class="thinking-chevron" aria-hidden="true"></span>
+            </button>
+            <div id="thinkingMenu" class="thinking-menu" role="listbox" aria-label="Thinking level" hidden>
+              <button type="button" role="option" data-thinking-level="minimal">
+                <span><strong>Minimal</strong><small>Fastest response</small></span>
+                <span class="thinking-check" aria-hidden="true"></span>
+              </button>
+              <button type="button" role="option" data-thinking-level="low">
+                <span><strong>Low</strong><small>Light reasoning</small></span>
+                <span class="thinking-check" aria-hidden="true"></span>
+              </button>
+              <button type="button" role="option" data-thinking-level="medium">
+                <span><strong>Medium</strong><small>Balanced reasoning</small></span>
+                <span class="thinking-check" aria-hidden="true"></span>
+              </button>
+              <button type="button" role="option" data-thinking-level="high">
+                <span><strong>High</strong><small>Deepest reasoning</small></span>
+                <span class="thinking-check" aria-hidden="true"></span>
+              </button>
+            </div>
+          </div>
         </div>
       </footer>
+
+      <section id="connectionNotice" class="connection-notice-backdrop" hidden>
+        <div class="connection-notice" role="alertdialog" aria-modal="true" aria-labelledby="connectionNoticeTitle" aria-describedby="connectionNoticeMessage">
+          <span class="connection-notice-icon" aria-hidden="true">!</span>
+          <h2 id="connectionNoticeTitle">Gemini connection needed</h2>
+          <p id="connectionNoticeMessage"></p>
+          <button id="connectionNoticeAction" type="button">Open Lumi Settings</button>
+        </div>
+      </section>
     </main>
     <script type="module" src="index.js"></script>
   </body>

@@ -1,0 +1,37 @@
+import {
+  DISCLOSURE_ANIMATION_DURATION_MS,
+  SIDE_PANEL_BACKGROUND_DRIFT_DURATION_MS,
+  SIDE_PANEL_BACKGROUND_WASH_OFFSET_MS,
+  SIDE_PANEL_CANCEL_PULSE_DURATION_MS,
+  SIDE_PANEL_EXPANSION_DURATION_MS,
+  SIDE_PANEL_FAST_FEEDBACK_DURATION_MS,
+  SIDE_PANEL_MCP_SPINNER_DURATION_MS,
+  SIDE_PANEL_PETAL_ENTRANCE_DURATION_MS,
+  SIDE_PANEL_PETAL_FADE_DURATION_MS,
+  SIDE_PANEL_REDUCED_MOTION_DURATION_MS,
+  SIDE_PANEL_STANDARD_FEEDBACK_DURATION_MS,
+  SIDE_PANEL_THINKING_PULSE_DURATION_MS,
+  SIDE_PANEL_TRANSLATION_PULSE_DURATION_MS,
+} from "../core/ui-config.js";
+
+const CSS_DURATION_VARIABLES = {
+  "--ui-motion-fast": SIDE_PANEL_FAST_FEEDBACK_DURATION_MS,
+  "--ui-motion-standard": SIDE_PANEL_STANDARD_FEEDBACK_DURATION_MS,
+  "--ui-motion-panel": SIDE_PANEL_EXPANSION_DURATION_MS,
+  "--ui-motion-disclosure": DISCLOSURE_ANIMATION_DURATION_MS,
+  "--ui-motion-petal-fade": SIDE_PANEL_PETAL_FADE_DURATION_MS,
+  "--ui-motion-petal-entrance": SIDE_PANEL_PETAL_ENTRANCE_DURATION_MS,
+  "--ui-motion-background-drift": SIDE_PANEL_BACKGROUND_DRIFT_DURATION_MS,
+  "--ui-motion-background-offset": SIDE_PANEL_BACKGROUND_WASH_OFFSET_MS,
+  "--ui-motion-translation-pulse": SIDE_PANEL_TRANSLATION_PULSE_DURATION_MS,
+  "--ui-motion-thinking-pulse": SIDE_PANEL_THINKING_PULSE_DURATION_MS,
+  "--ui-motion-mcp-spinner": SIDE_PANEL_MCP_SPINNER_DURATION_MS,
+  "--ui-motion-cancel-pulse": SIDE_PANEL_CANCEL_PULSE_DURATION_MS,
+  "--ui-motion-reduced": SIDE_PANEL_REDUCED_MOTION_DURATION_MS,
+};
+
+export function applyUiConfig(root = document.documentElement) {
+  for (const [property, milliseconds] of Object.entries(CSS_DURATION_VARIABLES)) {
+    root.style.setProperty(property, `${milliseconds}ms`);
+  }
+}

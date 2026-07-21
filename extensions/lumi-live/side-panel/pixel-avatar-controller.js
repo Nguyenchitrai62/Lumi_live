@@ -1,6 +1,8 @@
+import { DEFAULT_AVATAR_MODE } from "../core/ui-config.js";
+
 const DEFAULT_MANIFEST_PATH = "assets/avatars/pixel/avatar.json";
 const EXIT_FRAME_MS = 90;
-const ACTION_MIN_MS = 600;
+const ACTION_MINIMUM_MS = 600;
 const ACTION_STATES = new Set(["ui_control", "tool_call"]);
 
 const MOOD_LABELS = {
@@ -16,7 +18,7 @@ const MOOD_LABELS = {
 };
 
 export function normalizeAvatarMode(value) {
-  return value === "vtuber" ? "vtuber" : "pixel";
+  return value === "vtuber" ? "vtuber" : DEFAULT_AVATAR_MODE;
 }
 
 export function normalizePixelAvatarManifest(value) {
@@ -144,7 +146,10 @@ export function createAvatarController({
     clearTimeout(deferredTimeoutId);
     deferredTimeoutId = null;
     if (!deferredState || pendingState || !ACTION_STATES.has(state)) return;
-    const waitMs = Math.max(0, ACTION_MIN_MS - (performance.now() - stateStartedAt));
+    const waitMs = Math.max(
+      0,
+      ACTION_MINIMUM_MS - (performance.now() - stateStartedAt),
+    );
     deferredTimeoutId = setTimeout(() => {
       const nextState = deferredState;
       deferredState = null;
@@ -177,7 +182,9 @@ export function createAvatarController({
 
     const draw = (now) => {
       if (pendingState) {
-        const stepCount = Math.floor((now - pendingState.startedAt) / EXIT_FRAME_MS);
+        const stepCount = Math.floor(
+          (now - pendingState.startedAt) / EXIT_FRAME_MS,
+        );
         const steppedFrame = pendingState.fromFrame + pendingState.direction * stepCount;
         const exitFrame = pendingState.direction > 0
           ? Math.min(pendingState.targetFrame, steppedFrame)
@@ -228,7 +235,8 @@ export function createAvatarController({
       deferState(nextState);
       return;
     }
-    if (ACTION_STATES.has(state) && performance.now() - stateStartedAt < ACTION_MIN_MS) {
+    if (ACTION_STATES.has(state)
+      && performance.now() - stateStartedAt < ACTION_MINIMUM_MS) {
       deferState(nextState);
       return;
     }

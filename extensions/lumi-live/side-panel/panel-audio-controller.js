@@ -6,6 +6,16 @@ import {
 } from "../live/audio-utils.js";
 import { MIC_CAPTURE_PROCESSOR } from "../live/session-config.js";
 
+const PLAYBACK_LEAD_SECONDS = 0.025;
+const PLAYBACK_SETTLE_MS = 120;
+const MOUTH_TAIL_SECONDS = 0.12;
+const BLINK_HALF_IN_MS = 58;
+const BLINK_CLOSED_MINIMUM_MS = 105;
+const BLINK_CLOSED_JITTER_MS = 55;
+const BLINK_HALF_OUT_MS = 72;
+const BLINK_INTERVAL_MINIMUM_MS = 2600;
+const BLINK_INTERVAL_JITTER_MS = 4200;
+
 export function createPanelAudioController({
   avatarController,
   elements,
@@ -73,7 +83,10 @@ export function createPanelAudioController({
     const source = audioContext.createBufferSource();
     source.buffer = buffer;
     source.connect(analyser);
-    const startAt = Math.max(audioContext.currentTime + 0.025, nextPlaybackTime);
+    const startAt = Math.max(
+      audioContext.currentTime + PLAYBACK_LEAD_SECONDS,
+      nextPlaybackTime,
+    );
     nextPlaybackTime = startAt + buffer.duration;
     playbackSources.add(source);
     source.onended = () => {
@@ -83,7 +96,7 @@ export function createPanelAudioController({
           if (!playbackSources.size && avatarController.isStateActive("speaking")) {
             avatarController.syncState();
           }
-        }, 120);
+        }, PLAYBACK_SETTLE_MS);
       }
     };
     source.start(startAt);
@@ -112,10 +125,10 @@ export function createPanelAudioController({
           blinkTimeoutId = setTimeout(() => {
             setEyeFrame("open");
             scheduleBlink();
-          }, 72);
-        }, 105 + Math.random() * 55);
-      }, 58);
-    }, 2600 + Math.random() * 4200);
+          }, BLINK_HALF_OUT_MS);
+        }, BLINK_CLOSED_MINIMUM_MS + Math.random() * BLINK_CLOSED_JITTER_MS);
+      }, BLINK_HALF_IN_MS);
+    }, BLINK_INTERVAL_MINIMUM_MS + Math.random() * BLINK_INTERVAL_JITTER_MS);
   }
 
   function animateMouth() {
@@ -123,7 +136,10 @@ export function createPanelAudioController({
     let smoothed = 0;
     const draw = () => {
       let frame = 0;
-      if (analyser && audioContext && (playbackSources.size > 0 || audioContext.currentTime < nextPlaybackTime + .12)) {
+      if (analyser && audioContext && (
+        playbackSources.size > 0
+        || audioContext.currentTime < nextPlaybackTime + MOUTH_TAIL_SECONDS
+      )) {
         analyser.getByteTimeDomainData(levels);
         let energy = 0;
         for (const value of levels) {

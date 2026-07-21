@@ -17,6 +17,10 @@ import {
   DEFAULT_VISUAL_PREFERENCES,
   normalizeVisualPreferences,
 } from "../core/visual-preferences.js";
+import {
+  BROWSER_ACTION_CLEANUP_DELAY_MS,
+  BROWSER_CLICK_RIPPLE_DURATION_MS,
+} from "../core/ui-config.js";
 import { RESPONSE_AUDIO_DIRECTIVE_KEY } from "../core/response-audio-policy.js";
 import {
   captureYouTubeVideoClick,
@@ -27,6 +31,7 @@ const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
 const MAX_STATE_CHARACTERS = 16000;
 const GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
 const HIGHLIGHT_STYLE_ID = "lumi-page-agent-highlight-preference";
+const CLICK_EFFECT_STYLE_ID = "lumi-page-agent-click-effect-preference";
 if (!globalThis[GLOBAL_KEY]) {
   const runtime = {
     controller: null,
@@ -64,6 +69,14 @@ if (!globalThis[GLOBAL_KEY]) {
   }
 
   function applyVisualPreferences() {
+    let clickEffectStyle = document.getElementById(CLICK_EFFECT_STYLE_ID);
+    if (!clickEffectStyle) {
+      clickEffectStyle = document.createElement("style");
+      clickEffectStyle.id = CLICK_EFFECT_STYLE_ID;
+      (document.head || document.documentElement).appendChild(clickEffectStyle);
+    }
+    clickEffectStyle.textContent = `[class*="_cursorRipple_"]::after { animation-duration: ${BROWSER_CLICK_RIPPLE_DURATION_MS}ms !important; }`;
+
     let style = document.getElementById(HIGHLIGHT_STYLE_ID);
     if (runtime.visualPreferences.showElementHighlights) {
       style?.remove();
@@ -121,7 +134,10 @@ if (!globalThis[GLOBAL_KEY]) {
       return result;
     } finally {
       if (!actionController.signal.aborted) {
-        await new Promise((resolve) => setTimeout(resolve, 420));
+        await new Promise((resolve) => setTimeout(
+          resolve,
+          BROWSER_ACTION_CLEANUP_DELAY_MS,
+        ));
       }
       await pageController.hideMask();
       await pageController.cleanUpHighlights();

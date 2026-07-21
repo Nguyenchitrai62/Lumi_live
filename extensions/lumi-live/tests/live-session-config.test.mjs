@@ -3,9 +3,47 @@ import test from "node:test";
 
 import {
   BUILTIN_TOOLS,
+  buildInitialHistoryClientContent,
+  buildThinkingConfig,
   buildSessionInstruction,
   configureMcpTools,
+  DEFAULT_THINKING_LEVEL,
+  normalizeThinkingLevel,
+  THINKING_LEVELS,
 } from "../live/session-config.js";
+
+test("builds bounded initial history without triggering a model turn", () => {
+  assert.deepEqual(buildInitialHistoryClientContent([
+    { role: "user", text: "  Xin   chào  " },
+    { role: "model", text: "Chào bạn" },
+    { role: "thinking", text: "hidden reasoning" },
+    { role: "user", text: "Mình đang nói tới tab nào?" },
+  ]), {
+    clientContent: {
+      turns: [
+        { role: "user", parts: [{ text: "Xin chào" }] },
+        { role: "model", parts: [{ text: "Chào bạn" }] },
+        { role: "user", parts: [{ text: "Mình đang nói tới tab nào?" }] },
+      ],
+      turnComplete: true,
+    },
+  });
+  assert.deepEqual(buildInitialHistoryClientContent(), {
+    clientContent: { turnComplete: true },
+  });
+});
+
+test("defaults Gemini Live thinking to the lowest supported level", () => {
+  assert.deepEqual(THINKING_LEVELS, ["minimal", "low", "medium", "high"]);
+  assert.equal(DEFAULT_THINKING_LEVEL, "minimal");
+  assert.equal(normalizeThinkingLevel(undefined), "minimal");
+  assert.equal(normalizeThinkingLevel(" HIGH "), "high");
+  assert.equal(normalizeThinkingLevel("unsupported"), "minimal");
+  assert.deepEqual(buildThinkingConfig("medium"), {
+    thinkingLevel: "MEDIUM",
+    includeThoughts: true,
+  });
+});
 
 test("grounds self-references and searches in the Lumi Live product identity", () => {
   const instruction = buildSessionInstruction();

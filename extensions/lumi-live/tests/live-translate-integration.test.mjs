@@ -104,7 +104,7 @@ test("cancel is silent, unlocks promptly, and stops pending translation without 
   assert.match(app, /freshUserInputStarted/);
   assert.match(app, /stop_live_translation/);
   assert.doesNotMatch(app, /cancelActiveAudioPicker|chooseDesktopMedia/);
-  assert.match(app, /setTimeout\(completeTurnCancellation, 80\)/);
+  assert.match(app, /TURN_CANCELLATION_WATCHDOG_MS/);
   assert.match(webPage, /toolRuntimeRef\.current!\.cancelledTurnBoundarySeen/);
   assert.match(webPage, /toolRuntimeRef\.current!\.freshUserInputStarted/);
 });

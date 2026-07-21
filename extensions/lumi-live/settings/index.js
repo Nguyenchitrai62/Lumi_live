@@ -1,5 +1,6 @@
 import { createMcpSettingsController } from "./mcp-settings-controller.js";
 import { EXTENSION_EVENTS, STORAGE_KEYS } from "../core/extension-config.js";
+import { DEFAULT_VOICE_NAME } from "../core/ui-config.js";
 import {
   createVoicePreviewController,
   VOICE_PROFILES,
@@ -114,7 +115,7 @@ async function saveSettings() {
   }
   await chrome.storage.local.set({
     [API_KEY_STORAGE_KEY]: apiKey,
-    [VOICE_STORAGE_KEY]: elements.voiceInput.value || "Zephyr",
+    [VOICE_STORAGE_KEY]: elements.voiceInput.value || DEFAULT_VOICE_NAME,
   });
   elements.saveNote.dataset.state = "saved";
   elements.saveNote.textContent = `Saved. Lumi will use ${elements.voiceInput.value} for the next voice session.`;
@@ -162,7 +163,7 @@ async function initialize() {
     ELEMENT_HIGHLIGHTS_STORAGE_KEY,
   ]);
   elements.apiKeyInput.value = String(stored[API_KEY_STORAGE_KEY] || "");
-  elements.voiceInput.value = String(stored[VOICE_STORAGE_KEY] || "Zephyr");
+  elements.voiceInput.value = String(stored[VOICE_STORAGE_KEY] || DEFAULT_VOICE_NAME);
   voicePreview.updateVoiceProfiles();
   elements.showElementHighlightsInput.checked = stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true;
   elements.connectMcpButton.disabled = true;

@@ -21,6 +21,9 @@ Lumi has two reactive avatar types:
 ## Highlights
 
 - Real-time voice and text conversation with `gemini-3.1-flash-live-preview`.
+- Composer thinking selector for Gemini Live with **Minimal**, **Low**, **Medium**, and **High** reasoning levels; **Minimal** is the low-latency default.
+- Non-blocking chat and Thinking controls: new messages queue behind the active turn with an optional **Steer** action to interrupt immediately; reconnects restore in-memory conversation context without replaying the welcome greeting.
+- Progressive Thinking reveal at 400 characters per second with automatic transcript scrolling; Thinking, MCP, click, form, scroll, and Google-effect timings are plain variables in `extensions/lumi-live/core/ui-config.js`.
 - Agent-triggered speech-to-speech translation into Google's documented 70+ languages with `gemini-3.5-live-translate-preview`; the translation tool owns audio playback, preserves the video's speaking voices, ducks the source audio to 6%, and uses a small jitter buffer without changing video or translated-audio playback speed.
 - 30 selectable voices with audio preview.
 - Automatic active-tab targeting in the Lumi Live Chrome extension.
@@ -125,7 +128,7 @@ Then:
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Select **Load unpacked** and choose [`extensions/lumi-live`](./extensions/lumi-live).
 3. Open Lumi Settings, save the Gemini API key, choose a voice, and allow microphone access.
-4. Open a normal HTTP/HTTPS page and press **Start voice**.
+4. Open a normal HTTP/HTTPS page and open the Lumi side panel. Voice connects automatically after the API key and microphone permission are ready.
 
 The Pixel Companion starts in `idle` immediately. Use the avatar button in the toolbar to switch to the VTuber.
 

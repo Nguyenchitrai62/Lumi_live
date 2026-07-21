@@ -40,7 +40,7 @@ async function requestMicrophone() {
     settingsButton.hidden = true;
     message.className = "message success";
     message.textContent = "Microphone allowed. Lumi can now start a voice session.";
-    detail.textContent = "Return to Lumi Live and press Start voice. You can close this tab.";
+    detail.textContent = "Return to Lumi Live; the voice session will connect automatically. You can close this tab.";
     setTimeout(() => window.close(), 1400);
   } catch (error) {
     if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {

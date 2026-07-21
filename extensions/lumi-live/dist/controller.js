@@ -3139,6 +3139,26 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     return new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 
+  // extensions/lumi-live/core/ui-config.js
+  var DEFAULT_SHOW_ELEMENT_HIGHLIGHTS = false;
+  var BROWSER_CLICK_RIPPLE_DURATION_MS = 300;
+  var BROWSER_ACTION_CLEANUP_DELAY_MS = 420;
+  var FORM_INPUT_REVEAL_DURATION_MS = 500;
+  var PAGE_SCROLL_DURATION_MS = 1e3;
+  var PAGE_SCROLL_FRAME_ENTRANCE_DURATION_MS = 180;
+  var PAGE_SCROLL_HUD_ENTRANCE_DURATION_MS = 220;
+  var PAGE_SCROLL_ARROW_PULSE_DURATION_MS = 720;
+  var PAGE_SCROLL_EXIT_DURATION_MS = 160;
+  var PAGE_SCROLL_CLEANUP_DELAY_MS = 170;
+  var GOOGLE_STAGE_ENTRANCE_DURATION_MS = 1e3;
+  var GOOGLE_QUERY_REVEAL_DURATION_MS = 500;
+  var GOOGLE_CARET_BLINK_DURATION_MS = 700;
+  var GOOGLE_BUTTON_FEEDBACK_DURATION_MS = 100;
+  var GOOGLE_POINTER_AIM_DURATION_MS = 360;
+  var GOOGLE_CLICK_RING_DURATION_MS = 240;
+  var GOOGLE_POST_CLICK_DELAY_MS = 120;
+  var GOOGLE_EFFECT_CLEANUP_DELAY_MS = 12e3;
+
   // extensions/lumi-live/browser/effects/tab-transition.js
   var TAB_TRANSITION_HOST_ID = "lumi-page-agent-tab-transition";
   var tabTransitionCleanupTimer = null;
@@ -3151,7 +3171,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     shadow.innerHTML = `
     <style>
       .veil { position:absolute; inset:0; overflow:hidden; background:rgba(19,15,34,.58); backdrop-filter:blur(14px); }
-      .stage { position:absolute; left:50%; top:50%; width:min(620px,calc(100vw - 36px)); transform:translate3d(-50%,calc(-50% + 14px),0) scale(.96); opacity:0; animation:lumi-search-in 1s cubic-bezier(.2,.8,.2,1) forwards; }
+      .stage { position:absolute; left:50%; top:50%; width:min(620px,calc(100vw - 36px)); transform:translate3d(-50%,calc(-50% + 14px),0) scale(.96); opacity:0; animation:lumi-search-in ${GOOGLE_STAGE_ENTRANCE_DURATION_MS}ms cubic-bezier(.2,.8,.2,1) forwards; }
       .brand { display:flex; justify-content:center; margin:0 0 22px; font:600 clamp(36px,7vw,62px)/1 Arial,sans-serif; letter-spacing:-.08em; filter:drop-shadow(0 10px 25px rgba(0,0,0,.2)); }
       .brand span:nth-child(1),.brand span:nth-child(4) { color:#4285f4; }
       .brand span:nth-child(2),.brand span:nth-child(6) { color:#ea4335; }
@@ -3161,17 +3181,17 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       .magnifier { position:relative; width:17px; height:17px; flex:0 0 auto; border:2px solid #9aa0a6; border-radius:50%; }
       .magnifier::after { content:""; position:absolute; width:7px; height:2px; right:-6px; bottom:-3px; border-radius:2px; background:#9aa0a6; transform:rotate(45deg); }
       .query { min-width:0; overflow:hidden; color:#202124; font:400 18px/1.4 Arial,sans-serif; white-space:nowrap; text-overflow:ellipsis; }
-      .caret { width:2px; height:24px; flex:0 0 auto; border-radius:2px; background:#4285f4; animation:lumi-caret .7s step-end infinite; }
+      .caret { width:2px; height:24px; flex:0 0 auto; border-radius:2px; background:#4285f4; animation:lumi-caret ${GOOGLE_CARET_BLINK_DURATION_MS}ms step-end infinite; }
       .actions { display:flex; justify-content:center; margin-top:20px; }
-      .search-button { position:relative; min-width:132px; padding:10px 18px; border:1px solid #f8f9fa; border-radius:4px; color:#3c4043; background:#f8f9fa; box-shadow:0 1px 1px rgba(0,0,0,.08); font:500 14px/1 Arial,sans-serif; text-align:center; transition:background .1s ease,border-color .1s ease,box-shadow .1s ease,transform .1s ease; }
+      .search-button { position:relative; min-width:132px; padding:10px 18px; border:1px solid #f8f9fa; border-radius:4px; color:#3c4043; background:#f8f9fa; box-shadow:0 1px 1px rgba(0,0,0,.08); font:500 14px/1 Arial,sans-serif; text-align:center; transition:background ${GOOGLE_BUTTON_FEEDBACK_DURATION_MS}ms ease,border-color ${GOOGLE_BUTTON_FEEDBACK_DURATION_MS}ms ease,box-shadow ${GOOGLE_BUTTON_FEEDBACK_DURATION_MS}ms ease,transform ${GOOGLE_BUTTON_FEEDBACK_DURATION_MS}ms ease; }
       .pointer { position:absolute; z-index:2; left:50%; top:50%; width:30px; height:34px; opacity:0; transform:translate3d(150px,78px,0); filter:drop-shadow(0 3px 4px rgba(0,0,0,.35)); }
       .pointer svg { display:block; width:100%; height:100%; overflow:visible; }
       .click-ring { position:absolute; left:7px; top:7px; width:12px; height:12px; border:2px solid rgba(66,133,244,.9); border-radius:50%; opacity:0; transform:scale(.25); }
       .status { margin:14px 0 0; color:rgba(255,255,255,.9); font:700 12px/1.35 "Segoe UI",sans-serif; letter-spacing:.04em; text-align:center; text-shadow:0 2px 8px rgba(0,0,0,.32); }
       :host([data-state="aim"]) .caret,:host([data-state="click"]) .caret { opacity:0; animation:none; }
-      :host([data-state="aim"]) .pointer { animation:lumi-pointer-aim .36s cubic-bezier(.2,.75,.2,1) forwards; }
+      :host([data-state="aim"]) .pointer { animation:lumi-pointer-aim ${GOOGLE_POINTER_AIM_DURATION_MS}ms cubic-bezier(.2,.75,.2,1) forwards; }
       :host([data-state="click"]) .pointer { opacity:1; transform:translate3d(10px,5px,0) scale(.92); }
-      :host([data-state="click"]) .click-ring { animation:lumi-click-ring .24s ease-out forwards; }
+      :host([data-state="click"]) .click-ring { animation:lumi-click-ring ${GOOGLE_CLICK_RING_DURATION_MS}ms ease-out forwards; }
       :host([data-state="click"]) .search-button { border-color:#dadce0; background:#eef3fe; box-shadow:inset 0 1px 3px rgba(60,64,67,.2); transform:translateY(2px); }
       @keyframes lumi-search-in { to { transform:translate3d(-50%,-50%,0) scale(1); opacity:1; } }
       @keyframes lumi-caret { 50% { opacity:0; } }
@@ -3199,7 +3219,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       status: shadow.querySelector(".status")
     };
   }
-  async function revealSearchText(element, text, durationMs = 500) {
+  async function revealSearchText(element, text, durationMs = GOOGLE_QUERY_REVEAL_DURATION_MS) {
     const elementWindow = element.ownerDocument.defaultView || window;
     const segmenter = elementWindow.Intl?.Segmenter ? new elementWindow.Intl.Segmenter(void 0, { granularity: "grapheme" }) : null;
     const characters = segmenter ? [...segmenter.segment(String(text))].map(({ segment }) => segment) : Array.from(String(text));
@@ -3231,15 +3251,15 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     clearTabTransition();
     const { host, query, status } = createGoogleSearchTransitionHost();
     await new Promise((resolve) => requestAnimationFrame(resolve));
-    await wait(1e3);
+    await wait(GOOGLE_STAGE_ENTRANCE_DURATION_MS);
     status.textContent = "Lumi is typing the destination";
-    await revealSearchText(query, String(searchText || "new tab"), 500);
+    await revealSearchText(query, String(searchText || "new tab"), GOOGLE_QUERY_REVEAL_DURATION_MS);
     status.textContent = "Opening a new tab";
     host.dataset.state = "aim";
-    await wait(360);
+    await wait(GOOGLE_POINTER_AIM_DURATION_MS);
     host.dataset.state = "click";
-    await wait(120);
-    tabTransitionCleanupTimer = setTimeout(() => host.remove(), 12e3);
+    await wait(GOOGLE_POST_CLICK_DELAY_MS);
+    tabTransitionCleanupTimer = setTimeout(() => host.remove(), GOOGLE_EFFECT_CLEANUP_DELAY_MS);
   }
 
   // extensions/lumi-live/browser/effects/scroll.js
@@ -3254,16 +3274,16 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     shadow.innerHTML = `
     <style>
       :host { --progress:0; color-scheme:light dark; }
-      .frame { position:absolute; inset:10px; border:1px solid rgba(122,207,255,.34); border-radius:18px; box-shadow:inset 0 0 38px rgba(45,155,218,.11); opacity:0; animation:lumi-scroll-frame-in .18s ease-out forwards; }
-      .hud { position:absolute; right:max(20px,3vw); top:50%; display:grid; grid-template-columns:30px auto; align-items:center; gap:10px; min-width:142px; padding:10px 13px 10px 10px; border:1px solid rgba(194,231,255,.45); border-radius:999px; color:#fff; background:linear-gradient(135deg,rgba(12,49,76,.9),rgba(22,91,129,.84)); box-shadow:0 14px 36px rgba(4,30,49,.3),inset 0 1px rgba(255,255,255,.16); backdrop-filter:blur(12px); transform:translate(14px,-50%); opacity:0; animation:lumi-scroll-hud-in .22s cubic-bezier(.2,.8,.2,1) forwards; }
+      .frame { position:absolute; inset:10px; border:1px solid rgba(122,207,255,.34); border-radius:18px; box-shadow:inset 0 0 38px rgba(45,155,218,.11); opacity:0; animation:lumi-scroll-frame-in ${PAGE_SCROLL_FRAME_ENTRANCE_DURATION_MS}ms ease-out forwards; }
+      .hud { position:absolute; right:max(20px,3vw); top:50%; display:grid; grid-template-columns:30px auto; align-items:center; gap:10px; min-width:142px; padding:10px 13px 10px 10px; border:1px solid rgba(194,231,255,.45); border-radius:999px; color:#fff; background:linear-gradient(135deg,rgba(12,49,76,.9),rgba(22,91,129,.84)); box-shadow:0 14px 36px rgba(4,30,49,.3),inset 0 1px rgba(255,255,255,.16); backdrop-filter:blur(12px); transform:translate(14px,-50%); opacity:0; animation:lumi-scroll-hud-in ${PAGE_SCROLL_HUD_ENTRANCE_DURATION_MS}ms cubic-bezier(.2,.8,.2,1) forwards; }
       .motion { position:relative; width:30px; height:30px; display:grid; place-items:center; overflow:hidden; border-radius:50%; color:#d7f4ff; background:rgba(255,255,255,.13); }
-      .arrow { width:8px; height:8px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(45deg) translate(-1px,-1px); animation:lumi-scroll-arrow .72s ease-in-out infinite; }
+      .arrow { width:8px; height:8px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(45deg) translate(-1px,-1px); animation:lumi-scroll-arrow ${PAGE_SCROLL_ARROW_PULSE_DURATION_MS}ms ease-in-out infinite; }
       :host([data-direction="up"]) .arrow { transform:rotate(225deg) translate(-1px,-1px); animation-name:lumi-scroll-arrow-up; }
       .copy { display:grid; gap:3px; min-width:76px; font:700 10px/1.1 "Segoe UI",sans-serif; letter-spacing:.02em; }
       .copy small { color:rgba(225,245,255,.72); font:800 7px/1 "Segoe UI",sans-serif; letter-spacing:.14em; text-transform:uppercase; }
       .track { grid-column:1/-1; height:2px; overflow:hidden; border-radius:2px; background:rgba(255,255,255,.17); }
       .track::after { content:""; display:block; width:100%; height:100%; border-radius:inherit; background:linear-gradient(90deg,#7bdcff,#d8f7ff); transform-origin:left; transform:scaleX(var(--progress)); }
-      :host([data-state="done"]) .hud,:host([data-state="done"]) .frame { opacity:0; transition:opacity .16s ease; }
+      :host([data-state="done"]) .hud,:host([data-state="done"]) .frame { opacity:0; transition:opacity ${PAGE_SCROLL_EXIT_DURATION_MS}ms ease; }
       @keyframes lumi-scroll-frame-in { to { opacity:1; } }
       @keyframes lumi-scroll-hud-in { to { transform:translate(0,-50%); opacity:1; } }
       @keyframes lumi-scroll-arrow { 0% { opacity:0; translate:0 -6px; } 35% { opacity:1; } 100% { opacity:0; translate:0 7px; } }
@@ -3283,7 +3303,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       },
       async finish() {
         host.dataset.state = "done";
-        await wait(170);
+        await wait(PAGE_SCROLL_CLEANUP_DELAY_MS);
         host.remove();
       },
       remove() {
@@ -3506,7 +3526,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     occurrence = 1,
     alignment = "center",
     root,
-    durationMs = 1e3,
+    durationMs = PAGE_SCROLL_DURATION_MS,
     signal: signal2
   }) {
     const match = findTextElement(text, root, occurrence);
@@ -3548,7 +3568,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     pages = 0.8,
     position,
     indexedElement,
-    durationMs = 1e3,
+    durationMs = PAGE_SCROLL_DURATION_MS,
     signal: signal2
   } = {}) {
     const scrollTarget = findVerticalScroller(indexedElement);
@@ -3719,13 +3739,13 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
 
   // extensions/lumi-live/core/visual-preferences.js
   var DEFAULT_VISUAL_PREFERENCES = Object.freeze({
-    showElementHighlights: false,
-    scrollDurationMs: 1e3,
-    typingDurationMs: 500
+    showElementHighlights: DEFAULT_SHOW_ELEMENT_HIGHLIGHTS,
+    scrollDurationMs: PAGE_SCROLL_DURATION_MS,
+    typingDurationMs: FORM_INPUT_REVEAL_DURATION_MS
   });
   function normalizeVisualPreferences(value = {}) {
     return {
-      showElementHighlights: value.showElementHighlights === true,
+      showElementHighlights: typeof value.showElementHighlights === "boolean" ? value.showElementHighlights : DEFAULT_VISUAL_PREFERENCES.showElementHighlights,
       scrollDurationMs: DEFAULT_VISUAL_PREFERENCES.scrollDurationMs,
       typingDurationMs: DEFAULT_VISUAL_PREFERENCES.typingDurationMs
     };
@@ -3799,6 +3819,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
   var MAX_STATE_CHARACTERS = 16e3;
   var GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
   var HIGHLIGHT_STYLE_ID = "lumi-page-agent-highlight-preference";
+  var CLICK_EFFECT_STYLE_ID = "lumi-page-agent-click-effect-preference";
   if (!globalThis[GLOBAL_KEY]) {
     let getController = function() {
       if (!runtime.controller) {
@@ -3824,6 +3845,13 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       }
       return runtime.controller;
     }, applyVisualPreferences = function() {
+      let clickEffectStyle = document.getElementById(CLICK_EFFECT_STYLE_ID);
+      if (!clickEffectStyle) {
+        clickEffectStyle = document.createElement("style");
+        clickEffectStyle.id = CLICK_EFFECT_STYLE_ID;
+        (document.head || document.documentElement).appendChild(clickEffectStyle);
+      }
+      clickEffectStyle.textContent = `[class*="_cursorRipple_"]::after { animation-duration: ${BROWSER_CLICK_RIPPLE_DURATION_MS}ms !important; }`;
       let style = document.getElementById(HIGHLIGHT_STYLE_ID);
       if (runtime.visualPreferences.showElementHighlights) {
         style?.remove();
@@ -3881,7 +3909,10 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
         return result2;
       } finally {
         if (!actionController.signal.aborted) {
-          await new Promise((resolve) => setTimeout(resolve, 420));
+          await new Promise((resolve) => setTimeout(
+            resolve,
+            BROWSER_ACTION_CLEANUP_DELAY_MS
+          ));
         }
         await pageController.hideMask();
         await pageController.cleanUpHighlights();

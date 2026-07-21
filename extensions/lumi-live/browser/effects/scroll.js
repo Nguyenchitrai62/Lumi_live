@@ -1,4 +1,12 @@
 import { wait } from "./timing.js";
+import {
+  PAGE_SCROLL_ARROW_PULSE_DURATION_MS,
+  PAGE_SCROLL_CLEANUP_DELAY_MS,
+  PAGE_SCROLL_DURATION_MS,
+  PAGE_SCROLL_EXIT_DURATION_MS,
+  PAGE_SCROLL_FRAME_ENTRANCE_DURATION_MS,
+  PAGE_SCROLL_HUD_ENTRANCE_DURATION_MS,
+} from "../../core/ui-config.js";
 
 const SCROLL_EFFECT_HOST_ID = "lumi-page-agent-scroll-effect";
 
@@ -12,16 +20,16 @@ function createScrollEffect(direction) {
   shadow.innerHTML = `
     <style>
       :host { --progress:0; color-scheme:light dark; }
-      .frame { position:absolute; inset:10px; border:1px solid rgba(122,207,255,.34); border-radius:18px; box-shadow:inset 0 0 38px rgba(45,155,218,.11); opacity:0; animation:lumi-scroll-frame-in .18s ease-out forwards; }
-      .hud { position:absolute; right:max(20px,3vw); top:50%; display:grid; grid-template-columns:30px auto; align-items:center; gap:10px; min-width:142px; padding:10px 13px 10px 10px; border:1px solid rgba(194,231,255,.45); border-radius:999px; color:#fff; background:linear-gradient(135deg,rgba(12,49,76,.9),rgba(22,91,129,.84)); box-shadow:0 14px 36px rgba(4,30,49,.3),inset 0 1px rgba(255,255,255,.16); backdrop-filter:blur(12px); transform:translate(14px,-50%); opacity:0; animation:lumi-scroll-hud-in .22s cubic-bezier(.2,.8,.2,1) forwards; }
+      .frame { position:absolute; inset:10px; border:1px solid rgba(122,207,255,.34); border-radius:18px; box-shadow:inset 0 0 38px rgba(45,155,218,.11); opacity:0; animation:lumi-scroll-frame-in ${PAGE_SCROLL_FRAME_ENTRANCE_DURATION_MS}ms ease-out forwards; }
+      .hud { position:absolute; right:max(20px,3vw); top:50%; display:grid; grid-template-columns:30px auto; align-items:center; gap:10px; min-width:142px; padding:10px 13px 10px 10px; border:1px solid rgba(194,231,255,.45); border-radius:999px; color:#fff; background:linear-gradient(135deg,rgba(12,49,76,.9),rgba(22,91,129,.84)); box-shadow:0 14px 36px rgba(4,30,49,.3),inset 0 1px rgba(255,255,255,.16); backdrop-filter:blur(12px); transform:translate(14px,-50%); opacity:0; animation:lumi-scroll-hud-in ${PAGE_SCROLL_HUD_ENTRANCE_DURATION_MS}ms cubic-bezier(.2,.8,.2,1) forwards; }
       .motion { position:relative; width:30px; height:30px; display:grid; place-items:center; overflow:hidden; border-radius:50%; color:#d7f4ff; background:rgba(255,255,255,.13); }
-      .arrow { width:8px; height:8px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(45deg) translate(-1px,-1px); animation:lumi-scroll-arrow .72s ease-in-out infinite; }
+      .arrow { width:8px; height:8px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(45deg) translate(-1px,-1px); animation:lumi-scroll-arrow ${PAGE_SCROLL_ARROW_PULSE_DURATION_MS}ms ease-in-out infinite; }
       :host([data-direction="up"]) .arrow { transform:rotate(225deg) translate(-1px,-1px); animation-name:lumi-scroll-arrow-up; }
       .copy { display:grid; gap:3px; min-width:76px; font:700 10px/1.1 "Segoe UI",sans-serif; letter-spacing:.02em; }
       .copy small { color:rgba(225,245,255,.72); font:800 7px/1 "Segoe UI",sans-serif; letter-spacing:.14em; text-transform:uppercase; }
       .track { grid-column:1/-1; height:2px; overflow:hidden; border-radius:2px; background:rgba(255,255,255,.17); }
       .track::after { content:""; display:block; width:100%; height:100%; border-radius:inherit; background:linear-gradient(90deg,#7bdcff,#d8f7ff); transform-origin:left; transform:scaleX(var(--progress)); }
-      :host([data-state="done"]) .hud,:host([data-state="done"]) .frame { opacity:0; transition:opacity .16s ease; }
+      :host([data-state="done"]) .hud,:host([data-state="done"]) .frame { opacity:0; transition:opacity ${PAGE_SCROLL_EXIT_DURATION_MS}ms ease; }
       @keyframes lumi-scroll-frame-in { to { opacity:1; } }
       @keyframes lumi-scroll-hud-in { to { transform:translate(0,-50%); opacity:1; } }
       @keyframes lumi-scroll-arrow { 0% { opacity:0; translate:0 -6px; } 35% { opacity:1; } 100% { opacity:0; translate:0 7px; } }
@@ -41,7 +49,7 @@ function createScrollEffect(direction) {
     },
     async finish() {
       host.dataset.state = "done";
-      await wait(170);
+      await wait(PAGE_SCROLL_CLEANUP_DELAY_MS);
       host.remove();
     },
     remove() {
@@ -309,7 +317,7 @@ export async function scrollToTextGradually({
   occurrence = 1,
   alignment = "center",
   root,
-  durationMs = 1000,
+  durationMs = PAGE_SCROLL_DURATION_MS,
   signal,
 }) {
   const match = findTextElement(text, root, occurrence);
@@ -366,7 +374,7 @@ export async function scrollPageGradually({
   pages = 0.8,
   position,
   indexedElement,
-  durationMs = 1000,
+  durationMs = PAGE_SCROLL_DURATION_MS,
   signal,
 } = {}) {
   const scrollTarget = findVerticalScroller(indexedElement);

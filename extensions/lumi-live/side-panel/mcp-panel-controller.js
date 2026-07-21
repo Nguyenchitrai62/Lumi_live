@@ -1,3 +1,8 @@
+import { attachAnimatedDisclosure } from "./disclosure-controller.js";
+
+const MCP_APPROVAL_TIMEOUT_MS = 45000;
+const MCP_PREVIEW_CHARACTER_LIMIT = 24000;
+
 export function createMcpPanelController({
   elements,
   getActiveMcpTools,
@@ -167,7 +172,7 @@ function requestMcpToolPermission(tool, args, callId) {
           activity.root.dataset.state = "waiting";
           activity.status.textContent = "Awaiting approval";
         }
-        timeoutId = setTimeout(() => finish(false), 45000);
+        timeoutId = setTimeout(() => finish(false), MCP_APPROVAL_TIMEOUT_MS);
       },
       onPrimary: () => {
         const activity = mcpActivityCards.get(callId);
@@ -243,7 +248,7 @@ function formatMcpActivityValue(value) {
     text = String(value);
   }
   if (!text) return "No data returned.";
-  const limit = 24000;
+  const limit = MCP_PREVIEW_CHARACTER_LIMIT;
   return text.length > limit ? `${text.slice(0, limit)}\n\n... UI preview truncated ...` : text;
 }
 
@@ -310,7 +315,12 @@ function createMcpActivityCard(callId, tool, args) {
   body.append(metadata, argsSection, resultSection);
   root.append(summary, body);
   elements.transcript.append(root);
-  elements.transcript.scrollTop = elements.transcript.scrollHeight;
+  const disclosure = attachAnimatedDisclosure({ root, summary, body });
+  if (typeof elements.transcript.scrollTo === "function") {
+    elements.transcript.scrollTo({ top: elements.transcript.scrollHeight, behavior: "smooth" });
+  } else {
+    elements.transcript.scrollTop = elements.transcript.scrollHeight;
+  }
 
   const activity = {
     root,
@@ -320,6 +330,7 @@ function createMcpActivityCard(callId, tool, args) {
     resultLabel,
     resultPre,
     startedAt: Date.now(),
+    disclosure,
   };
   mcpActivityCards.set(callId, activity);
   return activity;

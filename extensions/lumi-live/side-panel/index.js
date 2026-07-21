@@ -10,11 +10,15 @@ import {
   BROWSER_TOOLS,
   BUILTIN_TOOLS,
   BROWSER_UI_ACTION_TOOLS,
+  buildInitialHistoryClientContent,
+  buildThinkingConfig,
   buildSessionInstruction,
   configureMcpTools,
+  DEFAULT_THINKING_LEVEL,
   findRejectedMcpDeclaration,
   MAX_MCP_TOOL_RESPONSE_CHARS,
   MODEL,
+  normalizeThinkingLevel,
   WS_ENDPOINT,
 } from "../live/session-config.js";
 import {
@@ -23,6 +27,20 @@ import {
   normalizeLiveTranslationLanguageCode,
 } from "../live/translate.js";
 import { mergeTranscriptText } from "../live/audio-utils.js";
+import {
+  findCommonCharacterPrefix,
+  getTranscriptRevealDurationMs,
+  splitTranscriptCharacters,
+} from "./transcript-presentation.js";
+import { applyUiConfig } from "./apply-ui-config.js";
+import {
+  AVATAR_ERROR_STATE_DURATION_MS,
+  AVATAR_SUCCESS_STATE_DURATION_MS,
+  DEFAULT_AUTO_CONNECT_ENABLED,
+  DEFAULT_FALLING_PETALS_ENABLED,
+  DEFAULT_VOICE_NAME,
+} from "../core/ui-config.js";
+import { attachAnimatedDisclosure } from "./disclosure-controller.js";
 import { createPetalEmitter } from "./petal-emitter.js";
 import {
   consumeResponseAudioDirective,
@@ -41,8 +59,16 @@ const VOICE_STORAGE_KEY = STORAGE_KEYS.voice;
 const MICROPHONE_GRANTED_STORAGE_KEY = STORAGE_KEYS.microphoneGrantedAt;
 const PETALS_STORAGE_KEY = STORAGE_KEYS.fallingPetals;
 const AVATAR_MODE_STORAGE_KEY = STORAGE_KEYS.avatarMode;
+const THINKING_LEVEL_STORAGE_KEY = STORAGE_KEYS.thinkingLevel;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
 const PANEL_LIFECYCLE_MESSAGE = EXTENSION_EVENTS.lifecycle;
+const GEMINI_SETUP_TIMEOUT_MS = 15000;
+const CANCELLED_TOOL_CALL_RETENTION_MS = 60000;
+const TURN_CANCELLATION_DRAIN_MS = 120;
+const TURN_CANCELLATION_WATCHDOG_MS = 80;
+const TURN_CANCELLATION_BOUNDARY_MS = 1500;
+const TARGET_REFRESH_INTERVAL_MS = 2800;
+applyUiConfig();
 const sidePanelLifecyclePort = chrome.runtime.connect({ name: "lumi_live_side_panel" });
 const elements = {
   liveBadge: document.querySelector("#liveBadge"),
@@ -62,6 +88,10 @@ const elements = {
   mcpToolNoticePrimary: document.querySelector("#mcpToolNoticePrimary"),
   mcpToolNoticeSecondary: document.querySelector("#mcpToolNoticeSecondary"),
   mcpToolNoticeTertiary: document.querySelector("#mcpToolNoticeTertiary"),
+  connectionNotice: document.querySelector("#connectionNotice"),
+  connectionNoticeTitle: document.querySelector("#connectionNoticeTitle"),
+  connectionNoticeMessage: document.querySelector("#connectionNoticeMessage"),
+  connectionNoticeAction: document.querySelector("#connectionNoticeAction"),
   vtuberCard: document.querySelector("#vtuberCard"),
   vtuberToggle: document.querySelector("#vtuberToggle"),
   lumiRig: document.querySelector(".lumi-rig"),
@@ -76,14 +106,25 @@ const elements = {
   vtuberMood: document.querySelector("#vtuberMood"),
   startButton: document.querySelector("#startButton"),
   muteButton: document.querySelector("#muteButton"),
+  messageQueue: document.querySelector("#messageQueue"),
+  messageQueuePreview: document.querySelector("#messageQueuePreview"),
+  messageQueueCount: document.querySelector("#messageQueueCount"),
+  messageQueueSteer: document.querySelector("#messageQueueSteer"),
+  messageQueueRemove: document.querySelector("#messageQueueRemove"),
   messageForm: document.querySelector("#messageForm"),
   messageInput: document.querySelector("#messageInput"),
   messageSubmit: document.querySelector("#messageForm button[type='submit']"),
   statusLine: document.querySelector("#statusLine"),
   microphoneHelpButton: document.querySelector("#microphoneHelpButton"),
+  thinkingPicker: document.querySelector("#thinkingPicker"),
+  thinkingButton: document.querySelector("#thinkingButton"),
+  thinkingLevelLabel: document.querySelector("#thinkingLevelLabel"),
+  thinkingMenu: document.querySelector("#thinkingMenu"),
+  thinkingOptions: [...document.querySelectorAll("[data-thinking-level]")],
 };
 
 let sessionStatus = "idle";
+let sessionStartPending = false;
 let intentionalClose = false;
 let isMuted = false;
 let agentTurnActive = false;
@@ -105,12 +146,19 @@ let activeApiKey = "";
 let pendingLiveTranslationStart = false;
 let liveTranslationTargetLanguageCode = "";
 let cancelPendingSharedTabAudioPrompt = null;
+let thinkingLevel = DEFAULT_THINKING_LEVEL;
+let pendingThinkingReconnect = false;
+let hasConnectedInPanelLifetime = false;
+const conversationHistory = [];
+const queuedUserMessages = [];
+const initialTranscriptMarkup = elements.transcript.innerHTML;
+const activeTranscriptReveals = new Set();
 
-let petalsEnabled = true;
+let petalsEnabled = DEFAULT_FALLING_PETALS_ENABLED;
 
 let setupTimeoutId = null;
 
-const partialMessages = { user: null, lumi: null };
+const partialMessages = { user: null, lumi: null, thinking: null };
 
 const avatarController = createAvatarController({
   elements: {
@@ -143,6 +191,7 @@ const panelAudio = createPanelAudioController({
     markFreshUserInputStarted();
     finalizeTranscript("user");
     finalizeTranscript("lumi");
+    finalizeTranscript("thinking");
   },
   sendJson,
 });
@@ -151,7 +200,7 @@ const sharedTabAudio = createSharedTabAudioController({
     void sendRuntime("release_tab_audio").catch(() => {});
     setLiveTranslationBadge("error");
     elements.statusLine.textContent = "Tab sharing stopped. Share the tab again to continue Live Translate.";
-    avatarController.transitionState("error", { forMs: 2080 });
+    avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
   },
 });
 const responseAudioGate = createTurnAudioGate(() => panelAudio.stopPlayback());
@@ -259,18 +308,37 @@ function requestSharedTabAudio(targetLanguageCode, failureReason = "") {
 
 function syncMessageComposer() {
   const ready = sessionStatus === "ready";
-  const cancelMode = ready && agentTurnActive;
-  elements.messageInput.disabled = !ready || cancelMode || turnCancellationPending;
-  elements.messageInput.placeholder = !ready
-    ? "Start voice to type a message…"
-    : turnCancellationPending ? "Cancelling current action…"
-      : cancelMode ? "Lumi is working…" : "Type a message to Lumi…";
+  const hasText = Boolean(elements.messageInput.value.trim());
+  const cancelMode = ready && agentTurnActive && !turnCancellationPending && !hasText;
+  const queueMode = ready && (agentTurnActive || turnCancellationPending) && hasText;
+  elements.messageInput.disabled = false;
+  elements.messageInput.placeholder = ready
+    ? turnCancellationPending
+      ? "Type your next message while Lumi stops…"
+      : agentTurnActive ? "Type to queue your next message…" : "Type a message to Lumi…"
+    : sessionStatus === "connecting"
+      ? "Type while Lumi reconnects…"
+      : "Type a message; Lumi will connect when you send…";
   elements.messageSubmit.dataset.mode = cancelMode ? "cancel" : "send";
-  elements.messageSubmit.setAttribute("aria-label", cancelMode ? "Cancel current action" : "Send message");
-  elements.messageSubmit.title = cancelMode ? "Cancel current action" : "Send message";
-  elements.messageSubmit.disabled = !ready
-    || turnCancellationPending
-    || (!cancelMode && !elements.messageInput.value.trim());
+  const submitLabel = cancelMode
+    ? "Cancel current action"
+    : queueMode ? "Add message to queue" : "Send message";
+  elements.messageSubmit.setAttribute("aria-label", submitLabel);
+  elements.messageSubmit.title = submitLabel;
+  elements.messageSubmit.disabled = !hasText && !cancelMode;
+}
+
+function syncQueuedMessagePanel() {
+  const count = queuedUserMessages.length;
+  elements.messageQueue.hidden = count === 0;
+  if (!count) return;
+  elements.messageQueuePreview.textContent = queuedUserMessages[0];
+  elements.messageQueuePreview.title = queuedUserMessages[0];
+  elements.messageQueueCount.textContent = count > 1 ? `+${count - 1}` : "";
+  elements.messageQueueSteer.disabled = turnCancellationPending;
+  elements.messageQueueSteer.title = sessionStatus === "ready"
+    ? "Interrupt the current turn and send this now"
+    : "Send this as soon as Lumi reconnects";
 }
 
 function resizeMessageInput() {
@@ -320,7 +388,10 @@ function markCancelledTurnBoundarySeen() {
 function rememberCancelledToolCall(callId) {
   if (!callId) return;
   cancelledToolCallIds.add(callId);
-  setTimeout(() => cancelledToolCallIds.delete(callId), 60000);
+  setTimeout(
+    () => cancelledToolCallIds.delete(callId),
+    CANCELLED_TOOL_CALL_RETENTION_MS,
+  );
 }
 
 function resetPendingTurnExecution(message = "Cancelled by the user.") {
@@ -346,6 +417,7 @@ function resetPendingTurnExecution(message = "Cancelled by the user.") {
   responseAudioGate.reset();
   finalizeTranscript("user");
   finalizeTranscript("lumi");
+  finalizeTranscript("thinking");
   return cancelledResponses;
 }
 
@@ -358,11 +430,59 @@ function completeTurnCancellation() {
   elements.statusLine.textContent = "Current action stopped. Waiting silently for your next instruction.";
   avatarController.syncState();
   syncMessageComposer();
+  flushQueuedUserMessage();
 }
 
 function scheduleTurnCancellationCompletion() {
   clearTimeout(turnCancellationDrainTimeoutId);
-  turnCancellationDrainTimeoutId = setTimeout(completeTurnCancellation, 120);
+  turnCancellationDrainTimeoutId = setTimeout(
+    completeTurnCancellation,
+    TURN_CANCELLATION_DRAIN_MS,
+  );
+}
+
+function formatThinkingLevel(value) {
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+}
+
+function setThinkingMenuOpen(open) {
+  const shouldOpen = Boolean(open) && !elements.thinkingButton.disabled;
+  elements.thinkingMenu.hidden = !shouldOpen;
+  elements.thinkingButton.setAttribute("aria-expanded", String(shouldOpen));
+  if (shouldOpen) {
+    elements.thinkingOptions.find((option) => option.getAttribute("aria-selected") === "true")?.focus();
+  }
+}
+
+function applyThinkingLevel(value) {
+  thinkingLevel = normalizeThinkingLevel(value);
+  elements.thinkingLevelLabel.textContent = formatThinkingLevel(thinkingLevel);
+  for (const option of elements.thinkingOptions) {
+    option.setAttribute("aria-selected", String(option.dataset.thinkingLevel === thinkingLevel));
+  }
+}
+
+async function selectThinkingLevel(value) {
+  const nextLevel = normalizeThinkingLevel(value);
+  const changed = nextLevel !== thinkingLevel;
+  applyThinkingLevel(nextLevel);
+  setThinkingMenuOpen(false);
+  await chrome.storage.local.set({ [THINKING_LEVEL_STORAGE_KEY]: nextLevel });
+  if (!changed) {
+    elements.statusLine.textContent = `Thinking ${formatThinkingLevel(nextLevel)} is already active.`;
+    return;
+  }
+  if (sessionStatus === "ready") {
+    pendingThinkingReconnect = true;
+    await restartSessionWithContext(`Applying Thinking ${formatThinkingLevel(nextLevel)} without clearing this conversation…`);
+    return;
+  }
+  if (sessionStatus === "connecting") {
+    pendingThinkingReconnect = true;
+    elements.statusLine.textContent = `Thinking ${formatThinkingLevel(nextLevel)} will apply as soon as Lumi finishes reconnecting.`;
+    return;
+  }
+  elements.statusLine.textContent = `Thinking ${formatThinkingLevel(nextLevel)} selected for the next connection.`;
 }
 
 function setSessionStatus(nextStatus, message) {
@@ -375,9 +495,16 @@ function setSessionStatus(nextStatus, message) {
   elements.statusLine.textContent = message;
   elements.startButton.disabled = nextStatus === "connecting";
   elements.startButton.classList.toggle("live", nextStatus === "ready");
-  elements.startButton.querySelector("span:last-child").textContent = nextStatus === "ready" ? "End voice" : nextStatus === "connecting" ? "Connecting…" : "Start voice";
+  elements.startButton.querySelector("span:last-child").textContent = nextStatus === "ready"
+    ? "End voice"
+    : nextStatus === "connecting" ? "Connecting…" : nextStatus === "error" ? "Retry" : "Connect";
   elements.muteButton.disabled = nextStatus !== "ready";
+  elements.thinkingButton.disabled = false;
+  elements.thinkingButton.title = nextStatus === "ready" || nextStatus === "connecting"
+    ? "Change thinking level; Lumi will reconnect without losing this conversation"
+    : "Choose how deeply Gemini reasons";
   syncMessageComposer();
+  syncQueuedMessagePanel();
   avatarController.syncState();
 }
 
@@ -422,7 +549,7 @@ async function refreshMicrophonePermission() {
 async function openMicrophonePermissionPage() {
   await chrome.tabs.create({ url: chrome.runtime.getURL("settings/microphone-permission.html"), active: true });
   elements.microphoneHelpButton.hidden = false;
-  setSessionStatus("idle", "A Lumi permission tab opened. Choose Allow there, then return and press Start voice again.");
+  setSessionStatus("idle", "A Lumi permission tab opened. Choose Allow there, then return; voice will connect automatically.");
 }
 
 async function validateGeminiApiKey(apiKey) {
@@ -466,7 +593,175 @@ function openSettings() {
   return chrome.runtime.openOptionsPage();
 }
 
+function hideConnectionNotice() {
+  elements.connectionNotice.hidden = true;
+  elements.connectionNoticeAction.disabled = false;
+}
+
+function rememberConversationTurn(role, text) {
+  const normalizedRole = role === "model" || role === "lumi" ? "model" : role === "user" ? "user" : "";
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalizedRole || !clean) return;
+  const previous = conversationHistory.at(-1);
+  if (previous?.role === normalizedRole && previous.text === clean) return;
+  conversationHistory.push({ role: normalizedRole, text: clean });
+}
+
+function clearConversationContext() {
+  for (const message of activeTranscriptReveals) {
+    cancelAnimationFrame(message.revealFrameId);
+  }
+  activeTranscriptReveals.clear();
+  conversationHistory.length = 0;
+  queuedUserMessages.length = 0;
+  hasConnectedInPanelLifetime = false;
+  pendingThinkingReconnect = false;
+  for (const role of Object.keys(partialMessages)) {
+    partialMessages[role]?.disclosure?.dispose();
+    partialMessages[role] = null;
+  }
+  elements.transcript.innerHTML = initialTranscriptMarkup;
+  elements.messageInput.value = "";
+  resizeMessageInput();
+  syncMessageComposer();
+  syncQueuedMessagePanel();
+}
+
+function showConnectionNotice({ action, title, message, actionLabel }) {
+  elements.connectionNotice.dataset.action = action;
+  elements.connectionNoticeTitle.textContent = title;
+  elements.connectionNoticeMessage.textContent = message;
+  elements.connectionNoticeAction.textContent = actionLabel;
+  elements.connectionNoticeAction.disabled = false;
+  elements.connectionNotice.hidden = false;
+  elements.connectionNoticeAction.focus();
+}
+
+function showMissingKeyNotice(message = "Add a Gemini API key in Lumi Settings, then Lumi will connect automatically.") {
+  showConnectionNotice({
+    action: "settings",
+    title: "Gemini API key required",
+    message,
+    actionLabel: "Open Lumi Settings",
+  });
+}
+
+function showReconnectNotice(message) {
+  showConnectionNotice({
+    action: "reconnect",
+    title: "Gemini connection unavailable",
+    message: message || "The Gemini Live connection ended unexpectedly. Reconnect to continue talking with Lumi.",
+    actionLabel: "Reconnect",
+  });
+}
+
+function isGeminiKeyIssue(message) {
+  return /api.?key|api_key|unauthenticated|authentication|credential|permission.denied/i.test(String(message || ""));
+}
+
+async function handleConnectionNoticeAction() {
+  const action = elements.connectionNotice.dataset.action;
+  elements.connectionNoticeAction.disabled = true;
+  try {
+    if (action === "settings") {
+      await openSettings();
+      return;
+    }
+    hideConnectionNotice();
+    await startSession();
+  } finally {
+    elements.connectionNoticeAction.disabled = false;
+  }
+}
+
+function scrollTranscriptToLatest({ smooth = false } = {}) {
+  const top = elements.transcript.scrollHeight;
+  if (smooth && typeof elements.transcript.scrollTo === "function") {
+    elements.transcript.scrollTo({ top, behavior: "smooth" });
+    return;
+  }
+  elements.transcript.scrollTop = top;
+}
+
+function revealTranscriptText(message, targetText) {
+  const targetCharacters = splitTranscriptCharacters(targetText);
+  const visibleText = message.content.textContent || "";
+  const stableCharacterCount = findCommonCharacterPrefix(visibleText, targetText);
+  const remainingCharacterCount = Math.max(0, targetCharacters.length - stableCharacterCount);
+  cancelAnimationFrame(message.revealFrameId);
+  activeTranscriptReveals.delete(message);
+
+  if (!remainingCharacterCount
+    || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true) {
+    message.content.textContent = targetText;
+    scrollTranscriptToLatest();
+    return;
+  }
+
+  const duration = getTranscriptRevealDurationMs(remainingCharacterCount);
+  const startedAt = performance.now();
+  message.content.textContent = targetCharacters.slice(0, stableCharacterCount).join("");
+  activeTranscriptReveals.add(message);
+
+  const revealFrame = (now) => {
+    const progress = Math.min(1, (now - startedAt) / duration);
+    const visibleCharacterCount = stableCharacterCount
+      + Math.ceil(remainingCharacterCount * progress);
+    message.content.textContent = targetCharacters.slice(0, visibleCharacterCount).join("");
+    scrollTranscriptToLatest();
+    if (progress < 1) {
+      message.revealFrameId = requestAnimationFrame(revealFrame);
+      return;
+    }
+    message.revealFrameId = null;
+    activeTranscriptReveals.delete(message);
+  };
+  message.revealFrameId = requestAnimationFrame(revealFrame);
+}
+
 function createMessage(role, text) {
+  if (role === "thinking") {
+    const details = document.createElement("details");
+    details.className = "message-thinking";
+    details.dataset.state = "streaming";
+    const summary = document.createElement("summary");
+    const mark = document.createElement("span");
+    mark.className = "thinking-summary-mark";
+    mark.setAttribute("aria-hidden", "true");
+    const title = document.createElement("span");
+    title.className = "thinking-summary-title";
+    title.textContent = "Thinking";
+    const status = document.createElement("span");
+    status.className = "thinking-summary-status";
+    status.textContent = "Streaming";
+    const chevron = document.createElement("span");
+    chevron.className = "thinking-summary-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    summary.append(mark, title, status, chevron);
+    const body = document.createElement("div");
+    body.className = "thinking-summary-body";
+    const content = document.createElement("p");
+    content.textContent = text;
+    body.append(content);
+    details.append(summary, body);
+    elements.transcript.append(details);
+    const message = {
+      article: details,
+      body,
+      content,
+      summary,
+      status,
+      text,
+    };
+    message.disclosure = attachAnimatedDisclosure({
+      root: details,
+      summary,
+      body,
+      initiallyExpanded: true,
+    });
+    scrollTranscriptToLatest({ smooth: true });
+    return message;
+  }
   const article = document.createElement("article");
   article.className = `message message-${role}`;
   const author = document.createElement("span");
@@ -475,23 +770,54 @@ function createMessage(role, text) {
   content.textContent = text;
   article.append(author, content);
   elements.transcript.append(article);
-  elements.transcript.scrollTop = elements.transcript.scrollHeight;
+  scrollTranscriptToLatest();
   return { article, content, text };
 }
 
 function updateTranscript(role, incoming) {
   const clean = String(incoming || "").trim();
   if (!clean) return;
-  if (!partialMessages[role]) partialMessages[role] = createMessage(role, clean);
-  else {
-    const message = partialMessages[role];
-    message.text = mergeTranscriptText(message.text, clean);
-    message.content.textContent = message.text;
+  if (!partialMessages[role]) {
+    partialMessages[role] = createMessage(role, role === "user" ? clean : "");
   }
-  elements.transcript.scrollTop = elements.transcript.scrollHeight;
+  const message = partialMessages[role];
+  const wasPlaceholder = role === "thinking" && message.placeholder;
+  message.text = wasPlaceholder ? clean : mergeTranscriptText(message.text, clean);
+  message.placeholder = false;
+  if (wasPlaceholder) message.content.textContent = "";
+  if (role === "thinking" || role === "lumi") revealTranscriptText(message, message.text);
+  else message.content.textContent = message.text;
+  if (role === "thinking") {
+    const message = partialMessages.thinking;
+    message.article.dataset.state = "streaming";
+    message.status.textContent = "Streaming";
+    scrollTranscriptToLatest();
+  }
+  scrollTranscriptToLatest();
+}
+
+function startThinkingTranscript() {
+  if (partialMessages.thinking) return;
+  partialMessages.thinking = createMessage("thinking", "Thinking…");
+  partialMessages.thinking.placeholder = true;
+}
+
+function collapseThinkingTranscript() {
+  const message = partialMessages.thinking;
+  if (!message) return;
+  message.disclosure.setExpanded(false);
 }
 
 function finalizeTranscript(role) {
+  const message = partialMessages[role];
+  if ((role === "user" || role === "lumi") && message?.text) {
+    rememberConversationTurn(role, message.text);
+  }
+  if (role === "thinking" && partialMessages.thinking) {
+    partialMessages.thinking.article.dataset.state = "complete";
+    partialMessages.thinking.status.textContent = "Complete";
+    partialMessages.thinking.disclosure.setExpanded(false);
+  }
   partialMessages[role] = null;
 }
 
@@ -569,7 +895,7 @@ async function runLiveTranslationTool(args = {}) {
       throw new DOMException("Live translation was cancelled.", "AbortError");
     }
   } catch (error) {
-    avatarController.transitionState("error", { forMs: 2080 });
+    avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
     throw error;
   } finally {
     pendingLiveTranslationStart = false;
@@ -583,7 +909,7 @@ async function runLiveTranslationTool(args = {}) {
     ? result.sourcePlaybackVolume
     : 0.06;
   elements.statusLine.textContent = `Live translating ${result.source?.title || "the active video"} to ${languageLabel} · ${captureLabel} · source audio at ${Math.round(sourcePlaybackVolume * 100)}%.`;
-  avatarController.transitionState("success", { forMs: 1760 });
+  avatarController.transitionState("success", { forMs: AVATAR_SUCCESS_STATE_DURATION_MS });
   return {
     success: true,
     state: "active",
@@ -604,13 +930,16 @@ async function runBrowserTool(tool, args) {
   try {
     const result = await sendRuntime("browser_tool", { tool, args });
     if (isUiAction) {
-      avatarController.transitionState("success", { forMs: 1760, resumeState: "thinking" });
+      avatarController.transitionState("success", {
+        forMs: AVATAR_SUCCESS_STATE_DURATION_MS,
+        resumeState: "thinking",
+      });
     } else {
       avatarController.transitionState("thinking");
     }
     return result;
   } catch (error) {
-    avatarController.transitionState("error", { forMs: 2080 });
+    avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
     throw error;
   } finally {
     browserToolRunning = false;
@@ -637,15 +966,18 @@ async function runMcpTool(tool, args, callId) {
       args,
       permissionGranted,
     });
-    avatarController.transitionState("success", { forMs: 1760, resumeState: "thinking" });
+    avatarController.transitionState("success", {
+      forMs: AVATAR_SUCCESS_STATE_DURATION_MS,
+      resumeState: "thinking",
+    });
     return result;
   } catch (error) {
-    avatarController.transitionState("error", { forMs: 2080 });
+    avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
     throw error;
   }
 }
 
-async function handleServerMessage(event, sourceSocket) {
+async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
   const raw = typeof event.data === "string" ? event.data : await event.data.text();
   const response = JSON.parse(raw);
   if (sourceSocket !== websocket) return;
@@ -661,6 +993,7 @@ async function handleServerMessage(event, sourceSocket) {
     finishMcpActivity(id, "cancelled", "Gemini cancelled this tool call because the conversation turn was interrupted.");
   }
   if (response.setupComplete) {
+    hideConnectionNotice();
     clearSetupTimeout();
     clearTurnCancellationTimers();
     clearTurnCancellationBoundaryTimeout();
@@ -668,9 +1001,22 @@ async function handleServerMessage(event, sourceSocket) {
     suppressServerOutputUntilNextUserTurn = false;
     cancelledTurnBoundarySeen = false;
     freshUserInputStarted = false;
+    if (pendingThinkingReconnect && sessionThinkingLevel !== thinkingLevel) {
+      pendingThinkingReconnect = false;
+      await restartSessionWithContext(`Applying Thinking ${formatThinkingLevel(thinkingLevel)} without clearing this conversation…`);
+      return;
+    }
+    pendingThinkingReconnect = false;
+    const reconnectingExistingConversation = hasConnectedInPanelLifetime;
+    sendJson(buildInitialHistoryClientContent(conversationHistory), sourceSocket);
+    hasConnectedInPanelLifetime = true;
     setSessionStatus("ready", "Lumi is listening. PageAgent automatically follows your active web tab.");
-    setAgentTurnActive(true);
-    sendJson({ realtimeInput: { text: "Greet the user warmly in one short sentence and say you are ready." } }, sourceSocket);
+    if (queuedUserMessages.length) {
+      flushQueuedUserMessage();
+    } else if (!reconnectingExistingConversation && !conversationHistory.length) {
+      setAgentTurnActive(true);
+      sendJson({ realtimeInput: { text: "Greet the user warmly in one short sentence and say you are ready." } }, sourceSocket);
+    }
   }
 
   const serverContent = response.serverContent;
@@ -729,13 +1075,24 @@ async function handleServerMessage(event, sourceSocket) {
     || serverContent?.outputTranscription?.text
     || functionCalls.length
   ) setAgentTurnActive(true);
+  if (serverContent?.inputTranscription?.text) {
+    updateTranscript("user", serverContent.inputTranscription.text);
+    startThinkingTranscript();
+  }
   for (const part of serverContent?.modelTurn?.parts || []) {
+    if (part.thought && part.text) {
+      updateTranscript("thinking", part.text);
+      avatarController.transitionState("thinking");
+    }
     if (part.inlineData?.data && responseAudioGate.shouldPlay()) {
+      collapseThinkingTranscript();
       panelAudio.playPcmChunk(part.inlineData.data);
     }
   }
-  if (serverContent?.inputTranscription?.text) updateTranscript("user", serverContent.inputTranscription.text);
-  if (serverContent?.outputTranscription?.text) updateTranscript("lumi", serverContent.outputTranscription.text);
+  if (serverContent?.outputTranscription?.text) {
+    collapseThinkingTranscript();
+    updateTranscript("lumi", serverContent.outputTranscription.text);
+  }
   if (serverContent?.interrupted) {
     const wasUserCancellation = turnCancellationPending;
     turnCancellationPending = false;
@@ -743,20 +1100,24 @@ async function handleServerMessage(event, sourceSocket) {
     panelAudio.stopPlayback();
     responseAudioGate.reset();
     finalizeTranscript("lumi");
+    finalizeTranscript("thinking");
     setAgentTurnActive(false);
     if (wasUserCancellation) {
       elements.statusLine.textContent = "Current action cancelled. Lumi is ready for your next request.";
     }
+    flushQueuedUserMessage();
   }
   if (serverContent?.turnComplete) {
     const wasUserCancellation = turnCancellationPending;
     turnCancellationPending = false;
     finalizeTranscript("user");
     finalizeTranscript("lumi");
+    finalizeTranscript("thinking");
     setAgentTurnActive(false);
     if (wasUserCancellation) {
       elements.statusLine.textContent = "Current action cancelled. Lumi is ready for your next request.";
     }
+    flushQueuedUserMessage();
   }
 
   if (functionCalls.length) {
@@ -853,7 +1214,7 @@ async function handleServerMessage(event, sourceSocket) {
   if (serverContent?.turnComplete && !functionCalls.length) responseAudioGate.reset();
 }
 
-function openGeminiSocket({ apiKey, voiceName, mcpInfo, mcpFunctionDeclarations, activeTabContext }) {
+function openGeminiSocket({ apiKey, voiceName, thinkingLevel: sessionThinkingLevel, mcpInfo, mcpFunctionDeclarations, activeTabContext }) {
   setSessionStatus("connecting", "Microphone is ready. Opening Gemini Live...");
   const functionDeclarations = [...BUILTIN_TOOLS, ...mcpFunctionDeclarations];
   websocket = new WebSocket(`${WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`);
@@ -864,8 +1225,11 @@ function openGeminiSocket({ apiKey, voiceName, mcpInfo, mcpFunctionDeclarations,
     websocket = null;
     sessionSocket.close(4000, "Gemini setup timed out");
     cleanupMedia();
-    setSessionStatus("error", "Gemini Live did not finish setup within 15 seconds. Check API access, then retry.");
-  }, 15000);
+    const seconds = GEMINI_SETUP_TIMEOUT_MS / 1000;
+    const message = `Gemini Live did not finish setup within ${seconds} seconds. Check API access, then retry.`;
+    setSessionStatus("error", message);
+    showReconnectNotice(message);
+  }, GEMINI_SETUP_TIMEOUT_MS);
   sessionSocket.onopen = () => {
     if (websocket !== sessionSocket) return;
     sendJson({
@@ -874,6 +1238,7 @@ function openGeminiSocket({ apiKey, voiceName, mcpInfo, mcpFunctionDeclarations,
         generationConfig: {
           responseModalities: ["AUDIO"],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+          thinkingConfig: buildThinkingConfig(sessionThinkingLevel),
         },
         realtimeInputConfig: {
           automaticActivityDetection: {
@@ -888,17 +1253,20 @@ function openGeminiSocket({ apiKey, voiceName, mcpInfo, mcpFunctionDeclarations,
         systemInstruction: { parts: [{ text: buildSessionInstruction(mcpInfo, activeTabContext) }] },
         inputAudioTranscription: {},
         outputAudioTranscription: {},
+        historyConfig: { initialHistoryInClientContent: true },
       },
     }, sessionSocket);
   };
   sessionSocket.onmessage = (event) => {
-    void handleServerMessage(event, sessionSocket).catch((error) => {
+    void handleServerMessage(event, sessionSocket, sessionThinkingLevel).catch((error) => {
       if (websocket !== sessionSocket) return;
       intentionalClose = true;
       websocket = null;
       sessionSocket.close(4001, "Invalid Gemini response");
       cleanupMedia();
-      setSessionStatus("error", `Gemini Live returned an unreadable response: ${error instanceof Error ? error.message : "Unknown response"}`);
+      const message = `Gemini Live returned an unreadable response: ${error instanceof Error ? error.message : "Unknown response"}`;
+      setSessionStatus("error", message);
+      showReconnectNotice(message);
     });
   };
   sessionSocket.onerror = () => {
@@ -937,18 +1305,25 @@ function openGeminiSocket({ apiKey, voiceName, mcpInfo, mcpFunctionDeclarations,
         "connecting",
         `Temporarily disabled incompatible MCP tool ${rejected.tool.toolName}. Retrying Gemini Live...`,
       );
-      openGeminiSocket({ apiKey, voiceName, mcpInfo, mcpFunctionDeclarations, activeTabContext });
+      openGeminiSocket({
+        apiKey,
+        voiceName,
+        thinkingLevel: sessionThinkingLevel,
+        mcpInfo,
+        mcpFunctionDeclarations,
+        activeTabContext,
+      });
       return;
     }
 
     cleanupMedia();
     if (!expected) {
-      setSessionStatus(
-        "error",
-        reason
-          ? `Gemini Live closed (${event.code}): ${reason.slice(0, 140)}`
-          : `Gemini Live closed with code ${event.code}. The key passed validation; reload this extension and try again.`,
-      );
+      const message = reason
+        ? `Gemini Live closed (${event.code}): ${reason.slice(0, 140)}`
+        : `Gemini Live closed with code ${event.code}. Reconnect to continue.`;
+      setSessionStatus("error", message);
+      if (isGeminiKeyIssue(reason)) showMissingKeyNotice(message);
+      else showReconnectNotice(message);
     }
   };
 }
@@ -958,57 +1333,106 @@ async function startSession() {
     stopSession();
     return;
   }
-  if (sessionStatus === "connecting") return;
+  if (sessionStatus === "connecting" || sessionStartPending) return;
+  sessionStartPending = true;
 
-  const stored = await chrome.storage.local.get([API_KEY_STORAGE_KEY, VOICE_STORAGE_KEY]);
-  const apiKey = String(stored[API_KEY_STORAGE_KEY] || "").trim();
-  const voiceName = String(stored[VOICE_STORAGE_KEY] || "Zephyr");
-  if (!apiKey) {
-    await openSettings();
-    setSessionStatus("error", "Save a Gemini API key before starting voice.");
-    return;
+  try {
+    const stored = await chrome.storage.local.get([
+      API_KEY_STORAGE_KEY,
+      VOICE_STORAGE_KEY,
+      THINKING_LEVEL_STORAGE_KEY,
+    ]);
+    const apiKey = String(stored[API_KEY_STORAGE_KEY] || "").trim();
+    const voiceName = String(stored[VOICE_STORAGE_KEY] || DEFAULT_VOICE_NAME);
+    const sessionThinkingLevel = normalizeThinkingLevel(stored[THINKING_LEVEL_STORAGE_KEY]);
+    if (!apiKey) {
+      const message = "Add a Gemini API key in Lumi Settings before connecting voice.";
+      setSessionStatus("error", message);
+      showMissingKeyNotice(message);
+      return;
+    }
+
+    const microphonePermission = await refreshMicrophonePermission();
+    if (microphonePermission !== "granted") {
+      await openMicrophonePermissionPage();
+      return;
+    }
+
+    intentionalClose = false;
+    cancelledToolCallIds.clear();
+    pendingToolCallIds.clear();
+    resetMcpSessionFailures();
+    hideConnectionNotice();
+    elements.microphoneHelpButton.hidden = true;
+    setSessionStatus("connecting", "Checking the Gemini key and requesting microphone access…");
+    try {
+      const mcpInfo = await sendRuntime("mcp_get_tools");
+      notifyInvalidMcpSchemas(mcpInfo);
+      const mcpFunctionDeclarations = configureMcpTools(mcpInfo, activeMcpTools);
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Microphone access is unavailable in Lumi Live. Update Chrome and reopen the extension.");
+      }
+      await panelAudio.requestMicrophone();
+      setSessionStatus("connecting", "Microphone is ready. Checking the Gemini API key…");
+      await validateGeminiApiKey(apiKey);
+      await panelAudio.startMicrophone();
+      activeApiKey = apiKey;
+
+      const activeTabContext = await sendRuntime("browser_tool", {
+        tool: "browser_get_active_context",
+        args: {},
+      });
+      openGeminiSocket({
+        apiKey,
+        voiceName,
+        thinkingLevel: sessionThinkingLevel,
+        mcpInfo,
+        mcpFunctionDeclarations,
+        activeTabContext,
+      });
+    } catch (error) {
+      intentionalClose = true;
+      const activeSocket = websocket;
+      websocket = null;
+      activeSocket?.close();
+      cleanupMedia();
+      const diagnosis = describeStartError(error);
+      elements.microphoneHelpButton.hidden = !diagnosis.microphone;
+      setSessionStatus("error", diagnosis.message);
+      if (!diagnosis.microphone) {
+        if (isGeminiKeyIssue(diagnosis.message)) showMissingKeyNotice(diagnosis.message);
+        else showReconnectNotice(diagnosis.message);
+      }
+    }
+  } finally {
+    sessionStartPending = false;
   }
+}
 
+async function autoStartSessionIfReady() {
+  if (sessionStatus === "connecting" || sessionStatus === "ready") return false;
+  const stored = await chrome.storage.local.get(API_KEY_STORAGE_KEY);
+  if (!String(stored[API_KEY_STORAGE_KEY] || "").trim()) {
+    const message = "Add a Gemini API key in Lumi Settings before connecting voice.";
+    setSessionStatus("idle", message);
+    showMissingKeyNotice(message);
+    return false;
+  }
   const microphonePermission = await refreshMicrophonePermission();
   if (microphonePermission !== "granted") {
-    await openMicrophonePermissionPage();
-    return;
+    setSessionStatus("idle", "Allow microphone once; Lumi will connect automatically when permission is ready.");
+    elements.microphoneHelpButton.hidden = false;
+    return false;
   }
+  await startSession();
+  return true;
+}
 
-  intentionalClose = false;
-  cancelledToolCallIds.clear();
-  pendingToolCallIds.clear();
-  resetMcpSessionFailures();
-  elements.microphoneHelpButton.hidden = true;
-  setSessionStatus("connecting", "Checking the Gemini key and requesting microphone access…");
-  try {
-    const mcpInfo = await sendRuntime("mcp_get_tools");
-    notifyInvalidMcpSchemas(mcpInfo);
-    const mcpFunctionDeclarations = configureMcpTools(mcpInfo, activeMcpTools);
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error("Microphone access is unavailable in Lumi Live. Update Chrome and reopen the extension.");
-    }
-    await panelAudio.requestMicrophone();
-    setSessionStatus("connecting", "Microphone is ready. Checking the Gemini API key…");
-    await validateGeminiApiKey(apiKey);
-    await panelAudio.startMicrophone();
-    activeApiKey = apiKey;
-
-    const activeTabContext = await sendRuntime("browser_tool", {
-      tool: "browser_get_active_context",
-      args: {},
-    });
-    openGeminiSocket({ apiKey, voiceName, mcpInfo, mcpFunctionDeclarations, activeTabContext });
-  } catch (error) {
-    intentionalClose = true;
-    const activeSocket = websocket;
-    websocket = null;
-    activeSocket?.close();
-    cleanupMedia();
-    const diagnosis = describeStartError(error);
-    elements.microphoneHelpButton.hidden = !diagnosis.microphone;
-    setSessionStatus("error", diagnosis.message);
-  }
+function syncMuteButton() {
+  const label = isMuted ? "Unmute microphone" : "Mute microphone";
+  elements.muteButton.setAttribute("aria-pressed", String(isMuted));
+  elements.muteButton.setAttribute("aria-label", label);
+  elements.muteButton.title = label;
 }
 
 function cleanupMedia() {
@@ -1036,9 +1460,10 @@ function cleanupMedia() {
   suppressServerOutputUntilNextUserTurn = false;
   cancelledTurnBoundarySeen = false;
   freshUserInputStarted = false;
-  elements.muteButton.textContent = "Mute";
+  syncMuteButton();
   finalizeTranscript("user");
   finalizeTranscript("lumi");
+  finalizeTranscript("thinking");
 }
 
 function stopSession() {
@@ -1050,30 +1475,110 @@ function stopSession() {
   setSessionStatus("idle", "Ready. PageAgent will follow whichever web tab you open.");
 }
 
+async function restartSessionWithContext(message) {
+  intentionalClose = true;
+  const activeSocket = websocket;
+  websocket = null;
+  activeSocket?.close(1000, "Applying updated session settings");
+  cleanupMedia();
+  setSessionStatus("idle", message);
+  await startSession();
+}
+
 function toggleMute() {
   if (sessionStatus !== "ready") return;
   isMuted = !isMuted;
-  elements.muteButton.textContent = isMuted ? "Unmute" : "Mute";
+  syncMuteButton();
   avatarController.syncState();
   if (isMuted) sendJson({ realtimeInput: { audioStreamEnd: true } });
 }
 
-function sendText(text) {
+function sendText(text, { clearComposer = true, render = true, remember = true } = {}) {
   const clean = text.trim();
-  if (!clean || sessionStatus !== "ready" || agentTurnActive || turnCancellationPending) return;
+  if (!clean || sessionStatus !== "ready" || agentTurnActive || turnCancellationPending) return false;
   turnExecutionSequence += 1;
   if (suppressServerOutputUntilNextUserTurn) markFreshUserInputStarted();
   responseAudioGate.reset();
   finalizeTranscript("user");
   finalizeTranscript("lumi");
-  createMessage("user", clean);
+  finalizeTranscript("thinking");
+  if (render) createMessage("user", clean);
+  if (remember) rememberConversationTurn("user", clean);
+  startThinkingTranscript();
   avatarController.transitionState("thinking");
   turnCancellationPending = false;
   setAgentTurnActive(true);
   sendJson({ realtimeInput: { text: clean } });
+  if (clearComposer) {
+    elements.messageInput.value = "";
+    resizeMessageInput();
+  }
+  syncMessageComposer();
+  return true;
+}
+
+function flushQueuedUserMessage() {
+  if (!queuedUserMessages.length || sessionStatus !== "ready" || agentTurnActive || turnCancellationPending) {
+    return false;
+  }
+  const nextMessage = queuedUserMessages.shift();
+  syncQueuedMessagePanel();
+  if (!sendText(nextMessage, { clearComposer: false })) {
+    queuedUserMessages.unshift(nextMessage);
+    syncQueuedMessagePanel();
+    return false;
+  }
+  elements.statusLine.textContent = queuedUserMessages.length
+    ? `${queuedUserMessages.length} more message${queuedUserMessages.length === 1 ? "" : "s"} queued.`
+    : "Message sent. Lumi is working on it now.";
+  return true;
+}
+
+function queueUserMessage(text) {
+  const clean = String(text || "").trim();
+  if (!clean) return;
+  queuedUserMessages.push(clean);
+  syncQueuedMessagePanel();
   elements.messageInput.value = "";
   resizeMessageInput();
   syncMessageComposer();
+
+  if (sessionStatus === "ready") {
+    elements.statusLine.textContent = agentTurnActive || turnCancellationPending
+      ? "Message queued. It will send when the current turn finishes; choose Steer to send it now."
+      : "Message queued. Sending now…";
+    if (!agentTurnActive && !turnCancellationPending) flushQueuedUserMessage();
+    return;
+  }
+
+  elements.statusLine.textContent = sessionStatus === "connecting"
+    ? "Message queued and will send as soon as Lumi reconnects."
+    : "Message queued. Connecting Lumi automatically…";
+  if (sessionStatus !== "connecting") void autoStartSessionIfReady();
+}
+
+function steerQueuedUserMessage() {
+  if (!queuedUserMessages.length || turnCancellationPending) return;
+  if (sessionStatus !== "ready") {
+    elements.statusLine.textContent = "Steer is ready. Reconnecting Lumi, then this message will send first…";
+    if (sessionStatus !== "connecting") void autoStartSessionIfReady();
+    return;
+  }
+  if (!agentTurnActive) {
+    flushQueuedUserMessage();
+    return;
+  }
+  cancelCurrentTurn();
+  elements.statusLine.textContent = "Steering to the queued message now…";
+}
+
+function removeQueuedUserMessage() {
+  if (!queuedUserMessages.length) return;
+  queuedUserMessages.shift();
+  syncQueuedMessagePanel();
+  elements.statusLine.textContent = queuedUserMessages.length
+    ? `${queuedUserMessages.length} queued message${queuedUserMessages.length === 1 ? "" : "s"} remaining.`
+    : "Queued message removed.";
 }
 
 function cancelCurrentTurn() {
@@ -1095,10 +1600,17 @@ function cancelCurrentTurn() {
     sendRuntime("cancel_active_mcp_calls"),
   ]);
   setAgentTurnActive(false);
+  syncQueuedMessagePanel();
   elements.statusLine.textContent = "Stopping the current action…";
   avatarController.syncState();
-  turnCancellationWatchdogTimeoutId = setTimeout(completeTurnCancellation, 80);
-  turnCancellationBoundaryTimeoutId = setTimeout(markCancelledTurnBoundarySeen, 1500);
+  turnCancellationWatchdogTimeoutId = setTimeout(
+    completeTurnCancellation,
+    TURN_CANCELLATION_WATCHDOG_MS,
+  );
+  turnCancellationBoundaryTimeoutId = setTimeout(
+    markCancelledTurnBoundarySeen,
+    TURN_CANCELLATION_BOUNDARY_MS,
+  );
 }
 
 function toggleVtuberSize() {
@@ -1142,7 +1654,24 @@ elements.petalsButton.addEventListener("click", () => void togglePetals());
 elements.vtuberToggle.addEventListener("click", toggleVtuberSize);
 elements.startButton.addEventListener("click", () => void startSession());
 elements.muteButton.addEventListener("click", toggleMute);
+elements.messageQueueSteer.addEventListener("click", steerQueuedUserMessage);
+elements.messageQueueRemove.addEventListener("click", removeQueuedUserMessage);
 elements.microphoneHelpButton.addEventListener("click", () => void openMicrophonePermissionPage());
+elements.connectionNoticeAction.addEventListener("click", () => void handleConnectionNoticeAction());
+elements.thinkingButton.addEventListener("click", () => {
+  setThinkingMenuOpen(elements.thinkingButton.getAttribute("aria-expanded") !== "true");
+});
+for (const option of elements.thinkingOptions) {
+  option.addEventListener("click", () => void selectThinkingLevel(option.dataset.thinkingLevel));
+}
+document.addEventListener("click", (event) => {
+  if (!elements.thinkingPicker.contains(event.target)) setThinkingMenuOpen(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || elements.thinkingMenu.hidden) return;
+  setThinkingMenuOpen(false);
+  elements.thinkingButton.focus();
+});
 elements.mcpToolNoticePrimary.addEventListener("click", () => void handleMcpToolNoticeAction("primary"));
 elements.mcpToolNoticeSecondary.addEventListener("click", () => void handleMcpToolNoticeAction("secondary"));
 elements.mcpToolNoticeTertiary.addEventListener("click", () => void handleMcpToolNoticeAction("tertiary"));
@@ -1157,11 +1686,18 @@ elements.messageInput.addEventListener("keydown", (event) => {
 });
 elements.messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (agentTurnActive) cancelCurrentTurn();
-  else sendText(elements.messageInput.value);
+  const message = elements.messageInput.value.trim();
+  if (message && (sessionStatus !== "ready" || agentTurnActive || turnCancellationPending)) {
+    queueUserMessage(message);
+  } else if (message) {
+    sendText(message);
+  } else if (agentTurnActive) {
+    cancelCurrentTurn();
+  }
 });
 window.addEventListener("unload", () => {
   intentionalClose = true;
+  clearConversationContext();
   sidePanelLifecyclePort.disconnect();
   petalEmitter.stop();
   websocket?.close();
@@ -1179,18 +1715,44 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     applyMcpToolPolicies(changes[MCP_TOOL_POLICIES_STORAGE_KEY].newValue);
   }
   if (changes[PETALS_STORAGE_KEY]) {
-    applyPetals(changes[PETALS_STORAGE_KEY].newValue !== false);
+    const nextPetals = changes[PETALS_STORAGE_KEY].newValue;
+    applyPetals(typeof nextPetals === "boolean"
+      ? nextPetals
+      : DEFAULT_FALLING_PETALS_ENABLED);
   }
   if (changes[AVATAR_MODE_STORAGE_KEY]) {
     void avatarController.applyMode(normalizeAvatarMode(changes[AVATAR_MODE_STORAGE_KEY].newValue));
   }
-  if (changes[API_KEY_STORAGE_KEY]?.newValue && sessionStatus !== "ready") {
-    setSessionStatus("idle", "Settings saved. Lumi is ready to start with the selected voice.");
+  if (changes[THINKING_LEVEL_STORAGE_KEY]) {
+    const nextThinkingLevel = normalizeThinkingLevel(changes[THINKING_LEVEL_STORAGE_KEY].newValue);
+    const changed = nextThinkingLevel !== thinkingLevel;
+    applyThinkingLevel(nextThinkingLevel);
+    if (changed && sessionStatus === "ready") {
+      pendingThinkingReconnect = true;
+      void restartSessionWithContext(`Applying Thinking ${formatThinkingLevel(nextThinkingLevel)} without clearing this conversation…`);
+    } else if (changed && sessionStatus === "connecting") {
+      pendingThinkingReconnect = true;
+    }
+  }
+  if (changes[API_KEY_STORAGE_KEY]) {
+    const nextApiKey = String(changes[API_KEY_STORAGE_KEY].newValue || "").trim();
+    if (!nextApiKey) {
+      if (sessionStatus === "ready" || sessionStatus === "connecting") stopSession();
+      const message = "Add a Gemini API key in Lumi Settings before connecting voice.";
+      setSessionStatus("error", message);
+      showMissingKeyNotice(message);
+    } else if (sessionStatus !== "ready" && DEFAULT_AUTO_CONNECT_ENABLED) {
+      hideConnectionNotice();
+      setSessionStatus("idle", "Settings saved. Connecting Lumi automatically…");
+      void autoStartSessionIfReady();
+    }
   }
   if (!changes[MICROPHONE_GRANTED_STORAGE_KEY]) return;
-  void refreshMicrophonePermission();
-  if (changes[MICROPHONE_GRANTED_STORAGE_KEY].newValue) {
-    setSessionStatus("idle", "Microphone allowed. Return to Lumi and press Start voice.");
+  if (changes[MICROPHONE_GRANTED_STORAGE_KEY].newValue && DEFAULT_AUTO_CONNECT_ENABLED) {
+    setSessionStatus("idle", "Microphone allowed. Connecting Lumi automatically…");
+    void autoStartSessionIfReady();
+  } else {
+    void refreshMicrophonePermission();
   }
 });
 chrome.runtime.onMessage.addListener((message) => {
@@ -1200,38 +1762,59 @@ chrome.runtime.onMessage.addListener((message) => {
       sharedTabAudio.stop();
       void sendRuntime("release_tab_audio").catch(() => {});
       elements.statusLine.textContent = message.detail;
-      avatarController.transitionState("error", { forMs: 2080 });
+      avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
     }
     return;
   }
   if (message?.type === PANEL_LIFECYCLE_MESSAGE) {
     if (message.state === "opened") petalEmitter.restart();
-    else if (message.state === "closed") petalEmitter.stop();
+    else if (message.state === "closed") {
+      petalEmitter.stop();
+      clearConversationContext();
+    }
     return;
   }
   if (message?.type === EXTENSION_EVENTS.targetChanged) void refreshTarget();
 });
 
 async function initialize() {
-  const stored = await chrome.storage.local.get([API_KEY_STORAGE_KEY, PETALS_STORAGE_KEY, AVATAR_MODE_STORAGE_KEY]);
-  const savedKey = String(stored[API_KEY_STORAGE_KEY] || "");
-  applyPetals(stored[PETALS_STORAGE_KEY] !== false);
+  const stored = await chrome.storage.local.get([
+    API_KEY_STORAGE_KEY,
+    PETALS_STORAGE_KEY,
+    AVATAR_MODE_STORAGE_KEY,
+    THINKING_LEVEL_STORAGE_KEY,
+  ]);
+  const savedKey = String(stored[API_KEY_STORAGE_KEY] || "").trim();
+  const storedPetals = stored[PETALS_STORAGE_KEY];
+  applyPetals(typeof storedPetals === "boolean"
+    ? storedPetals
+    : DEFAULT_FALLING_PETALS_ENABLED);
+  const storedThinkingLevel = normalizeThinkingLevel(stored[THINKING_LEVEL_STORAGE_KEY]);
+  applyThinkingLevel(storedThinkingLevel);
+  if (stored[THINKING_LEVEL_STORAGE_KEY] !== storedThinkingLevel) {
+    await chrome.storage.local.set({ [THINKING_LEVEL_STORAGE_KEY]: storedThinkingLevel });
+  }
   const storedAvatarMode = normalizeAvatarMode(stored[AVATAR_MODE_STORAGE_KEY]);
   if (stored[AVATAR_MODE_STORAGE_KEY] !== storedAvatarMode) {
     await chrome.storage.local.set({ [AVATAR_MODE_STORAGE_KEY]: storedAvatarMode });
   }
   await avatarController.applyMode(storedAvatarMode);
-  if (!savedKey) setSessionStatus("idle", "Open settings and save a Gemini API key before starting voice.");
-  else setSessionStatus("idle", "Ready. PageAgent will follow whichever web tab you open.");
-  await refreshMicrophonePermission();
+  if (!savedKey) {
+    const message = "Add a Gemini API key in Lumi Settings before connecting voice.";
+    setSessionStatus("idle", message);
+    showMissingKeyNotice(message);
+  } else {
+    setSessionStatus("idle", "Preparing automatic voice connection…");
+  }
   await refreshTarget();
   const translationStatus = await sendRuntime("live_translation_status").catch(() => null);
   if (translationStatus?.prepared) {
     setLiveTranslationBadge(translationStatus.state || "off", translationStatus.targetLanguageCode || "");
-    elements.statusLine.textContent = "Video audio is prepared. Start voice when you are ready.";
+    elements.statusLine.textContent = "Video audio is prepared. Connecting voice automatically…";
   }
   panelAudio.startAnimations();
-  setInterval(refreshTarget, 2800);
+  setInterval(refreshTarget, TARGET_REFRESH_INTERVAL_MS);
+  if (savedKey && DEFAULT_AUTO_CONNECT_ENABLED) await autoStartSessionIfReady();
 }
 
 void initialize();

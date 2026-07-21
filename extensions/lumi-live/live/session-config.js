@@ -2,14 +2,53 @@ import {
   LIVE_TRANSLATE_TOOL,
   LIVE_TRANSLATION_GUIDANCE,
 } from "./translate.js";
+import { DEFAULT_THINKING_LEVEL } from "../core/ui-config.js";
+
+export { DEFAULT_THINKING_LEVEL };
 
 export const MODEL = "gemini-3.1-flash-live-preview";
 export const WS_ENDPOINT =
   "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 export const MIC_CAPTURE_PROCESSOR = "lumi-pcm-capture";
-export const MIN_ACTIVE_PETALS = 16;
-export const MAX_ACTIVE_PETALS = 28;
 export const MAX_MCP_TOOL_RESPONSE_CHARS = 64000;
+export const MAX_INITIAL_HISTORY_TURNS = 32;
+export const MAX_INITIAL_HISTORY_CHARS = 24000;
+export const THINKING_LEVELS = Object.freeze(["minimal", "low", "medium", "high"]);
+
+export function normalizeThinkingLevel(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return THINKING_LEVELS.includes(normalized) ? normalized : DEFAULT_THINKING_LEVEL;
+}
+
+export function buildThinkingConfig(value) {
+  return {
+    thinkingLevel: normalizeThinkingLevel(value).toUpperCase(),
+    includeThoughts: true,
+  };
+}
+
+export function buildInitialHistoryClientContent(history = []) {
+  const normalized = [];
+  let remainingChars = MAX_INITIAL_HISTORY_CHARS;
+
+  for (let index = history.length - 1; index >= 0 && normalized.length < MAX_INITIAL_HISTORY_TURNS; index -= 1) {
+    const turn = history[index];
+    const role = turn?.role === "model" ? "model" : turn?.role === "user" ? "user" : "";
+    const text = String(turn?.text || "").replace(/\s+/g, " ").trim();
+    if (!role || !text || remainingChars <= 0) continue;
+    const retainedText = text.slice(-remainingChars);
+    normalized.push({ role, parts: [{ text: retainedText }] });
+    remainingChars -= retainedText.length;
+  }
+
+  normalized.reverse();
+  return {
+    clientContent: {
+      ...(normalized.length ? { turns: normalized } : {}),
+      turnComplete: true,
+    },
+  };
+}
 
 export const BROWSER_TOOLS = [
   {

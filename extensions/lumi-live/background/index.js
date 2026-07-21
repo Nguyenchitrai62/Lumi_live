@@ -398,12 +398,7 @@ function requireWebUrl(rawUrl) {
 }
 
 function tabTransitionSearchText(url) {
-  const parsed = new URL(url);
-  for (const parameter of ["q", "query", "search_query"]) {
-    const value = parsed.searchParams.get(parameter)?.replace(/\s+/g, " ").trim();
-    if (value) return value.slice(0, 120);
-  }
-  return parsed.hostname.replace(/^www\./i, "").slice(0, 120) || "new tab";
+  return String(url || "new tab");
 }
 
 async function findExistingTabForUrl(url) {

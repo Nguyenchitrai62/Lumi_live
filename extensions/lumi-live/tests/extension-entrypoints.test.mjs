@@ -70,6 +70,63 @@ test("every local import reachable from a Chrome runtime entrypoint resolves", a
   assert.ok(graphs.every((graph) => graph.size > 0));
 });
 
+test("side panel exposes an upward thinking picker and sends it in Gemini Live setup", async () => {
+  const html = await readFile(new URL("side-panel/index.html", extensionRoot), "utf8");
+  const styles = await readFile(new URL("side-panel/styles.css", extensionRoot), "utf8");
+  const controller = await readFile(new URL("side-panel/index.js", extensionRoot), "utf8");
+  assert.match(html, /id="thinkingButton"/);
+  assert.match(html, /data-thinking-level="minimal"/);
+  assert.match(html, /data-thinking-level="high"/);
+  assert.match(html, /class="secondary mute-control"/);
+  assert.match(html, /id="connectionNotice"/);
+  assert.match(html, /id="connectionNoticeAction"/);
+  assert.match(html, /id="messageQueue"/);
+  assert.match(html, /id="messageQueueSteer"/);
+  assert.match(html, /id="messageQueueRemove"/);
+  assert.match(styles, /\.thinking-menu[^}]+bottom:\s*calc\(100%/);
+  assert.match(styles, /\.thinking-summary-chevron[^}]+var\(--ui-motion-disclosure\)/);
+  assert.match(styles, /\.mcp-activity-chevron[^}]+var\(--ui-motion-disclosure\)/);
+  assert.match(styles, /\.mcp-activity\[data-expanded="true"\]/);
+  assert.doesNotMatch(styles, /is-typing|transcript-caret-blink/);
+  assert.match(styles, /\.message-queue-steer/);
+  assert.match(styles, /\.connection-notice-backdrop[^}]+place-items:\s*center/);
+  assert.match(controller, /thinkingConfig:\s*buildThinkingConfig\(sessionThinkingLevel\)/);
+  assert.match(controller, /historyConfig:\s*\{\s*initialHistoryInClientContent:\s*true\s*\}/);
+  assert.match(controller, /sendJson\(buildInitialHistoryClientContent\(conversationHistory\),\s*sourceSocket\)/);
+  assert.match(controller, /elements\.messageInput\.disabled\s*=\s*false/);
+  assert.match(controller, /queueUserMessage\(message\)/);
+  assert.match(controller, /function steerQueuedUserMessage\(\)/);
+  assert.match(controller, /getTranscriptRevealDurationMs\(remainingCharacterCount\)/);
+  assert.match(controller, /attachAnimatedDisclosure/);
+  assert.match(controller, /scrollTranscriptToLatest\(\)/);
+  assert.match(controller, /revealTranscriptText\(message,\s*message\.text\)/);
+  assert.match(controller, /!reconnectingExistingConversation\s*&&\s*!conversationHistory\.length/);
+  assert.match(controller, /window\.addEventListener\("unload"[^]*clearConversationContext\(\)/);
+  assert.match(controller, /part\.thought\s*&&\s*part\.text/);
+  assert.match(controller, /updateTranscript\("thinking",\s*part\.text\)/);
+  assert.match(controller, /document\.createElement\("details"\)/);
+  assert.match(controller, /collapseThinkingTranscript\(\);\s*updateTranscript\("lumi"/);
+  assert.match(controller, /showMissingKeyNotice\(message\)/);
+  assert.match(controller, /showReconnectNotice\(message\)/);
+  assert.match(controller, /if \(savedKey && DEFAULT_AUTO_CONNECT_ENABLED\) await autoStartSessionIfReady\(\)/);
+  const queueSource = controller.slice(
+    controller.indexOf("function queueUserMessage"),
+    controller.indexOf("function steerQueuedUserMessage"),
+  );
+  const steerSource = controller.slice(
+    controller.indexOf("function steerQueuedUserMessage"),
+    controller.indexOf("function removeQueuedUserMessage"),
+  );
+  assert.doesNotMatch(queueSource, /cancelCurrentTurn\(\)/);
+  assert.match(steerSource, /cancelCurrentTurn\(\)/);
+
+  const mcpController = await readFile(
+    new URL("side-panel/mcp-panel-controller.js", extensionRoot),
+    "utf8",
+  );
+  assert.match(mcpController, /attachAnimatedDisclosure\(\{ root, summary, body \}\)/);
+});
+
 test("settings ships Notion OAuth, a Redmine popup, app icons, and a temporary server toggle", async () => {
   const html = await readFile(new URL("settings/index.html", extensionRoot), "utf8");
   const controller = await readFile(

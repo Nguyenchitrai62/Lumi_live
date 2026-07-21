@@ -1,5 +1,14 @@
-const MIN_ACTIVE_PETALS = 16;
-const MAX_ACTIVE_PETALS = 28;
+import {
+  PETAL_FALL_MAXIMUM_DURATION_SECONDS,
+  PETAL_FALL_MINIMUM_DURATION_SECONDS,
+} from "../core/ui-config.js";
+
+const MINIMUM_ACTIVE_PETALS = 16;
+const MAXIMUM_ACTIVE_PETALS = 28;
+const SPAWN_INTERVAL_MINIMUM_MS = 420;
+const SPAWN_INTERVAL_MAXIMUM_MS = 1100;
+const INITIAL_PROGRESS_MINIMUM = 0.08;
+const INITIAL_PROGRESS_MAXIMUM = 0.88;
 
 function randomBetween(min, max) {
   return min + Math.random() * (max - min);
@@ -10,13 +19,16 @@ export function createPetalEmitter({ field, isEnabled }) {
   let startFrame = null;
 
   function spawn(initialProgress = 0) {
-    if (field.childElementCount >= MAX_ACTIVE_PETALS) return;
+    if (field.childElementCount >= MAXIMUM_ACTIVE_PETALS) return;
 
     const petal = document.createElement("i");
     const direction = Math.random() > .5 ? 1 : -1;
     const width = randomBetween(6, 11);
     const opacity = randomBetween(.34, .68);
-    const duration = randomBetween(16, 26);
+    const duration = randomBetween(
+      PETAL_FALL_MINIMUM_DURATION_SECONDS,
+      PETAL_FALL_MAXIMUM_DURATION_SECONDS,
+    );
 
     petal.style.left = `${randomBetween(1, 97).toFixed(2)}%`;
     petal.style.width = `${width.toFixed(1)}px`;
@@ -42,8 +54,11 @@ export function createPetalEmitter({ field, isEnabled }) {
   }
 
   function ensureDensity() {
-    while (field.childElementCount < MIN_ACTIVE_PETALS) {
-      spawn(randomBetween(.08, .88));
+    while (field.childElementCount < MINIMUM_ACTIVE_PETALS) {
+      spawn(randomBetween(
+        INITIAL_PROGRESS_MINIMUM,
+        INITIAL_PROGRESS_MAXIMUM,
+      ));
     }
   }
 
@@ -54,7 +69,10 @@ export function createPetalEmitter({ field, isEnabled }) {
       ensureDensity();
       spawn();
       scheduleNext();
-    }, randomBetween(420, 1100));
+    }, randomBetween(
+      SPAWN_INTERVAL_MINIMUM_MS,
+      SPAWN_INTERVAL_MAXIMUM_MS,
+    ));
   }
 
   function start() {
