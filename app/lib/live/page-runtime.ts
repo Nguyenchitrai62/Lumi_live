@@ -50,6 +50,7 @@ export function createPageToolRuntime() {
     turnCancellationSequence: 0,
     turnCancellationDrainTimer: null as number | null,
     turnCancellationWatchdogTimer: null as number | null,
+    turnCancellationBoundaryTimer: null as number | null,
     suppressServerOutputUntilNextUserTurn: false,
     cancelledTurnBoundarySeen: false,
     freshUserInputStarted: false,

@@ -53,6 +53,11 @@ import {
   createPageTranscriptRuntime,
 } from "./lib/live/page-runtime";
 import {
+  buildPendingCancellationResponses,
+  registerPendingFunctionCalls,
+  settlePendingFunctionCalls,
+} from "./lib/live/tool-call-ledger";
+import {
   STUDIO_PAGE_AGENT_GUIDANCE,
   STUDIO_PAGE_AGENT_TOOL_DECLARATIONS,
   STUDIO_PAGE_AGENT_TOOL_NAMES,
@@ -170,6 +175,13 @@ export default function Home() {
     setAgentTurnActive(nextActive);
   };
 
+  const clearTurnCancellationBoundaryTimer = () => {
+    if (toolRuntimeRef.current!.turnCancellationBoundaryTimer !== null) {
+      window.clearTimeout(toolRuntimeRef.current!.turnCancellationBoundaryTimer);
+      toolRuntimeRef.current!.turnCancellationBoundaryTimer = null;
+    }
+  };
+
   const markFreshUserInputStarted = () => {
     toolRuntimeRef.current!.freshUserInputStarted = true;
     if (!toolRuntimeRef.current!.cancelledTurnBoundarySeen) return;
@@ -179,6 +191,7 @@ export default function Home() {
   };
 
   const markCancelledTurnBoundarySeen = () => {
+    clearTurnCancellationBoundaryTimer();
     toolRuntimeRef.current!.cancelledTurnBoundarySeen = true;
     if (!toolRuntimeRef.current!.freshUserInputStarted) return;
     toolRuntimeRef.current!.suppressServerOutputUntilNextUserTurn = false;
@@ -285,6 +298,7 @@ export default function Home() {
       if (toolRuntimeRef.current!.mcpAvatarTimer !== null) window.clearTimeout(toolRuntimeRef.current!.mcpAvatarTimer);
       if (toolRuntimeRef.current!.turnCancellationDrainTimer !== null) window.clearTimeout(toolRuntimeRef.current!.turnCancellationDrainTimer);
       if (toolRuntimeRef.current!.turnCancellationWatchdogTimer !== null) window.clearTimeout(toolRuntimeRef.current!.turnCancellationWatchdogTimer);
+      if (toolRuntimeRef.current!.turnCancellationBoundaryTimer !== null) window.clearTimeout(toolRuntimeRef.current!.turnCancellationBoundaryTimer);
       if (toolRuntimeRef.current!.mcpApproval) {
         window.clearTimeout(toolRuntimeRef.current!.mcpApproval.timeoutId);
         toolRuntimeRef.current!.mcpApproval.resolve(false);
@@ -614,23 +628,14 @@ export default function Home() {
 
   const resetPendingTurnExecution = (message = "Cancelled by the user.") => {
     void toolRuntimeRef.current!.studioPageAgent?.cancel();
-    const cancelledResponses: Array<{
-      id: string;
-      name: string;
-      response: { error: string };
-    }> = [];
+    const cancelledResponses = buildPendingCancellationResponses(
+      toolRuntimeRef.current!.pendingToolCallIds,
+      toolRuntimeRef.current!.pendingToolCallNames,
+    );
     for (const callId of toolRuntimeRef.current!.pendingToolCallIds) {
       toolRuntimeRef.current!.cancelledToolCallIds.add(callId);
       toolRuntimeRef.current!.activeMcpCallControllers.get(callId)?.abort();
       updateToolMessage(`mcp-${callId}`, "cancelled", message);
-      const name = toolRuntimeRef.current!.pendingToolCallNames.get(callId);
-      if (name) {
-        cancelledResponses.push({
-          id: callId,
-          name,
-          response: { error: "Cancelled by the user before this tool could finish." },
-        });
-      }
     }
     toolRuntimeRef.current!.activeMcpCallControllers.forEach((controller) => controller.abort());
     toolRuntimeRef.current!.activeMcpCallControllers.clear();
@@ -758,6 +763,8 @@ export default function Home() {
       if (typeof id !== "string") continue;
       toolRuntimeRef.current!.cancelledToolCallIds.add(id);
       toolRuntimeRef.current!.activeMcpCallControllers.get(id)?.abort();
+      toolRuntimeRef.current!.pendingToolCallIds.delete(id);
+      toolRuntimeRef.current!.pendingToolCallNames.delete(id);
       updateToolMessage(`mcp-${id}`, "cancelled", "Gemini cancelled this tool call because the current turn changed.");
       if (toolRuntimeRef.current!.mcpApproval?.id === id) {
         window.clearTimeout(toolRuntimeRef.current!.mcpApproval.timeoutId);
@@ -769,6 +776,7 @@ export default function Home() {
 
     if (response.setupComplete) {
       clearTurnCancellationTimers();
+      clearTurnCancellationBoundaryTimer();
       toolRuntimeRef.current!.suppressServerOutputUntilNextUserTurn = false;
       toolRuntimeRef.current!.cancelledTurnBoundarySeen = false;
       toolRuntimeRef.current!.freshUserInputStarted = false;
@@ -902,18 +910,32 @@ export default function Home() {
     if (functionCalls.length > 0) {
       const cancellationSequence = toolRuntimeRef.current!.turnCancellationSequence;
       const functionResponses = [];
-      for (const functionCall of functionCalls) {
+      const functionCallBatch = functionCalls.map((functionCall: {
+        id?: unknown;
+        name: string;
+        args?: Record<string, unknown>;
+      }) => {
+        toolRuntimeRef.current!.mcpToolCallSequence += 1;
+        return {
+          ...functionCall,
+          id: typeof functionCall.id === "string"
+            ? functionCall.id
+            : `tool-${toolRuntimeRef.current!.mcpToolCallSequence}`,
+        };
+      });
+      registerPendingFunctionCalls(
+        functionCallBatch,
+        toolRuntimeRef.current!.pendingToolCallIds,
+        toolRuntimeRef.current!.pendingToolCallNames,
+        toolRuntimeRef.current!.cancelledToolCallIds,
+      );
+      for (const functionCall of functionCallBatch) {
         if (
           cancellationSequence !== toolRuntimeRef.current!.turnCancellationSequence
           || toolRuntimeRef.current!.turnCancellationPending
         ) break;
-        toolRuntimeRef.current!.mcpToolCallSequence += 1;
-        const callId = typeof functionCall.id === "string"
-          ? functionCall.id
-          : `tool-${toolRuntimeRef.current!.mcpToolCallSequence}`;
+        const callId = functionCall.id;
         if (toolRuntimeRef.current!.cancelledToolCallIds.has(callId)) continue;
-        toolRuntimeRef.current!.pendingToolCallIds.add(callId);
-        toolRuntimeRef.current!.pendingToolCallNames.set(callId, functionCall.name);
         const isLiveTranslationTool = functionCall.name === LIVE_TRANSLATE_TOOL_NAME;
         const isStudioPageAgentTool = STUDIO_PAGE_AGENT_TOOL_NAMES.has(functionCall.name);
         const mcpTool = toolRuntimeRef.current!.mcpManager.getActiveTool(functionCall.name);
@@ -1007,12 +1029,6 @@ export default function Home() {
           });
         } finally {
           if (mcpCallController) toolRuntimeRef.current!.activeMcpCallControllers.delete(callId);
-          toolRuntimeRef.current!.pendingToolCallIds.delete(callId);
-          toolRuntimeRef.current!.pendingToolCallNames.delete(callId);
-          if (
-            cancellationSequence === toolRuntimeRef.current!.turnCancellationSequence
-            && !toolRuntimeRef.current!.turnCancellationPending
-          ) toolRuntimeRef.current!.cancelledToolCallIds.delete(callId);
         }
       }
 
@@ -1020,7 +1036,17 @@ export default function Home() {
         functionResponses.length
         && cancellationSequence === toolRuntimeRef.current!.turnCancellationSequence
         && !toolRuntimeRef.current!.turnCancellationPending
-      ) sendJson({ toolResponse: { functionResponses } });
+      ) {
+        sendJson({ toolResponse: { functionResponses } });
+        settlePendingFunctionCalls(
+          functionResponses,
+          toolRuntimeRef.current!.pendingToolCallIds,
+          toolRuntimeRef.current!.pendingToolCallNames,
+        );
+        for (const functionResponse of functionResponses) {
+          toolRuntimeRef.current!.cancelledToolCallIds.delete(functionResponse.id);
+        }
+      }
     }
     if (serverContent?.turnComplete && functionCalls.length === 0) {
       mediaRuntimeRef.current!.suppressAgentAudioForTurn = false;
@@ -1029,6 +1055,7 @@ export default function Home() {
 
   const stopSession = (showIdle = true) => {
     clearTurnCancellationTimers();
+    clearTurnCancellationBoundaryTimer();
     toolRuntimeRef.current!.suppressServerOutputUntilNextUserTurn = false;
     toolRuntimeRef.current!.cancelledTurnBoundarySeen = false;
     toolRuntimeRef.current!.freshUserInputStarted = false;
@@ -1103,6 +1130,7 @@ export default function Home() {
 
     const requestedVideoMode = videoMode;
     clearTurnCancellationTimers();
+    clearTurnCancellationBoundaryTimer();
     toolRuntimeRef.current!.suppressServerOutputUntilNextUserTurn = false;
     toolRuntimeRef.current!.cancelledTurnBoundarySeen = false;
     toolRuntimeRef.current!.freshUserInputStarted = false;
@@ -1292,6 +1320,7 @@ export default function Home() {
   const cancelCurrentTurn = () => {
     if (status !== "ready" || !toolRuntimeRef.current!.agentTurnActive) return;
     clearTurnCancellationTimers();
+    clearTurnCancellationBoundaryTimer();
     updateTurnCancellationPending(true);
     toolRuntimeRef.current!.suppressServerOutputUntilNextUserTurn = true;
     toolRuntimeRef.current!.cancelledTurnBoundarySeen = false;
@@ -1307,6 +1336,10 @@ export default function Home() {
     setStatusMessage("Stopping the current action…");
     setTransientMcpAvatarState("listening", 600);
     toolRuntimeRef.current!.turnCancellationWatchdogTimer = window.setTimeout(completeTurnCancellation, 80);
+    toolRuntimeRef.current!.turnCancellationBoundaryTimer = window.setTimeout(
+      markCancelledTurnBoundarySeen,
+      1500,
+    );
   };
 
   const submitText = (event: FormEvent) => {

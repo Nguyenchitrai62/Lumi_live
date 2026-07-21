@@ -29,6 +29,11 @@ import {
   createTurnAudioGate,
   RESPONSE_AUDIO_DIRECTIVE_KEY,
 } from "../core/response-audio-policy.js";
+import {
+  buildPendingCancellationResponses,
+  registerPendingFunctionCalls,
+  settlePendingFunctionCalls,
+} from "../live/tool-call-ledger.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
@@ -86,6 +91,7 @@ let turnCancellationPending = false;
 let turnExecutionSequence = 0;
 let turnCancellationDrainTimeoutId = null;
 let turnCancellationWatchdogTimeoutId = null;
+let turnCancellationBoundaryTimeoutId = null;
 let suppressServerOutputUntilNextUserTurn = false;
 let cancelledTurnBoundarySeen = false;
 let freshUserInputStarted = false;
@@ -288,6 +294,11 @@ function clearTurnCancellationTimers() {
   turnCancellationWatchdogTimeoutId = null;
 }
 
+function clearTurnCancellationBoundaryTimeout() {
+  clearTimeout(turnCancellationBoundaryTimeoutId);
+  turnCancellationBoundaryTimeoutId = null;
+}
+
 function markFreshUserInputStarted() {
   freshUserInputStarted = true;
   if (!cancelledTurnBoundarySeen) return;
@@ -297,6 +308,7 @@ function markFreshUserInputStarted() {
 }
 
 function markCancelledTurnBoundarySeen() {
+  clearTurnCancellationBoundaryTimeout();
   cancelledTurnBoundarySeen = true;
   if (!freshUserInputStarted) return;
   suppressServerOutputUntilNextUserTurn = false;
@@ -319,18 +331,13 @@ function resetPendingTurnExecution(message = "Cancelled by the user.") {
     pendingLiveTranslationStart = false;
     void sendRuntime("stop_live_translation").catch(() => {});
   }
-  const cancelledResponses = [];
+  const cancelledResponses = buildPendingCancellationResponses(
+    pendingToolCallIds,
+    pendingToolCallNames,
+  );
   for (const callId of pendingToolCallIds) {
     rememberCancelledToolCall(callId);
     finishMcpActivity(callId, "cancelled", message);
-    const name = pendingToolCallNames.get(callId);
-    if (name) {
-      cancelledResponses.push({
-        id: callId,
-        name,
-        response: { error: "Cancelled by the user before this tool could finish." },
-      });
-    }
   }
   pendingToolCallIds.clear();
   pendingToolCallNames.clear();
@@ -649,11 +656,14 @@ async function handleServerMessage(event, sourceSocket) {
       void sendRuntime("stop_live_translation").catch(() => {});
     }
     rememberCancelledToolCall(id);
+    pendingToolCallIds.delete(id);
+    pendingToolCallNames.delete(id);
     finishMcpActivity(id, "cancelled", "Gemini cancelled this tool call because the conversation turn was interrupted.");
   }
   if (response.setupComplete) {
     clearSetupTimeout();
     clearTurnCancellationTimers();
+    clearTurnCancellationBoundaryTimeout();
     turnCancellationPending = false;
     suppressServerOutputUntilNextUserTurn = false;
     cancelledTurnBoundarySeen = false;
@@ -752,12 +762,16 @@ async function handleServerMessage(event, sourceSocket) {
   if (functionCalls.length) {
     const executionSequence = turnExecutionSequence;
     const functionResponses = [];
+    registerPendingFunctionCalls(
+      functionCalls,
+      pendingToolCallIds,
+      pendingToolCallNames,
+      cancelledToolCallIds,
+    );
     for (const functionCall of functionCalls) {
       if (executionSequence !== turnExecutionSequence || turnCancellationPending) break;
       const callId = functionCall.id;
       if (!callId || cancelledToolCallIds.has(callId)) continue;
-      pendingToolCallIds.add(callId);
-      pendingToolCallNames.set(callId, functionCall.name);
       let mcpTool = null;
       let activityTool = null;
       try {
@@ -820,9 +834,6 @@ async function handleServerMessage(event, sourceSocket) {
           name: functionCall.name,
           response: { error: (error instanceof Error ? error.message : "Tool call failed.").slice(0, 1200) },
         });
-      } finally {
-        pendingToolCallIds.delete(callId);
-        pendingToolCallNames.delete(callId);
       }
     }
     if (
@@ -832,6 +843,11 @@ async function handleServerMessage(event, sourceSocket) {
       && sourceSocket === websocket
     ) {
       sendJson({ toolResponse: { functionResponses } }, sourceSocket);
+      settlePendingFunctionCalls(
+        functionResponses,
+        pendingToolCallIds,
+        pendingToolCallNames,
+      );
     }
   }
   if (serverContent?.turnComplete && !functionCalls.length) responseAudioGate.reset();
@@ -998,6 +1014,7 @@ async function startSession() {
 function cleanupMedia() {
   clearSetupTimeout();
   clearTurnCancellationTimers();
+  clearTurnCancellationBoundaryTimeout();
   turnExecutionSequence += 1;
   cancelPendingMcpPermissionPrompts();
   cancelPendingSharedTabAudioPrompt?.();
@@ -1062,6 +1079,7 @@ function sendText(text) {
 function cancelCurrentTurn() {
   if (sessionStatus !== "ready" || !agentTurnActive) return;
   clearTurnCancellationTimers();
+  clearTurnCancellationBoundaryTimeout();
   turnCancellationPending = true;
   suppressServerOutputUntilNextUserTurn = true;
   cancelledTurnBoundarySeen = false;
@@ -1080,6 +1098,7 @@ function cancelCurrentTurn() {
   elements.statusLine.textContent = "Stopping the current action…";
   avatarController.syncState();
   turnCancellationWatchdogTimeoutId = setTimeout(completeTurnCancellation, 80);
+  turnCancellationBoundaryTimeoutId = setTimeout(markCancelledTurnBoundarySeen, 1500);
 }
 
 function toggleVtuberSize() {
