@@ -24,6 +24,7 @@ const elements = {
   enableMicrophoneButton: document.querySelector("#enableMicrophoneButton"),
   showElementHighlightsInput: document.querySelector("#showElementHighlightsInput"),
   showAddMcpButton: document.querySelector("#showAddMcpButton"),
+  mcpAddModal: document.querySelector("#mcpAddModal"),
   cancelAddMcpButton: document.querySelector("#cancelAddMcpButton"),
   mcpAddForm: document.querySelector("#mcpAddForm"),
   mcpUrlInput: document.querySelector("#mcpUrlInput"),

@@ -80,6 +80,7 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(html, /class="secondary mute-control"/);
   assert.match(html, /id="connectionNotice"/);
   assert.match(html, /id="connectionNoticeAction"/);
+  assert.match(html, /id="connectionNoticeSettings"[^>]+hidden/);
   assert.match(html, /id="messageQueue"/);
   assert.match(html, /id="messageQueueSteer"/);
   assert.match(html, /id="messageQueueRemove"/);
@@ -91,6 +92,7 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(styles, /\.message-queue-steer/);
   assert.match(styles, /\.connection-notice-backdrop[^}]+place-items:\s*center/);
   assert.match(controller, /thinkingConfig:\s*buildThinkingConfig\(sessionThinkingLevel\)/);
+  assert.match(controller, /tools:\s*\[\{ functionDeclarations \}\]/);
   assert.match(controller, /historyConfig:\s*\{\s*initialHistoryInClientContent:\s*true\s*\}/);
   assert.match(controller, /sendJson\(buildInitialHistoryClientContent\(conversationHistory\),\s*sourceSocket\)/);
   assert.match(controller, /elements\.messageInput\.disabled\s*=\s*false/);
@@ -108,6 +110,11 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /collapseThinkingTranscript\(\);\s*updateTranscript\("lumi"/);
   assert.match(controller, /showMissingKeyNotice\(message\)/);
   assert.match(controller, /showReconnectNotice\(message\)/);
+  assert.match(controller, /EARLY_CONNECTION_DROP_MS\s*=\s*3000/);
+  assert.match(controller, /performance\.now\(\) - sessionReadyAt <= EARLY_CONNECTION_DROP_MS/);
+  assert.match(controller, /showReconnectNotice\(message,\s*\{ earlyDisconnect: disconnectedSoonAfterConnect \}\)/);
+  assert.match(controller, /earlyDisconnect \? "Check Settings" : "Open Settings"/);
+  assert.match(controller, /connectionNoticeSettings[^]*openSettings\(\)/);
   assert.match(controller, /if \(savedKey && DEFAULT_AUTO_CONNECT_ENABLED\) await autoStartSessionIfReady\(\)/);
   const queueSource = controller.slice(
     controller.indexOf("function queueUserMessage"),
@@ -135,14 +142,21 @@ test("settings ships Notion OAuth, a Redmine popup, app icons, and a temporary s
   );
   const styles = await readFile(new URL("settings/styles.css", extensionRoot), "utf8");
   assert.match(html, /id="mcpConnectorModal"/);
+  assert.match(html, /id="mcpAddModal" class="mcp-connector-modal-backdrop" hidden/);
+  assert.match(html, /id="mcpAddForm"[^>]+role="dialog"[^>]+aria-modal="true"/);
   assert.match(html, /id="mcpConnectorModalFields"/);
   assert.match(html, /id="mcpConnectorCatalog"/);
+  assert.match(styles, /\.settings-grid[^}]+repeat\(12, minmax\(0, 1fr\)\)/);
+  assert.match(styles, /\.settings-column[^}]+grid-template-columns:\s*1fr/);
+  assert.match(styles, /\.mcp-card[^}]+grid-column:\s*1 \/ -1/);
   assert.match(html, /icons\/connectors\/mcp\.svg/);
   assert.match(controller, /mcp_set_server_enabled/);
   assert.match(controller, /connectNotion/);
   assert.match(controller, /connector\.id === "redmine"/);
   assert.match(controller, /availableConnectors[\s\S]*!mcpServers\.some/);
   assert.match(controller, /connector\?\.icon \|\| DEFAULT_MCP_ICON/);
+  assert.match(controller, /event\.target === elements\.mcpAddModal/);
+  assert.match(controller, /!elements\.mcpAddModal\.hidden[^]*toggleMcpAddForm\(false\)/);
   assert.match(styles, /\.mcp-connector-mark img/);
 });
 

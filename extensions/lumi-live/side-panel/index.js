@@ -63,6 +63,7 @@ const THINKING_LEVEL_STORAGE_KEY = STORAGE_KEYS.thinkingLevel;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
 const PANEL_LIFECYCLE_MESSAGE = EXTENSION_EVENTS.lifecycle;
 const GEMINI_SETUP_TIMEOUT_MS = 15000;
+const EARLY_CONNECTION_DROP_MS = 3000;
 const CANCELLED_TOOL_CALL_RETENTION_MS = 60000;
 const TURN_CANCELLATION_DRAIN_MS = 120;
 const TURN_CANCELLATION_WATCHDOG_MS = 80;
@@ -92,6 +93,7 @@ const elements = {
   connectionNoticeTitle: document.querySelector("#connectionNoticeTitle"),
   connectionNoticeMessage: document.querySelector("#connectionNoticeMessage"),
   connectionNoticeAction: document.querySelector("#connectionNoticeAction"),
+  connectionNoticeSettings: document.querySelector("#connectionNoticeSettings"),
   vtuberCard: document.querySelector("#vtuberCard"),
   vtuberToggle: document.querySelector("#vtuberToggle"),
   lumiRig: document.querySelector(".lumi-rig"),
@@ -126,6 +128,7 @@ const elements = {
 let sessionStatus = "idle";
 let sessionStartPending = false;
 let intentionalClose = false;
+let sessionReadyAt = 0;
 let isMuted = false;
 let agentTurnActive = false;
 let turnCancellationPending = false;
@@ -596,6 +599,8 @@ function openSettings() {
 function hideConnectionNotice() {
   elements.connectionNotice.hidden = true;
   elements.connectionNoticeAction.disabled = false;
+  elements.connectionNoticeSettings.disabled = false;
+  elements.connectionNoticeSettings.hidden = true;
 }
 
 function rememberConversationTurn(role, text) {
@@ -627,12 +632,16 @@ function clearConversationContext() {
   syncQueuedMessagePanel();
 }
 
-function showConnectionNotice({ action, title, message, actionLabel }) {
+function showConnectionNotice({ action, title, message, actionLabel, showSettings = false, earlyDisconnect = false }) {
   elements.connectionNotice.dataset.action = action;
+  elements.connectionNotice.dataset.earlyDisconnect = String(earlyDisconnect);
   elements.connectionNoticeTitle.textContent = title;
   elements.connectionNoticeMessage.textContent = message;
   elements.connectionNoticeAction.textContent = actionLabel;
   elements.connectionNoticeAction.disabled = false;
+  elements.connectionNoticeSettings.disabled = false;
+  elements.connectionNoticeSettings.textContent = earlyDisconnect ? "Check Settings" : "Open Settings";
+  elements.connectionNoticeSettings.hidden = !showSettings;
   elements.connectionNotice.hidden = false;
   elements.connectionNoticeAction.focus();
 }
@@ -646,12 +655,14 @@ function showMissingKeyNotice(message = "Add a Gemini API key in Lumi Settings, 
   });
 }
 
-function showReconnectNotice(message) {
+function showReconnectNotice(message, { earlyDisconnect = false } = {}) {
   showConnectionNotice({
     action: "reconnect",
     title: "Gemini connection unavailable",
     message: message || "The Gemini Live connection ended unexpectedly. Reconnect to continue talking with Lumi.",
     actionLabel: "Reconnect",
+    showSettings: true,
+    earlyDisconnect,
   });
 }
 
@@ -671,6 +682,17 @@ async function handleConnectionNoticeAction() {
     await startSession();
   } finally {
     elements.connectionNoticeAction.disabled = false;
+  }
+}
+
+async function handleConnectionNoticeSettings() {
+  elements.connectionNoticeAction.disabled = true;
+  elements.connectionNoticeSettings.disabled = true;
+  try {
+    await openSettings();
+  } finally {
+    elements.connectionNoticeAction.disabled = false;
+    elements.connectionNoticeSettings.disabled = false;
   }
 }
 
@@ -993,6 +1015,7 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
     finishMcpActivity(id, "cancelled", "Gemini cancelled this tool call because the conversation turn was interrupted.");
   }
   if (response.setupComplete) {
+    sessionReadyAt = performance.now();
     hideConnectionNotice();
     clearSetupTimeout();
     clearTurnCancellationTimers();
@@ -1216,6 +1239,7 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
 
 function openGeminiSocket({ apiKey, voiceName, thinkingLevel: sessionThinkingLevel, mcpInfo, mcpFunctionDeclarations, activeTabContext }) {
   setSessionStatus("connecting", "Microphone is ready. Opening Gemini Live...");
+  sessionReadyAt = 0;
   const functionDeclarations = [...BUILTIN_TOOLS, ...mcpFunctionDeclarations];
   websocket = new WebSocket(`${WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`);
   const sessionSocket = websocket;
@@ -1277,6 +1301,9 @@ function openGeminiSocket({ apiKey, voiceName, thinkingLevel: sessionThinkingLev
     if (websocket !== sessionSocket) return;
     const expected = intentionalClose;
     const reason = event.reason?.replace(/\s+/g, " ").trim() || "";
+    const disconnectedSoonAfterConnect = sessionReadyAt > 0
+      && performance.now() - sessionReadyAt <= EARLY_CONNECTION_DROP_MS;
+    sessionReadyAt = 0;
     clearSetupTimeout();
 
     const rejected = !expected && sessionStatus === "connecting"
@@ -1323,7 +1350,7 @@ function openGeminiSocket({ apiKey, voiceName, thinkingLevel: sessionThinkingLev
         : `Gemini Live closed with code ${event.code}. Reconnect to continue.`;
       setSessionStatus("error", message);
       if (isGeminiKeyIssue(reason)) showMissingKeyNotice(message);
-      else showReconnectNotice(message);
+      else showReconnectNotice(message, { earlyDisconnect: disconnectedSoonAfterConnect });
     }
   };
 }
@@ -1436,6 +1463,7 @@ function syncMuteButton() {
 }
 
 function cleanupMedia() {
+  sessionReadyAt = 0;
   clearSetupTimeout();
   clearTurnCancellationTimers();
   clearTurnCancellationBoundaryTimeout();
@@ -1658,6 +1686,7 @@ elements.messageQueueSteer.addEventListener("click", steerQueuedUserMessage);
 elements.messageQueueRemove.addEventListener("click", removeQueuedUserMessage);
 elements.microphoneHelpButton.addEventListener("click", () => void openMicrophonePermissionPage());
 elements.connectionNoticeAction.addEventListener("click", () => void handleConnectionNoticeAction());
+elements.connectionNoticeSettings.addEventListener("click", () => void handleConnectionNoticeSettings());
 elements.thinkingButton.addEventListener("click", () => {
   setThinkingMenuOpen(elements.thinkingButton.getAttribute("aria-expanded") !== "true");
 });

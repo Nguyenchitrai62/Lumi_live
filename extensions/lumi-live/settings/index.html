@@ -24,8 +24,11 @@
 
       <section class="settings-grid">
         <article class="settings-card connection-card">
-          <span class="eyebrow">GEMINI CONNECTION</span>
-          <h2>API and voice</h2>
+          <div class="card-heading">
+            <span class="eyebrow">GEMINI CONNECTION</span>
+            <h2>API and voice</h2>
+            <p>Everything Lumi needs to start a voice session.</p>
+          </div>
 
           <div class="field-label-row">
             <label for="apiKeyInput">Gemini API key</label>
@@ -77,7 +80,7 @@
         </article>
 
         <div class="settings-column">
-          <article class="settings-card compact-card">
+          <article class="settings-card compact-card microphone-card">
             <span class="eyebrow">AUDIO</span>
             <div class="setting-row">
               <div>
@@ -88,7 +91,7 @@
             </div>
           </article>
 
-          <article class="settings-card compact-card">
+          <article class="settings-card compact-card visuals-card">
             <span class="eyebrow">PAGEAGENT VISUALS</span>
             <div class="setting-row">
               <div>
@@ -116,7 +119,7 @@
               </div>
               <p class="mcp-intro">Connect external tools and choose when Lumi may use them.</p>
             </div>
-            <button id="showAddMcpButton" class="secondary add-mcp-button" type="button" aria-expanded="false" aria-controls="mcpAddForm">
+            <button id="showAddMcpButton" class="secondary add-mcp-button" type="button" aria-expanded="false" aria-haspopup="dialog" aria-controls="mcpAddModal">
               <span aria-hidden="true">+</span> Add server
             </button>
           </div>
@@ -140,22 +143,6 @@
             <button id="dismissMcpToolAlertButton" type="button">OK</button>
           </div>
 
-          <form id="mcpAddForm" class="mcp-add-form" hidden>
-            <div class="mcp-add-heading">
-              <div>
-                <strong>New MCP server</strong>
-                <p>Paste the server URL. Lumi checks it before saving.</p>
-              </div>
-              <button id="cancelAddMcpButton" class="text-button" type="button">Cancel</button>
-            </div>
-            <label for="mcpUrlInput">MCP server URL</label>
-            <div class="mcp-input-row">
-              <input id="mcpUrlInput" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/mcp" />
-              <button id="connectMcpButton" class="primary" type="submit">Connect server</button>
-            </div>
-            <p id="mcpStatus" class="note" role="status"></p>
-          </form>
-
           <div id="mcpEmptyState" class="mcp-empty-state">
             <span class="mcp-empty-icon" aria-hidden="true">
               <img src="../icons/connectors/mcp.svg" alt="" />
@@ -171,6 +158,28 @@
         </article>
       </section>
     </main>
+
+    <div id="mcpAddModal" class="mcp-connector-modal-backdrop" hidden>
+      <form id="mcpAddForm" class="mcp-connector-modal mcp-add-modal" role="dialog" aria-modal="true" aria-labelledby="mcpAddModalTitle" aria-describedby="mcpAddModalDescription">
+        <div class="mcp-connector-modal-head">
+          <span class="mcp-connector-mark" aria-hidden="true">
+            <img src="../icons/connectors/mcp.svg" alt="" />
+          </span>
+          <div>
+            <span class="eyebrow">CUSTOM CONNECTION</span>
+            <h2 id="mcpAddModalTitle">Add MCP server</h2>
+          </div>
+        </div>
+        <p id="mcpAddModalDescription" class="mcp-connector-modal-description">Paste the server URL. Lumi checks the connection and available tools before saving it.</p>
+        <label class="mcp-add-modal-label" for="mcpUrlInput">MCP server URL</label>
+        <input id="mcpUrlInput" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/mcp" />
+        <p id="mcpStatus" class="mcp-connector-modal-status" role="status"></p>
+        <div class="mcp-connector-modal-actions">
+          <button id="cancelAddMcpButton" class="secondary" type="button">Cancel</button>
+          <button id="connectMcpButton" class="primary" type="submit">Connect server</button>
+        </div>
+      </form>
+    </div>
 
     <div id="mcpConnectorModal" class="mcp-connector-modal-backdrop" hidden>
       <form id="mcpConnectorModalForm" class="mcp-connector-modal" role="dialog" aria-modal="true" aria-labelledby="mcpConnectorModalTitle">

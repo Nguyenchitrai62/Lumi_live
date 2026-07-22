@@ -10,6 +10,7 @@ let mcpServers = [];
 let selectedMcpServerId = null;
 let currentMcpToolAlertSignature = "";
 let dismissedMcpToolAlertSignature = "";
+let mcpAddModalReturnFocus = null;
 let connectorModalReturnFocus = null;
 
 const MCP_PERMISSION_OPTIONS = [
@@ -33,18 +34,28 @@ function setMcpStatus(state, message) {
   elements.mcpStatus.textContent = message;
 }
 
-function toggleMcpAddForm(shouldOpen) {
-  elements.mcpAddForm.hidden = !shouldOpen;
+function toggleMcpAddForm(shouldOpen, { force = false, restoreFocus = true } = {}) {
+  if (!shouldOpen && !force && elements.connectMcpButton.dataset.busy === "true") return;
+  elements.mcpAddModal.hidden = !shouldOpen;
   elements.showAddMcpButton.setAttribute("aria-expanded", String(shouldOpen));
   if (shouldOpen) {
+    mcpAddModalReturnFocus = document.activeElement;
+    document.body.classList.add("is-mcp-connector-modal-open");
+    elements.settingsShell.inert = true;
     requestAnimationFrame(() => elements.mcpUrlInput.focus());
     return;
   }
+  document.body.classList.remove("is-mcp-connector-modal-open");
+  elements.settingsShell.inert = false;
   elements.mcpUrlInput.value = "";
+  elements.mcpUrlInput.disabled = false;
+  elements.cancelAddMcpButton.disabled = false;
   elements.connectMcpButton.disabled = true;
   elements.connectMcpButton.dataset.busy = "";
   elements.connectMcpButton.textContent = "Connect server";
   setMcpStatus("", "");
+  if (restoreFocus) mcpAddModalReturnFocus?.focus();
+  mcpAddModalReturnFocus = null;
 }
 
 function createMcpMeta(text, className = "") {
@@ -464,6 +475,8 @@ async function connectMcp(event) {
   }
 
   elements.connectMcpButton.disabled = true;
+  elements.mcpUrlInput.disabled = true;
+  elements.cancelAddMcpButton.disabled = true;
   elements.connectMcpButton.dataset.busy = "true";
   elements.connectMcpButton.textContent = "Connecting...";
   setMcpStatus("", "Running the MCP handshake and loading tools...");
@@ -473,10 +486,12 @@ async function connectMcp(event) {
     server.uiState = getMcpServerUiState(server);
     mcpServers.push(server);
     renderMcpServers();
-    toggleMcpAddForm(false);
+    toggleMcpAddForm(false, { force: true });
   } catch (error) {
     setMcpStatus("error", error instanceof Error ? error.message : "Could not connect to the MCP server.");
   } finally {
+    elements.mcpUrlInput.disabled = false;
+    elements.cancelAddMcpButton.disabled = false;
     elements.connectMcpButton.dataset.busy = "";
     elements.connectMcpButton.textContent = "Connect server";
     elements.connectMcpButton.disabled = !elements.mcpUrlInput.value.trim();
@@ -656,9 +671,12 @@ async function loadMcpServers(refresh = false) {
 }
 
 elements.showAddMcpButton.addEventListener("click", () => {
-  toggleMcpAddForm(elements.mcpAddForm.hidden);
+  toggleMcpAddForm(elements.mcpAddModal.hidden);
 });
 elements.cancelAddMcpButton.addEventListener("click", () => toggleMcpAddForm(false));
+elements.mcpAddModal.addEventListener("click", (event) => {
+  if (event.target === elements.mcpAddModal) toggleMcpAddForm(false);
+});
 elements.mcpUrlInput.addEventListener("input", () => {
   elements.connectMcpButton.disabled = !elements.mcpUrlInput.value.trim()
     || elements.connectMcpButton.dataset.busy === "true";
@@ -714,7 +732,8 @@ elements.mcpServerList.addEventListener("keydown", (event) => {
 elements.backToMcpServersButton.addEventListener("click", closeMcpToolsView);
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (!elements.mcpConnectorModal.hidden) closeConnectorModal();
+  if (!elements.mcpAddModal.hidden) toggleMcpAddForm(false);
+  else if (!elements.mcpConnectorModal.hidden) closeConnectorModal();
   else if (selectedMcpServerId) closeMcpToolsView();
 });
 elements.mcpToolsView.addEventListener("click", (event) => {
