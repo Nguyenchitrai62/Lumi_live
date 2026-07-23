@@ -197,6 +197,20 @@ test("captures the active tab without a new permission and renders rich conversa
   assert.match(styles, /\.message-capture/);
 });
 
+test("opens a requested website even when the current tab cannot host PageAgent", async () => {
+  const worker = await readFile(new URL("background/index.js", extensionRoot), "utf8");
+  const openTabSource = worker.slice(
+    worker.indexOf("async function openBrowserTab"),
+    worker.indexOf("async function switchBrowserTab"),
+  );
+
+  assert.match(worker, /TAB_TRANSITION_FALLBACK_URL\s*=\s*"https:\/\/www\.google\.com\/"/);
+  assert.match(openTabSource, /if \(!departureTab\)[\s\S]+chrome\.tabs\.create\(\{ url: TAB_TRANSITION_FALLBACK_URL, active: true \}\)/);
+  assert.match(openTabSource, /bridge_show_google_search_departure/);
+  assert.match(openTabSource, /chrome\.tabs\.update\(createdTab\.id, \{ url, active: true \}\)/);
+  assert.doesNotMatch(openTabSource, /needs a controllable current page/);
+});
+
 test("settings ships Notion OAuth, a Redmine popup, app icons, and a temporary server toggle", async () => {
   const html = await readFile(new URL("settings/index.html", extensionRoot), "utf8");
   const controller = await readFile(

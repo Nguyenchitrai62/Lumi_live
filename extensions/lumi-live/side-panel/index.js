@@ -584,13 +584,18 @@ async function validateGeminiApiKey(apiKey) {
 
 function updateTarget(status) {
   const connected = Boolean(status?.connected);
+  const navigationReady = !connected && status?.navigationReady === true;
   elements.targetCard.classList.toggle("connected", connected);
-  elements.targetTitle.textContent = connected ? status.title || "Active web page" : "No controllable page";
+  elements.targetTitle.textContent = connected
+    ? status.title || "Active web page"
+    : navigationReady ? "Navigation ready" : "No controllable page";
   elements.targetHint.textContent = connected
     ? status.controllerReady === false ? "PageAgent is preparing this page..." : "Auto-following the active Chrome tab."
-    : status?.reason || "Switch to a web page and Lumi will follow it.";
-  elements.connectTabButton.textContent = connected ? "Auto" : "Waiting";
-  elements.connectTabButton.title = connected ? status.url || "Automatically follows the active tab" : "Waiting for an http/https tab";
+    : status?.reason || "Lumi can open or switch to a website from this tab.";
+  elements.connectTabButton.textContent = connected ? "Auto" : navigationReady ? "Ready" : "Waiting";
+  elements.connectTabButton.title = connected
+    ? status.url || "Automatically follows the active tab"
+    : navigationReady ? "Website navigation is available" : "Waiting for an http/https tab";
 }
 
 async function refreshTarget() {

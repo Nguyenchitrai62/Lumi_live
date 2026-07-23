@@ -58,6 +58,22 @@ test("grounds self-references and searches in the Lumi Live product identity", (
   assert.doesNotMatch(instruction, /Talk to a AI Agent That Controls Your Active Tab/i);
 });
 
+test("keeps website navigation available from New Tab and Chrome internal pages", () => {
+  const instruction = buildSessionInstruction(undefined, { connected: false });
+  const openTabTool = BUILTIN_TOOLS.find((tool) => tool.name === "browser_open_tab");
+
+  assert.match(openTabTool.description, /From New Tab, chrome:\/\/ pages/i);
+  assert.match(openTabTool.description, /must first open exactly https:\/\/www\.google\.com\//i);
+  assert.match(openTabTool.description, /reuse(?:s)? that same tab for the destination/i);
+  assert.match(instruction, /navigation tools .+ remain available from every active tab/i);
+  assert.match(instruction, /must open exactly https:\/\/www\.google\.com\//i);
+  assert.match(instruction, /never substitute another Google domain, search URL, or website/i);
+  assert.match(instruction, /without leaving a spare Google tab/i);
+  assert.match(instruction, /Continue answering ordinary questions normally/i);
+  assert.match(instruction, /Never ask the user to switch away from an uncontrollable page/i);
+  assert.doesNotMatch(instruction, /If there is no controllable tab, tell the user to switch/i);
+});
+
 test("does not expose temporarily disabled MCP servers to the agent session", () => {
   const activeTools = new Map();
   const declarations = configureMcpTools({

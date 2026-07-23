@@ -15,6 +15,7 @@ const PANEL_LIFECYCLE_MESSAGE = EXTENSION_EVENTS.lifecycle;
 const ELEMENT_HIGHLIGHTS_STORAGE_KEY = STORAGE_KEYS.elementHighlights;
 const OFFSCREEN_DOCUMENT_PATH = "offscreen/index.html";
 const OFFSCREEN_TARGET = "lumi_live_offscreen";
+const TAB_TRANSITION_FALLBACK_URL = "https://www.google.com/";
 
 let connectedTabId = null;
 let listedTabIds = new Set();
@@ -263,7 +264,8 @@ async function getStatus() {
   if (!activeTarget || !connectedTabId) {
     return {
       connected: false,
-      reason: "Switch to a normal http/https page and Lumi will target it automatically.",
+      navigationReady: true,
+      reason: "This tab cannot expose page content, but Lumi can open or switch to a website from here.",
     };
   }
   try {
@@ -484,28 +486,48 @@ async function openBrowserTab(args = {}, action) {
   }
   const previousTab = await getActiveTab();
   const previousTabId = previousTab?.id;
-  trackBrowserActionTab(action, previousTabId);
+  let departureTab = previousTabId && isWebPage(previousTab?.url) ? previousTab : null;
+  if (departureTab?.id) trackBrowserActionTab(action, departureTab.id);
   let createdTab = null;
   let activated = false;
+  let departureShown = false;
   try {
-    if (!previousTabId || !isWebPage(previousTab?.url)) {
-      throw new Error("Lumi needs a controllable current page to show the required Google Search transition before opening a new tab.");
+    if (!departureTab) {
+      createdTab = await chrome.tabs.create({ url: TAB_TRANSITION_FALLBACK_URL, active: true });
+      if (!createdTab.id) throw new Error("Chrome created the transition tab without an ID.");
+      activated = true;
+      trackBrowserActionTab(action, createdTab.id);
+      await chrome.windows.update(createdTab.windowId, { focused: true });
+      await setConnectedTab(createdTab.id);
+      departureTab = await waitForTabToSettle(createdTab.id, action);
     }
-    const departureReady = await ensureController(previousTabId, 3);
-    assertBrowserActionActive(action);
-    if (!departureReady) {
-      throw new Error("The current page could not prepare the required Google Search transition.");
-    }
-    await sendControllerBridge(previousTabId, "bridge_show_google_search_departure", {
-      searchText: tabTransitionSearchText(url),
-    });
-    assertBrowserActionActive(action);
 
-    createdTab = await chrome.tabs.create({ url, active: true });
-    if (!createdTab.id) throw new Error("Chrome created the tab without an ID.");
-    activated = true;
-    trackBrowserActionTab(action, createdTab.id);
-    void sendControllerBridge(previousTabId, "bridge_clear_tab_transition").catch(() => {});
+    const departureReady = await ensureController(departureTab.id, 5);
+    assertBrowserActionActive(action);
+    if (departureReady) {
+      try {
+        await sendControllerBridge(departureTab.id, "bridge_show_google_search_departure", {
+          searchText: tabTransitionSearchText(url),
+        });
+        departureShown = true;
+      } catch {
+        // The transition is decorative; navigation must still finish if the page
+        // stops accepting extension messages at this moment.
+      }
+      assertBrowserActionActive(action);
+    }
+
+    if (createdTab?.id) {
+      createdTab = await chrome.tabs.update(createdTab.id, { url, active: true });
+    } else {
+      createdTab = await chrome.tabs.create({ url, active: true });
+      if (!createdTab.id) throw new Error("Chrome created the tab without an ID.");
+      activated = true;
+      trackBrowserActionTab(action, createdTab.id);
+    }
+    if (departureShown) {
+      void sendControllerBridge(departureTab.id, "bridge_clear_tab_transition").catch(() => {});
+    }
     await chrome.windows.update(createdTab.windowId, { focused: true });
     await setConnectedTab(createdTab.id);
     await waitForTabToSettle(createdTab.id, action);
@@ -519,8 +541,8 @@ async function openBrowserTab(args = {}, action) {
       ...serializeTab(await chrome.tabs.get(createdTab.id)),
     };
   } catch (error) {
-    if (previousTabId) {
-      void sendControllerBridge(previousTabId, "bridge_clear_tab_transition").catch(() => {});
+    if (departureShown) {
+      void sendControllerBridge(departureTab.id, "bridge_clear_tab_transition").catch(() => {});
     }
     if (!activated && createdTab?.id) {
       await chrome.tabs.remove(createdTab.id).catch(() => {});
@@ -577,7 +599,7 @@ async function executeBrowserTool(tool, args = {}) {
     if (tool === "browser_switch_tab") return switchBrowserTab(args, action);
     return sendBrowserTool(tool, args, action);
   };
-  const timeoutMs = tool === "browser_open_tab" ? 20000 : 12000;
+  const timeoutMs = tool === "browser_open_tab" ? 30000 : 12000;
   try {
     return await Promise.race([
       execute(),
