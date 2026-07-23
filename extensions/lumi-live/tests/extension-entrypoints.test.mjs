@@ -32,6 +32,7 @@ async function collectLocalModules(entryPath, visited = new Set()) {
 test("manifest and HTML entrypoints keep their stable unpacked-extension paths", async () => {
   const manifest = JSON.parse(await readFile(new URL("manifest.json", extensionRoot), "utf8"));
   assert.ok(manifest.permissions.includes("identity"));
+  assert.ok(manifest.permissions.includes("activeTab"));
   assert.equal(Object.hasOwn(manifest, "oauth2"), false);
   const entrypoints = [
     manifest.background.service_worker,
@@ -99,6 +100,8 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /queueUserMessage\(message\)/);
   assert.match(controller, /function steerQueuedUserMessage\(\)/);
   assert.match(controller, /getTranscriptRevealDurationMs\(remainingCharacterCount\)/);
+  assert.match(controller, /function setVisibleTranscriptText\(message,\s*text\)[^]*message\.role === "lumi"[^]*renderMarkdown\(message\.content,\s*visibleText\)/);
+  assert.match(controller, /setVisibleTranscriptText\(\s*message,\s*targetCharacters\.slice\(0,\s*visibleCharacterCount\)\.join\(""\)/);
   assert.match(controller, /attachAnimatedDisclosure/);
   assert.match(controller, /scrollTranscriptToLatest\(\)/);
   assert.match(controller, /revealTranscriptText\(message,\s*message\.text\)/);
@@ -134,6 +137,66 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(mcpController, /attachAnimatedDisclosure\(\{ root, summary, body \}\)/);
 });
 
+test("side panel connects chat without requiring a microphone and remembers mic preference", async () => {
+  const controller = await readFile(new URL("side-panel/index.js", extensionRoot), "utf8");
+  const audioController = await readFile(
+    new URL("side-panel/panel-audio-controller.js", extensionRoot),
+    "utf8",
+  );
+  const config = await readFile(new URL("core/extension-config.js", extensionRoot), "utf8");
+  const html = await readFile(new URL("side-panel/index.html", extensionRoot), "utf8");
+  const startSessionSource = controller.slice(
+    controller.indexOf("async function startSession"),
+    controller.indexOf("async function autoStartSessionIfReady"),
+  );
+  const autoStartSource = controller.slice(
+    controller.indexOf("async function autoStartSessionIfReady"),
+    controller.indexOf("function syncMuteButton"),
+  );
+  const toggleSource = controller.slice(
+    controller.indexOf("async function enableMicrophone"),
+    controller.indexOf("function sendText"),
+  );
+
+  assert.match(config, /microphoneEnabled:\s*"lumiMicrophoneEnabled"/);
+  assert.match(html, /id="muteButton"[^>]+aria-label="Turn on microphone"[^>]+aria-pressed="true"/);
+  assert.match(controller, /let isMuted = true/);
+  assert.match(startSessionSource, /await panelAudio\.prepareOutput\(\)/);
+  assert.match(startSessionSource, /if \(microphoneEnabled\)[^]*panelAudio\.requestMicrophone\(\)/);
+  assert.match(startSessionSource, /microphoneWarning = `\$\{diagnosis\.message\} Chat is still connected\.`/);
+  assert.doesNotMatch(autoStartSource, /refreshMicrophonePermission|openMicrophonePermissionPage/);
+  assert.match(toggleSource, /\[MICROPHONE_ENABLED_STORAGE_KEY\]: true/);
+  assert.match(toggleSource, /\[MICROPHONE_ENABLED_STORAGE_KEY\]: false/);
+  assert.match(toggleSource, /panelAudio\.stopMicrophone\(\)/);
+  assert.match(audioController, /async function prepareOutput\(\)/);
+  assert.match(audioController, /function stopMicrophone\(\)/);
+});
+
+test("captures the active tab without a new permission and renders rich conversation Markdown", async () => {
+  const manifest = JSON.parse(await readFile(new URL("manifest.json", extensionRoot), "utf8"));
+  const worker = await readFile(new URL("background/index.js", extensionRoot), "utf8");
+  const sessionConfig = await readFile(new URL("live/session-config.js", extensionRoot), "utf8");
+  const controller = await readFile(new URL("side-panel/index.js", extensionRoot), "utf8");
+  const markdown = await readFile(new URL("side-panel/markdown-renderer.js", extensionRoot), "utf8");
+  const styles = await readFile(new URL("side-panel/styles.css", extensionRoot), "utf8");
+
+  assert.ok(manifest.permissions.includes("activeTab"));
+  assert.ok(manifest.permissions.includes("tabs"));
+  assert.match(sessionConfig, /name:\s*"browser_capture_screenshot"/);
+  assert.match(worker, /chrome\.tabs\.captureVisibleTab/);
+  assert.match(worker, /saveCapturedTabAsset/);
+  assert.match(controller, /createCapturedTabMessage\(result\)/);
+  assert.match(controller, /renderMarkdown\(message\.content,\s*message\.text\)/);
+  assert.match(controller, /elements\.transcript\.addEventListener\("click"[\s\S]+chrome\.tabs\.create\(\{\s*url,\s*active:\s*true\s*\}\)/);
+  assert.match(markdown, /function renderTable/);
+  assert.match(markdown, /function reconcileChildren/);
+  assert.doesNotMatch(markdown, /container\.replaceChildren\(\)/);
+  assert.match(markdown, /isSafeMarkdownUrl/);
+  assert.match(styles, /\.markdown-table-scroll/);
+  assert.match(styles, /\.markdown-body a:hover[^}]+background/);
+  assert.match(styles, /\.message-capture/);
+});
+
 test("settings ships Notion OAuth, a Redmine popup, app icons, and a temporary server toggle", async () => {
   const html = await readFile(new URL("settings/index.html", extensionRoot), "utf8");
   const controller = await readFile(
@@ -147,7 +210,12 @@ test("settings ships Notion OAuth, a Redmine popup, app icons, and a temporary s
   assert.match(html, /id="mcpConnectorModalFields"/);
   assert.match(html, /id="mcpConnectorCatalog"/);
   assert.match(styles, /\.settings-grid[^}]+repeat\(12, minmax\(0, 1fr\)\)/);
-  assert.match(styles, /\.settings-column[^}]+grid-template-columns:\s*1fr/);
+  assert.match(styles, /\.settings-column[^}]+grid-column:\s*span 3[^}]+grid-template-columns:\s*1fr[^}]+grid-template-rows:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]+align-self:\s*stretch/);
+  assert.match(styles, /\.connection-card[^}]+grid-column:\s*span 9/);
+  assert.match(html, /class="connection-fields"/);
+  assert.match(html, /class="connection-field api-field"/);
+  assert.match(html, /class="connection-field voice-field"/);
+  assert.match(styles, /\.connection-fields[^}]+repeat\(2, minmax\(0, 1fr\)\)[^}]+gap:\s*14px/);
   assert.match(styles, /\.mcp-card[^}]+grid-column:\s*1 \/ -1/);
   assert.match(html, /icons\/connectors\/mcp\.svg/);
   assert.match(controller, /mcp_set_server_enabled/);

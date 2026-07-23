@@ -27,53 +27,61 @@
           <div class="card-heading">
             <span class="eyebrow">GEMINI CONNECTION</span>
             <h2>API and voice</h2>
-            <p>Everything Lumi needs to start a voice session.</p>
+            <p>Configure chat access and Lumi's response voice.</p>
           </div>
 
-          <div class="field-label-row">
-            <label for="apiKeyInput">Gemini API key</label>
-            <a class="api-key-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Create or get an API key ↗</a>
-          </div>
-          <div class="key-row">
-            <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste a Google AI Studio key" />
-            <button id="toggleKeyButton" class="secondary" type="button">Show</button>
-          </div>
+          <div class="connection-fields">
+            <section class="connection-field api-field">
+              <div class="field-label-row">
+                <label for="apiKeyInput">Gemini API key</label>
+                <a class="api-key-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Create or get an API key ↗</a>
+              </div>
+              <div class="key-row">
+                <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste a Google AI Studio key" />
+                <button id="toggleKeyButton" class="secondary" type="button">Show</button>
+              </div>
+              <p class="field-help">Stored only in this browser.</p>
+            </section>
 
-          <label for="voiceInput">Lumi voice</label>
-          <div class="voice-row">
-          <select id="voiceInput">
-            <option value="Zephyr">Zephyr - Bright</option>
-            <option value="Puck">Puck - Upbeat</option>
-            <option value="Charon">Charon - Informative</option>
-            <option value="Kore">Kore - Firm</option>
-            <option value="Fenrir">Fenrir - Excitable</option>
-            <option value="Leda">Leda - Youthful</option>
-            <option value="Orus">Orus - Firm</option>
-            <option value="Aoede">Aoede - Breezy</option>
-            <option value="Callirrhoe">Callirrhoe - Easy-going</option>
-            <option value="Autonoe">Autonoe - Bright</option>
-            <option value="Enceladus">Enceladus - Breathy</option>
-            <option value="Iapetus">Iapetus - Clear</option>
-            <option value="Umbriel">Umbriel - Easy-going</option>
-            <option value="Algieba">Algieba - Smooth</option>
-            <option value="Despina">Despina - Smooth</option>
-            <option value="Erinome">Erinome - Clear</option>
-            <option value="Algenib">Algenib - Gravelly</option>
-            <option value="Rasalgethi">Rasalgethi - Informative</option>
-            <option value="Laomedeia">Laomedeia - Upbeat</option>
-            <option value="Achernar">Achernar - Soft</option>
-            <option value="Alnilam">Alnilam - Firm</option>
-            <option value="Schedar">Schedar - Even</option>
-            <option value="Gacrux">Gacrux - Mature</option>
-            <option value="Pulcherrima">Pulcherrima - Forward</option>
-            <option value="Achird">Achird - Friendly</option>
-            <option value="Zubenelgenubi">Zubenelgenubi - Casual</option>
-            <option value="Vindemiatrix">Vindemiatrix - Gentle</option>
-            <option value="Sadachbia">Sadachbia - Lively</option>
-            <option value="Sadaltager">Sadaltager - Knowledgeable</option>
-            <option value="Sulafat">Sulafat - Warm</option>
-          </select>
-          <button id="previewVoiceButton" class="secondary preview-voice" type="button">▶ Test voice</button>
+            <section class="connection-field voice-field">
+              <label for="voiceInput">Lumi voice</label>
+              <div class="voice-row">
+                <select id="voiceInput">
+                  <option value="Zephyr">Zephyr - Bright</option>
+                  <option value="Puck">Puck - Upbeat</option>
+                  <option value="Charon">Charon - Informative</option>
+                  <option value="Kore">Kore - Firm</option>
+                  <option value="Fenrir">Fenrir - Excitable</option>
+                  <option value="Leda">Leda - Youthful</option>
+                  <option value="Orus">Orus - Firm</option>
+                  <option value="Aoede">Aoede - Breezy</option>
+                  <option value="Callirrhoe">Callirrhoe - Easy-going</option>
+                  <option value="Autonoe">Autonoe - Bright</option>
+                  <option value="Enceladus">Enceladus - Breathy</option>
+                  <option value="Iapetus">Iapetus - Clear</option>
+                  <option value="Umbriel">Umbriel - Easy-going</option>
+                  <option value="Algieba">Algieba - Smooth</option>
+                  <option value="Despina">Despina - Smooth</option>
+                  <option value="Erinome">Erinome - Clear</option>
+                  <option value="Algenib">Algenib - Gravelly</option>
+                  <option value="Rasalgethi">Rasalgethi - Informative</option>
+                  <option value="Laomedeia">Laomedeia - Upbeat</option>
+                  <option value="Achernar">Achernar - Soft</option>
+                  <option value="Alnilam">Alnilam - Firm</option>
+                  <option value="Schedar">Schedar - Even</option>
+                  <option value="Gacrux">Gacrux - Mature</option>
+                  <option value="Pulcherrima">Pulcherrima - Forward</option>
+                  <option value="Achird">Achird - Friendly</option>
+                  <option value="Zubenelgenubi">Zubenelgenubi - Casual</option>
+                  <option value="Vindemiatrix">Vindemiatrix - Gentle</option>
+                  <option value="Sadachbia">Sadachbia - Lively</option>
+                  <option value="Sadaltager">Sadaltager - Knowledgeable</option>
+                  <option value="Sulafat">Sulafat - Warm</option>
+                </select>
+                <button id="previewVoiceButton" class="secondary preview-voice" type="button">▶ Test voice</button>
+              </div>
+              <p class="field-help">Used for spoken responses and previews.</p>
+            </section>
           </div>
           <button id="saveSettingsButton" class="primary" type="button">Save</button>
           <p id="saveNote" class="note" role="status">Saved only on this device.</p>

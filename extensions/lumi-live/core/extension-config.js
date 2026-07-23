@@ -8,6 +8,7 @@ export const EXTENSION_EVENTS = Object.freeze({
 export const STORAGE_KEYS = Object.freeze({
   apiKey: "lumiGeminiApiKey",
   avatarMode: "lumiAvatarMode",
+  capturedTabAssets: "lumiCapturedTabAssets",
   elementHighlights: "lumiShowElementHighlights",
   fallingPetals: "lumiFallingPetals",
   legacyMcpUrl: "lumiMcpServerUrl",
@@ -15,6 +16,7 @@ export const STORAGE_KEYS = Object.freeze({
   mcpConnectorCredentials: "lumiMcpConnectorCredentials",
   mcpServers: "lumiMcpServers",
   mcpToolPolicies: "lumiMcpToolPolicies",
+  microphoneEnabled: "lumiMicrophoneEnabled",
   microphoneGrantedAt: "lumiMicrophoneGrantedAt",
   targetTabId: "lumiLiveTargetTabId",
   thinkingLevel: "lumiGeminiThinkingLevel",

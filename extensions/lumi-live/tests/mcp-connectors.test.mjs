@@ -13,6 +13,7 @@ import {
   normalizeRedmineBaseUrl,
   RedmineMcpClient,
 } from "../background/redmine-mcp-client.js";
+import { saveCapturedTabAsset } from "../background/captured-tab-assets.js";
 
 test("ships the expected extension-only connector catalog", () => {
   assert.deepEqual(MCP_CONNECTORS.map((connector) => connector.id), ["notion", "redmine"]);
@@ -245,6 +246,72 @@ test("Redmine write tools send the expected REST payload", async () => {
     });
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("Redmine uploads a captured tab image and attaches its token to a new issue", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalChrome = globalThis.chrome;
+  const sessionValues = {};
+  const requests = [];
+  globalThis.chrome = {
+    storage: {
+      session: {
+        async get(key) {
+          return { [key]: sessionValues[key] };
+        },
+        async set(values) {
+          Object.assign(sessionValues, values);
+        },
+      },
+    },
+  };
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options });
+    if (String(url).includes("/uploads.json")) {
+      return new Response(JSON.stringify({ upload: { token: "capture-token" } }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ issue: { id: 43 } }), {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const asset = await saveCapturedTabAsset({
+      dataUrl: "data:image/jpeg;base64,AQIDBA==",
+      filename: "active-tab.jpg",
+      source: { tabId: 7, title: "Active tab", url: "https://example.com/" },
+    });
+    const client = new RedmineMcpClient("https://redmine.example.com", "redmine-key");
+    const result = await client.callTool("redmine_create_issue", {
+      projectId: "lumi",
+      subject: "Issue with screenshot",
+      attachmentId: asset.id,
+    });
+
+    assert.equal(result.issue.id, 43);
+    assert.equal(requests.length, 2);
+    assert.match(requests[0].url, /\/uploads\.json\?filename=active-tab\.jpg$/);
+    assert.equal(requests[0].options.headers["Content-Type"], "application/octet-stream");
+    assert.deepEqual([...requests[0].options.body], [1, 2, 3, 4]);
+    assert.deepEqual(JSON.parse(requests[1].options.body), {
+      issue: {
+        project_id: "lumi",
+        subject: "Issue with screenshot",
+        uploads: [{
+          token: "capture-token",
+          filename: "active-tab.jpg",
+          content_type: "image/jpeg",
+        }],
+      },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.chrome = originalChrome;
   }
 });
 

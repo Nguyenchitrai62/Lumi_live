@@ -1,3 +1,5 @@
+import { getCapturedTabAsset } from "./captured-tab-assets.js";
+
 const REDMINE_REQUEST_TIMEOUT_MS = 20_000;
 
 export function normalizeRedmineBaseUrl(rawUrl) {
@@ -96,6 +98,7 @@ const REDMINE_TOOLS = Object.freeze([
         priorityId: { type: "integer", minimum: 1 },
         assignedToId: { type: "integer", minimum: 1 },
         dueDate: { type: "string", description: "Date in YYYY-MM-DD format." },
+        attachmentId: { type: "string", description: "Optional Lumi attachmentId returned by browser_capture_screenshot. The captured JPEG will be uploaded and attached to the new issue." },
       },
       required: ["projectId", "subject"],
       additionalProperties: false,
@@ -115,6 +118,7 @@ const REDMINE_TOOLS = Object.freeze([
         assignedToId: { type: "integer", minimum: 1 },
         doneRatio: { type: "integer", minimum: 0, maximum: 100 },
         dueDate: { type: ["string", "null"], description: "Date in YYYY-MM-DD format, or null to clear." },
+        attachmentId: { type: "string", description: "Optional Lumi attachmentId returned by browser_capture_screenshot. The captured JPEG will be uploaded and attached to this issue." },
       },
       required: ["issueId"],
       additionalProperties: false,
@@ -140,7 +144,7 @@ function cleanObject(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
 }
 
-function issuePayload(args, includeProject = false) {
+function issuePayload(args, includeProject = false, uploads = []) {
   return cleanObject({
     project_id: includeProject ? args.projectId : undefined,
     subject: args.subject,
@@ -151,7 +155,19 @@ function issuePayload(args, includeProject = false) {
     assigned_to_id: args.assignedToId,
     done_ratio: args.doneRatio,
     due_date: args.dueDate,
+    uploads: uploads.length ? uploads : undefined,
   });
+}
+
+function capturedDataUrlBytes(dataUrl) {
+  const match = String(dataUrl || "").match(/^data:image\/(?:jpeg|png);base64,([a-z0-9+/=\s]+)$/i);
+  if (!match) throw new Error("The Lumi attachment is not a supported captured image.");
+  const binary = atob(match[1].replace(/\s+/g, ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
 function localDateString(date = new Date()) {
@@ -200,7 +216,14 @@ export class RedmineMcpClient {
     this.instructions = "Use Redmine read tools for project context. Ask for explicit user approval before create, update, or note actions.";
   }
 
-  async request(path, { method = "GET", query, body, signal } = {}) {
+  async request(path, {
+    method = "GET",
+    query,
+    body,
+    rawBody,
+    contentType = "application/json",
+    signal,
+  } = {}) {
     const url = new URL(`${this.url}/${String(path).replace(/^\/+/g, "")}`);
     for (const [name, value] of Object.entries(query || {})) {
       if (value !== undefined && value !== null && value !== "") url.searchParams.set(name, String(value));
@@ -219,10 +242,12 @@ export class RedmineMcpClient {
         method,
         headers: {
           Accept: "application/json",
-          "Content-Type": "application/json",
+          "Content-Type": contentType,
           "X-Redmine-API-Key": this.apiKey,
         },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body: rawBody === undefined
+          ? body === undefined ? undefined : JSON.stringify(body)
+          : rawBody,
         signal: controller.signal,
         cache: "no-store",
       });
@@ -312,6 +337,34 @@ export class RedmineMcpClient {
     };
   }
 
+  async uploadCapturedAttachment(attachmentId, options = {}) {
+    const asset = await getCapturedTabAsset(attachmentId);
+    if (!asset) {
+      throw new Error("That Lumi attachment is unavailable or expired. Capture the active tab again.");
+    }
+    const upload = await this.request("uploads.json", {
+      method: "POST",
+      query: { filename: asset.filename },
+      rawBody: capturedDataUrlBytes(asset.dataUrl),
+      contentType: "application/octet-stream",
+      signal: options.signal,
+    });
+    const token = String(upload?.upload?.token || "").trim();
+    if (!token) throw new Error("Redmine uploaded the screenshot but did not return an attachment token.");
+    return {
+      token,
+      filename: asset.filename,
+      content_type: asset.contentType || "image/jpeg",
+    };
+  }
+
+  async prepareUploads(args = {}, options = {}) {
+    const attachmentId = String(args.attachmentId || "").trim();
+    return attachmentId
+      ? [await this.uploadCapturedAttachment(attachmentId, options)]
+      : [];
+  }
+
   async callTool(name, args = {}, options = {}) {
     if (name === "redmine_get_current_user") {
       return this.request("users/current.json", { signal: options.signal });
@@ -344,9 +397,10 @@ export class RedmineMcpClient {
       if (!String(args.subject || "").trim() || args.projectId === undefined) {
         throw new Error("Redmine projectId and subject are required.");
       }
+      const uploads = await this.prepareUploads(args, options);
       return this.request("issues.json", {
         method: "POST",
-        body: { issue: issuePayload(args, true) },
+        body: { issue: issuePayload(args, true, uploads) },
         signal: options.signal,
       });
     }
@@ -354,14 +408,15 @@ export class RedmineMcpClient {
     if (!Number.isInteger(issueId) || issueId < 1) throw new Error("A positive Redmine issueId is required.");
     if (name === "redmine_get_issue") {
       return this.request(`issues/${issueId}.json`, {
-        query: { include: "journals,relations" },
+        query: { include: "journals,relations,attachments" },
         signal: options.signal,
       });
     }
     if (name === "redmine_update_issue") {
+      const uploads = await this.prepareUploads(args, options);
       return this.request(`issues/${issueId}.json`, {
         method: "PUT",
-        body: { issue: issuePayload(args) },
+        body: { issue: issuePayload(args, false, uploads) },
         signal: options.signal,
       });
     }

@@ -32,6 +32,7 @@ import {
   getTranscriptRevealDurationMs,
   splitTranscriptCharacters,
 } from "./transcript-presentation.js";
+import { isSafeMarkdownUrl, renderMarkdown } from "./markdown-renderer.js";
 import { applyUiConfig } from "./apply-ui-config.js";
 import {
   AVATAR_ERROR_STATE_DURATION_MS,
@@ -56,6 +57,7 @@ import {
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
 const VOICE_STORAGE_KEY = STORAGE_KEYS.voice;
+const MICROPHONE_ENABLED_STORAGE_KEY = STORAGE_KEYS.microphoneEnabled;
 const MICROPHONE_GRANTED_STORAGE_KEY = STORAGE_KEYS.microphoneGrantedAt;
 const PETALS_STORAGE_KEY = STORAGE_KEYS.fallingPetals;
 const AVATAR_MODE_STORAGE_KEY = STORAGE_KEYS.avatarMode;
@@ -129,7 +131,10 @@ let sessionStatus = "idle";
 let sessionStartPending = false;
 let intentionalClose = false;
 let sessionReadyAt = 0;
-let isMuted = false;
+let microphoneEnabled = false;
+let microphoneWarning = "";
+let microphonePermissionHelp = false;
+let isMuted = true;
 let agentTurnActive = false;
 let turnCancellationPending = false;
 let turnExecutionSequence = 0;
@@ -499,7 +504,7 @@ function setSessionStatus(nextStatus, message) {
   elements.startButton.disabled = nextStatus === "connecting";
   elements.startButton.classList.toggle("live", nextStatus === "ready");
   elements.startButton.querySelector("span:last-child").textContent = nextStatus === "ready"
-    ? "End voice"
+    ? "Disconnect"
     : nextStatus === "connecting" ? "Connecting…" : nextStatus === "error" ? "Retry" : "Connect";
   elements.muteButton.disabled = nextStatus !== "ready";
   elements.thinkingButton.disabled = false;
@@ -524,6 +529,7 @@ function describeStartError(error) {
   if (name === "NotAllowedError" || name === "SecurityError") {
     return {
       microphone: true,
+      permissionHelp: true,
       message: "Chrome has not allowed Lumi to use the microphone. Press Enable microphone and follow the permission tab.",
     };
   }
@@ -533,7 +539,7 @@ function describeStartError(error) {
   if (name === "NotReadableError" || name === "AbortError") {
     return { microphone: true, message: "The microphone is busy or unavailable. Close other apps using it, then retry." };
   }
-  return { microphone: false, message: original || "Could not start Gemini Live voice." };
+  return { microphone: false, permissionHelp: false, message: original || "Could not connect to Gemini Live." };
 }
 
 async function queryMicrophonePermission() {
@@ -552,7 +558,11 @@ async function refreshMicrophonePermission() {
 async function openMicrophonePermissionPage() {
   await chrome.tabs.create({ url: chrome.runtime.getURL("settings/microphone-permission.html"), active: true });
   elements.microphoneHelpButton.hidden = false;
-  setSessionStatus("idle", "A Lumi permission tab opened. Choose Allow there, then return; voice will connect automatically.");
+  if (sessionStatus === "ready") {
+    elements.statusLine.textContent = "A microphone permission tab opened. Chat remains connected while you choose Allow.";
+    return;
+  }
+  setSessionStatus("idle", "A Lumi permission tab opened. Choose Allow there, then return; Lumi will connect automatically.");
 }
 
 async function validateGeminiApiKey(apiKey) {
@@ -705,9 +715,16 @@ function scrollTranscriptToLatest({ smooth = false } = {}) {
   elements.transcript.scrollTop = top;
 }
 
+function setVisibleTranscriptText(message, text) {
+  const visibleText = String(text || "");
+  message.visibleText = visibleText;
+  if (message.role === "lumi") renderMarkdown(message.content, visibleText);
+  else message.content.textContent = visibleText;
+}
+
 function revealTranscriptText(message, targetText) {
   const targetCharacters = splitTranscriptCharacters(targetText);
-  const visibleText = message.content.textContent || "";
+  const visibleText = message.visibleText || "";
   const stableCharacterCount = findCommonCharacterPrefix(visibleText, targetText);
   const remainingCharacterCount = Math.max(0, targetCharacters.length - stableCharacterCount);
   cancelAnimationFrame(message.revealFrameId);
@@ -715,21 +732,27 @@ function revealTranscriptText(message, targetText) {
 
   if (!remainingCharacterCount
     || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true) {
-    message.content.textContent = targetText;
+    setVisibleTranscriptText(message, targetText);
     scrollTranscriptToLatest();
     return;
   }
 
   const duration = getTranscriptRevealDurationMs(remainingCharacterCount);
   const startedAt = performance.now();
-  message.content.textContent = targetCharacters.slice(0, stableCharacterCount).join("");
+  setVisibleTranscriptText(
+    message,
+    targetCharacters.slice(0, stableCharacterCount).join(""),
+  );
   activeTranscriptReveals.add(message);
 
   const revealFrame = (now) => {
     const progress = Math.min(1, (now - startedAt) / duration);
     const visibleCharacterCount = stableCharacterCount
       + Math.ceil(remainingCharacterCount * progress);
-    message.content.textContent = targetCharacters.slice(0, visibleCharacterCount).join("");
+    setVisibleTranscriptText(
+      message,
+      targetCharacters.slice(0, visibleCharacterCount).join(""),
+    );
     scrollTranscriptToLatest();
     if (progress < 1) {
       message.revealFrameId = requestAnimationFrame(revealFrame);
@@ -771,9 +794,11 @@ function createMessage(role, text) {
       article: details,
       body,
       content,
+      role,
       summary,
       status,
       text,
+      visibleText: text,
     };
     message.disclosure = attachAnimatedDisclosure({
       root: details,
@@ -788,12 +813,37 @@ function createMessage(role, text) {
   article.className = `message message-${role}`;
   const author = document.createElement("span");
   author.textContent = role === "lumi" ? "Lumi" : "You";
-  const content = document.createElement("p");
+  const content = document.createElement(role === "lumi" ? "div" : "p");
+  if (role === "lumi") content.className = "message-content";
   content.textContent = text;
   article.append(author, content);
   elements.transcript.append(article);
   scrollTranscriptToLatest();
-  return { article, content, text };
+  return { article, content, role, text, visibleText: text };
+}
+
+function createCapturedTabMessage(capture) {
+  if (!/^data:image\/(?:jpeg|png);base64,/i.test(capture?.previewDataUrl || "")) return;
+  const article = document.createElement("article");
+  article.className = "message message-lumi message-capture";
+  const author = document.createElement("span");
+  author.textContent = "Captured tab";
+  const figure = document.createElement("figure");
+  const image = document.createElement("img");
+  image.src = capture.previewDataUrl;
+  image.alt = `Screenshot of ${capture.source?.title || "the active tab"}`;
+  const caption = document.createElement("figcaption");
+  const title = document.createElement("strong");
+  title.textContent = capture.source?.title || capture.filename || "Active tab";
+  const download = document.createElement("a");
+  download.href = capture.previewDataUrl;
+  download.download = capture.filename || "lumi-tab-capture.jpg";
+  download.textContent = "Save image";
+  caption.append(title, download);
+  figure.append(image, caption);
+  article.append(author, figure);
+  elements.transcript.append(article);
+  scrollTranscriptToLatest({ smooth: true });
 }
 
 function updateTranscript(role, incoming) {
@@ -806,7 +856,10 @@ function updateTranscript(role, incoming) {
   const wasPlaceholder = role === "thinking" && message.placeholder;
   message.text = wasPlaceholder ? clean : mergeTranscriptText(message.text, clean);
   message.placeholder = false;
-  if (wasPlaceholder) message.content.textContent = "";
+  if (wasPlaceholder) {
+    message.content.textContent = "";
+    message.visibleText = "";
+  }
   if (role === "thinking" || role === "lumi") revealTranscriptText(message, message.text);
   else message.content.textContent = message.text;
   if (role === "thinking") {
@@ -834,6 +887,13 @@ function finalizeTranscript(role) {
   const message = partialMessages[role];
   if ((role === "user" || role === "lumi") && message?.text) {
     rememberConversationTurn(role, message.text);
+  }
+  if (role === "lumi" && message?.text) {
+    cancelAnimationFrame(message.revealFrameId);
+    activeTranscriptReveals.delete(message);
+    renderMarkdown(message.content, message.text);
+    message.visibleText = message.text;
+    scrollTranscriptToLatest();
   }
   if (role === "thinking" && partialMessages.thinking) {
     partialMessages.thinking.article.dataset.state = "complete";
@@ -867,15 +927,15 @@ function setLiveTranslationBadge(state, detail = "") {
   if (sessionStatus === "ready") {
     elements.startButton.querySelector("span:last-child").textContent =
       state === "active" || state === "connecting" || state === "reconnecting"
-        ? "End voice + translate"
-        : "End voice";
+        ? "Disconnect + stop translate"
+        : "Disconnect";
   }
 }
 
 async function runLiveTranslationTool(args = {}) {
   const action = String(args.action || "").trim().toLowerCase();
   if (!activeApiKey) {
-    throw new Error("Start the Lumi voice session before using Live Translate.");
+    throw new Error("Connect Lumi before using Live Translate.");
   }
   if (action === "status") {
     return sendRuntime("live_translation_status");
@@ -950,7 +1010,12 @@ async function runBrowserTool(tool, args) {
   const isUiAction = BROWSER_UI_ACTION_TOOLS.has(tool);
   avatarController.transitionState(isUiAction ? "ui_control" : "thinking");
   try {
-    const result = await sendRuntime("browser_tool", { tool, args });
+    let result = await sendRuntime("browser_tool", { tool, args });
+    if (tool === "browser_capture_screenshot" && result?.previewDataUrl) {
+      createCapturedTabMessage(result);
+      result = { ...result };
+      delete result.previewDataUrl;
+    }
     if (isUiAction) {
       avatarController.transitionState("success", {
         forMs: AVATAR_SUCCESS_STATE_DURATION_MS,
@@ -1033,7 +1098,12 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
     const reconnectingExistingConversation = hasConnectedInPanelLifetime;
     sendJson(buildInitialHistoryClientContent(conversationHistory), sourceSocket);
     hasConnectedInPanelLifetime = true;
-    setSessionStatus("ready", "Lumi is listening. PageAgent automatically follows your active web tab.");
+    const readyMessage = microphoneWarning
+      || (isMuted
+        ? "Chat is ready. Microphone is off; turn it on whenever you want to speak."
+        : "Lumi is listening. PageAgent automatically follows your active web tab.");
+    setSessionStatus("ready", readyMessage);
+    elements.microphoneHelpButton.hidden = !microphonePermissionHelp;
     if (queuedUserMessages.length) {
       flushQueuedUserMessage();
     } else if (!reconnectingExistingConversation && !conversationHistory.length) {
@@ -1238,7 +1308,7 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
 }
 
 function openGeminiSocket({ apiKey, voiceName, thinkingLevel: sessionThinkingLevel, mcpInfo, mcpFunctionDeclarations, activeTabContext }) {
-  setSessionStatus("connecting", "Microphone is ready. Opening Gemini Live...");
+  setSessionStatus("connecting", "Opening Gemini Live...");
   sessionReadyAt = 0;
   const functionDeclarations = [...BUILTIN_TOOLS, ...mcpFunctionDeclarations];
   websocket = new WebSocket(`${WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`);
@@ -1368,20 +1438,20 @@ async function startSession() {
       API_KEY_STORAGE_KEY,
       VOICE_STORAGE_KEY,
       THINKING_LEVEL_STORAGE_KEY,
+      MICROPHONE_ENABLED_STORAGE_KEY,
     ]);
     const apiKey = String(stored[API_KEY_STORAGE_KEY] || "").trim();
     const voiceName = String(stored[VOICE_STORAGE_KEY] || DEFAULT_VOICE_NAME);
     const sessionThinkingLevel = normalizeThinkingLevel(stored[THINKING_LEVEL_STORAGE_KEY]);
+    microphoneEnabled = stored[MICROPHONE_ENABLED_STORAGE_KEY] === true;
+    isMuted = true;
+    microphoneWarning = "";
+    microphonePermissionHelp = false;
+    syncMuteButton();
     if (!apiKey) {
-      const message = "Add a Gemini API key in Lumi Settings before connecting voice.";
+      const message = "Add a Gemini API key in Lumi Settings before connecting.";
       setSessionStatus("error", message);
       showMissingKeyNotice(message);
-      return;
-    }
-
-    const microphonePermission = await refreshMicrophonePermission();
-    if (microphonePermission !== "granted") {
-      await openMicrophonePermissionPage();
       return;
     }
 
@@ -1391,18 +1461,31 @@ async function startSession() {
     resetMcpSessionFailures();
     hideConnectionNotice();
     elements.microphoneHelpButton.hidden = true;
-    setSessionStatus("connecting", "Checking the Gemini key and requesting microphone access…");
+    setSessionStatus("connecting", "Checking the Gemini key and preparing chat…");
     try {
       const mcpInfo = await sendRuntime("mcp_get_tools");
       notifyInvalidMcpSchemas(mcpInfo);
       const mcpFunctionDeclarations = configureMcpTools(mcpInfo, activeMcpTools);
-      if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error("Microphone access is unavailable in Lumi Live. Update Chrome and reopen the extension.");
-      }
-      await panelAudio.requestMicrophone();
-      setSessionStatus("connecting", "Microphone is ready. Checking the Gemini API key…");
       await validateGeminiApiKey(apiKey);
-      await panelAudio.startMicrophone();
+      await panelAudio.prepareOutput();
+      if (microphoneEnabled) {
+        try {
+          if (!navigator.mediaDevices?.getUserMedia) {
+            throw new Error("Microphone access is unavailable in this version of Chrome.");
+          }
+          await panelAudio.requestMicrophone();
+          await panelAudio.startMicrophone();
+          isMuted = false;
+          syncMuteButton();
+        } catch (microphoneError) {
+          panelAudio.stopMicrophone();
+          isMuted = true;
+          const diagnosis = describeStartError(microphoneError);
+          microphoneWarning = `${diagnosis.message} Chat is still connected.`;
+          microphonePermissionHelp = diagnosis.permissionHelp === true;
+          syncMuteButton();
+        }
+      }
       activeApiKey = apiKey;
 
       const activeTabContext = await sendRuntime("browser_tool", {
@@ -1424,7 +1507,7 @@ async function startSession() {
       activeSocket?.close();
       cleanupMedia();
       const diagnosis = describeStartError(error);
-      elements.microphoneHelpButton.hidden = !diagnosis.microphone;
+      elements.microphoneHelpButton.hidden = !diagnosis.permissionHelp;
       setSessionStatus("error", diagnosis.message);
       if (!diagnosis.microphone) {
         if (isGeminiKeyIssue(diagnosis.message)) showMissingKeyNotice(diagnosis.message);
@@ -1440,15 +1523,9 @@ async function autoStartSessionIfReady() {
   if (sessionStatus === "connecting" || sessionStatus === "ready") return false;
   const stored = await chrome.storage.local.get(API_KEY_STORAGE_KEY);
   if (!String(stored[API_KEY_STORAGE_KEY] || "").trim()) {
-    const message = "Add a Gemini API key in Lumi Settings before connecting voice.";
+    const message = "Add a Gemini API key in Lumi Settings before connecting.";
     setSessionStatus("idle", message);
     showMissingKeyNotice(message);
-    return false;
-  }
-  const microphonePermission = await refreshMicrophonePermission();
-  if (microphonePermission !== "granted") {
-    setSessionStatus("idle", "Allow microphone once; Lumi will connect automatically when permission is ready.");
-    elements.microphoneHelpButton.hidden = false;
     return false;
   }
   await startSession();
@@ -1456,7 +1533,7 @@ async function autoStartSessionIfReady() {
 }
 
 function syncMuteButton() {
-  const label = isMuted ? "Unmute microphone" : "Mute microphone";
+  const label = isMuted ? "Turn on microphone" : "Turn off microphone";
   elements.muteButton.setAttribute("aria-pressed", String(isMuted));
   elements.muteButton.setAttribute("aria-label", label);
   elements.muteButton.title = label;
@@ -1471,7 +1548,7 @@ function cleanupMedia() {
   cancelPendingMcpPermissionPrompts();
   cancelPendingSharedTabAudioPrompt?.();
   sharedTabAudio.stop();
-  cancelPendingMcpActivities("The voice session ended before this MCP tool call completed.");
+  cancelPendingMcpActivities("The session ended before this MCP tool call completed.");
   void sendRuntime("release_tab_audio").catch(() => {});
   pendingToolCallIds.clear();
   pendingToolCallNames.clear();
@@ -1482,7 +1559,10 @@ function cleanupMedia() {
   panelAudio.closeSession();
   responseAudioGate.reset();
   websocket = null;
-  isMuted = false;
+  isMuted = true;
+  microphoneWarning = "";
+  microphonePermissionHelp = false;
+  elements.microphoneHelpButton.hidden = true;
   agentTurnActive = false;
   turnCancellationPending = false;
   suppressServerOutputUntilNextUserTurn = false;
@@ -1513,12 +1593,61 @@ async function restartSessionWithContext(message) {
   await startSession();
 }
 
-function toggleMute() {
+async function enableMicrophone({ persistPreference = true } = {}) {
+  if (sessionStatus !== "ready" || !isMuted) return !isMuted;
+  microphoneEnabled = true;
+  if (persistPreference) {
+    await chrome.storage.local.set({ [MICROPHONE_ENABLED_STORAGE_KEY]: true });
+  }
+  elements.muteButton.disabled = true;
+  elements.statusLine.textContent = "Turning on microphone…";
+
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Microphone access is unavailable in this version of Chrome.");
+    }
+    await panelAudio.requestMicrophone();
+    await panelAudio.startMicrophone();
+    isMuted = false;
+    microphoneWarning = "";
+    microphonePermissionHelp = false;
+    elements.microphoneHelpButton.hidden = true;
+    elements.statusLine.textContent = "Microphone is on. You can speak or continue typing.";
+    return true;
+  } catch (error) {
+    panelAudio.stopMicrophone();
+    isMuted = true;
+    const diagnosis = describeStartError(error);
+    microphoneWarning = `${diagnosis.message} Chat is still connected.`;
+    microphonePermissionHelp = diagnosis.permissionHelp === true;
+    elements.microphoneHelpButton.hidden = !microphonePermissionHelp;
+    elements.statusLine.textContent = microphoneWarning;
+    return false;
+  } finally {
+    elements.muteButton.disabled = sessionStatus !== "ready";
+    syncMuteButton();
+    avatarController.syncState();
+  }
+}
+
+async function toggleMute() {
   if (sessionStatus !== "ready") return;
-  isMuted = !isMuted;
+  if (isMuted) {
+    await enableMicrophone();
+    return;
+  }
+
+  microphoneEnabled = false;
+  isMuted = true;
+  microphoneWarning = "";
+  microphonePermissionHelp = false;
+  panelAudio.stopMicrophone();
+  sendJson({ realtimeInput: { audioStreamEnd: true } });
+  await chrome.storage.local.set({ [MICROPHONE_ENABLED_STORAGE_KEY]: false });
+  elements.microphoneHelpButton.hidden = true;
+  elements.statusLine.textContent = "Microphone is off. Chat remains connected.";
   syncMuteButton();
   avatarController.syncState();
-  if (isMuted) sendJson({ realtimeInput: { audioStreamEnd: true } });
 }
 
 function sendText(text, { clearComposer = true, render = true, remember = true } = {}) {
@@ -1704,6 +1833,16 @@ document.addEventListener("keydown", (event) => {
 elements.mcpToolNoticePrimary.addEventListener("click", () => void handleMcpToolNoticeAction("primary"));
 elements.mcpToolNoticeSecondary.addEventListener("click", () => void handleMcpToolNoticeAction("secondary"));
 elements.mcpToolNoticeTertiary.addEventListener("click", () => void handleMcpToolNoticeAction("tertiary"));
+elements.transcript.addEventListener("click", (event) => {
+  const link = event.target.closest?.(".markdown-body a[href]");
+  if (!link) return;
+  event.preventDefault();
+  const url = link.getAttribute("href");
+  if (!isSafeMarkdownUrl(url)) return;
+  void chrome.tabs.create({ url, active: true }).catch((error) => {
+    elements.statusLine.textContent = `Could not open link: ${error.message}`;
+  });
+});
 elements.messageInput.addEventListener("input", () => {
   resizeMessageInput();
   syncMessageComposer();
@@ -1767,7 +1906,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     const nextApiKey = String(changes[API_KEY_STORAGE_KEY].newValue || "").trim();
     if (!nextApiKey) {
       if (sessionStatus === "ready" || sessionStatus === "connecting") stopSession();
-      const message = "Add a Gemini API key in Lumi Settings before connecting voice.";
+      const message = "Add a Gemini API key in Lumi Settings before connecting.";
       setSessionStatus("error", message);
       showMissingKeyNotice(message);
     } else if (sessionStatus !== "ready" && DEFAULT_AUTO_CONNECT_ENABLED) {
@@ -1778,8 +1917,12 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
   if (!changes[MICROPHONE_GRANTED_STORAGE_KEY]) return;
   if (changes[MICROPHONE_GRANTED_STORAGE_KEY].newValue && DEFAULT_AUTO_CONNECT_ENABLED) {
-    setSessionStatus("idle", "Microphone allowed. Connecting Lumi automatically…");
-    void autoStartSessionIfReady();
+    if (sessionStatus === "ready" && microphoneEnabled && isMuted) {
+      void enableMicrophone({ persistPreference: false });
+    } else if (sessionStatus !== "ready") {
+      setSessionStatus("idle", "Microphone allowed. Connecting Lumi automatically…");
+      void autoStartSessionIfReady();
+    }
   } else {
     void refreshMicrophonePermission();
   }
@@ -1812,8 +1955,15 @@ async function initialize() {
     PETALS_STORAGE_KEY,
     AVATAR_MODE_STORAGE_KEY,
     THINKING_LEVEL_STORAGE_KEY,
+    MICROPHONE_ENABLED_STORAGE_KEY,
   ]);
   const savedKey = String(stored[API_KEY_STORAGE_KEY] || "").trim();
+  microphoneEnabled = stored[MICROPHONE_ENABLED_STORAGE_KEY] === true;
+  isMuted = true;
+  syncMuteButton();
+  if (typeof stored[MICROPHONE_ENABLED_STORAGE_KEY] !== "boolean") {
+    await chrome.storage.local.set({ [MICROPHONE_ENABLED_STORAGE_KEY]: false });
+  }
   const storedPetals = stored[PETALS_STORAGE_KEY];
   applyPetals(typeof storedPetals === "boolean"
     ? storedPetals
@@ -1829,17 +1979,17 @@ async function initialize() {
   }
   await avatarController.applyMode(storedAvatarMode);
   if (!savedKey) {
-    const message = "Add a Gemini API key in Lumi Settings before connecting voice.";
+    const message = "Add a Gemini API key in Lumi Settings before connecting.";
     setSessionStatus("idle", message);
     showMissingKeyNotice(message);
   } else {
-    setSessionStatus("idle", "Preparing automatic voice connection…");
+    setSessionStatus("idle", "Preparing automatic connection…");
   }
   await refreshTarget();
   const translationStatus = await sendRuntime("live_translation_status").catch(() => null);
   if (translationStatus?.prepared) {
     setLiveTranslationBadge(translationStatus.state || "off", translationStatus.targetLanguageCode || "");
-    elements.statusLine.textContent = "Video audio is prepared. Connecting voice automatically…";
+    elements.statusLine.textContent = "Video audio is prepared. Connecting automatically…";
   }
   panelAudio.startAnimations();
   setInterval(refreshTarget, TARGET_REFRESH_INTERVAL_MS);

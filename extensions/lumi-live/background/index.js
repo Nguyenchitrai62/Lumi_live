@@ -5,6 +5,7 @@ import {
 } from "../core/active-tab-context.js";
 import { EXTENSION_EVENTS, STORAGE_KEYS } from "../core/extension-config.js";
 import { normalizeVisualPreferences } from "../core/visual-preferences.js";
+import { saveCapturedTabAsset } from "./captured-tab-assets.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
@@ -401,6 +402,54 @@ function tabTransitionSearchText(url) {
   return String(url || "new tab");
 }
 
+function capturedTabFilename(requestedName, tabTitle) {
+  const baseName = String(requestedName || tabTitle || "lumi-tab-capture")
+    .replace(/[\\/:*?"<>|]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120)
+    || "lumi-tab-capture";
+  return /\.(?:jpe?g)$/i.test(baseName) ? baseName : `${baseName}.jpg`;
+}
+
+async function captureVisibleTab(args = {}, action) {
+  const tab = await getActiveTab();
+  if (!tab?.id || !isWebPage(tab.url)) {
+    throw new Error("No normal http/https tab is active to capture.");
+  }
+  trackBrowserActionTab(action, tab.id);
+  assertBrowserActionActive(action);
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+    format: "jpeg",
+    quality: 88,
+  });
+  assertBrowserActionActive(action);
+  const activeTab = await getActiveTab(tab.windowId);
+  if (activeTab?.id !== tab.id) {
+    throw new Error("The active tab changed while Lumi was taking the screenshot. Try again on the intended tab.");
+  }
+  const asset = await saveCapturedTabAsset({
+    dataUrl,
+    filename: capturedTabFilename(args.filename, tab.title),
+    contentType: "image/jpeg",
+    source: {
+      tabId: tab.id,
+      title: tab.title || "Active tab",
+      url: sanitizeActiveContextUrl(tab.url || ""),
+    },
+  });
+  return {
+    captured: true,
+    attachmentId: asset.id,
+    filename: asset.filename,
+    contentType: asset.contentType,
+    byteSize: asset.byteSize,
+    source: asset.source,
+    previewDataUrl: asset.dataUrl,
+    guidance: "Use attachmentId only in a connector tool that explicitly declares an attachmentId parameter.",
+  };
+}
+
 async function findExistingTabForUrl(url) {
   const focusedWindow = await chrome.windows.getLastFocused();
   const tabs = await chrome.tabs.query({ windowId: focusedWindow.id });
@@ -522,6 +571,7 @@ async function executeBrowserTool(tool, args = {}) {
   let timeoutId = null;
   const execute = async () => {
     if (tool === "browser_get_active_context") return getActivePageContext();
+    if (tool === "browser_capture_screenshot") return captureVisibleTab(args, action);
     if (tool === "browser_list_tabs") return listBrowserTabs();
     if (tool === "browser_open_tab") return openBrowserTab(args, action);
     if (tool === "browser_switch_tab") return switchBrowserTab(args, action);

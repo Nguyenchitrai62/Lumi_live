@@ -33,7 +33,20 @@ export function createPanelAudioController({
   let blinkTimeoutId = null;
   const playbackSources = new Set();
 
+  async function prepareOutput() {
+    if (!audioContext) {
+      audioContext = new AudioContext();
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = .45;
+      analyser.connect(audioContext.destination);
+      nextPlaybackTime = audioContext.currentTime;
+    }
+    if (audioContext.state === "suspended") await audioContext.resume();
+  }
+
   async function setupMicrophone(stream) {
+    if (micProcessor) return;
     await audioContext.audioWorklet.addModule(chrome.runtime.getURL("live/pcm-capture-worklet.js"));
     micSource = audioContext.createMediaStreamSource(stream);
     micProcessor = new AudioWorkletNode(audioContext, MIC_CAPTURE_PROCESSOR, {
@@ -156,13 +169,8 @@ export function createPanelAudioController({
   }
 
   async function requestMicrophone() {
-    audioContext = new AudioContext();
-    analyser = audioContext.createAnalyser();
-    analyser.fftSize = 256;
-    analyser.smoothingTimeConstant = .45;
-    analyser.connect(audioContext.destination);
-    nextPlaybackTime = audioContext.currentTime;
-    await audioContext.resume();
+    await prepareOutput();
+    if (micStream) return;
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
@@ -173,8 +181,7 @@ export function createPanelAudioController({
     await setupMicrophone(micStream);
   }
 
-  function closeSession() {
-    stopPlayback();
+  function stopMicrophone() {
     if (micProcessor) micProcessor.port.onmessage = null;
     micProcessor?.disconnect();
     micSource?.disconnect();
@@ -182,6 +189,11 @@ export function createPanelAudioController({
     micStream = null;
     micProcessor = null;
     micSource = null;
+  }
+
+  function closeSession() {
+    stopPlayback();
+    stopMicrophone();
     audioContext?.close().catch(() => {});
     audioContext = null;
     analyser = null;
@@ -202,9 +214,11 @@ export function createPanelAudioController({
     closeSession,
     dispose,
     playPcmChunk,
+    prepareOutput,
     requestMicrophone,
     startAnimations,
     startMicrophone,
+    stopMicrophone,
     stopPlayback,
   };
 }
