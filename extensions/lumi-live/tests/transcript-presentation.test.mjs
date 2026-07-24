@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   findCommonCharacterPrefix,
+  getLiveModelPartTranscriptRole,
 } from "../side-panel/transcript-presentation.js";
 import {
   BROWSER_ACTION_CLEANUP_DELAY_MS,
@@ -31,4 +32,23 @@ test("central UI config contains only tunable variables for visible behavior", (
 test("finds a Unicode-safe prefix when streamed transcript targets grow", () => {
   assert.equal(findCommonCharacterPrefix("Xin chào 👋", "Xin chào 👋 bạn"), 10);
   assert.equal(findCommonCharacterPrefix("abc", "axy"), 1);
+});
+
+test("routes only real Live model text to a visible transcript role", () => {
+  assert.equal(
+    getLiveModelPartTranscriptRole({ thought: true, text: "Checking the current tab." }),
+    "thinking",
+  );
+  assert.equal(
+    getLiveModelPartTranscriptRole({ text: "Here is what I found." }),
+    "lumi",
+  );
+  assert.equal(
+    getLiveModelPartTranscriptRole({ inlineData: { data: "audio" } }),
+    null,
+  );
+  assert.equal(
+    getLiveModelPartTranscriptRole({ thought: true, text: "   " }),
+    null,
+  );
 });

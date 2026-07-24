@@ -12,7 +12,9 @@ import {
   configureMcpTools,
   DEFAULT_THINKING_LEVEL,
   normalizeThinkingLevel,
+  shouldRefreshLiveContext,
   THINKING_LEVELS,
+  trimConversationHistory,
 } from "../live/session-config.js";
 
 test("builds bounded initial history without triggering a model turn", () => {
@@ -36,6 +38,25 @@ test("builds bounded initial history without triggering a model turn", () => {
   });
 });
 
+test("keeps only recent history beginning at a user turn", () => {
+  const history = Array.from({ length: 20 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" : "model",
+    text: `turn-${index}`,
+  }));
+  assert.deepEqual(
+    trimConversationHistory(history, { maxTurns: 5, maxChars: 1000 }),
+    history.slice(-4),
+  );
+  assert.deepEqual(
+    trimConversationHistory([
+      { role: "user", text: "old" },
+      { role: "model", text: "answer" },
+      { role: "user", text: "123456789" },
+    ], { maxTurns: 3, maxChars: 5 }),
+    [{ role: "user", text: "56789" }],
+  );
+});
+
 test("uses the configured Gemini Live thinking level and normalizes invalid values", () => {
   assert.deepEqual(THINKING_LEVELS, ["minimal", "low", "medium", "high"]);
   assert.equal(DEFAULT_THINKING_LEVEL, "low");
@@ -48,28 +69,34 @@ test("uses the configured Gemini Live thinking level and normalizes invalid valu
   });
 });
 
-test("configures token-free Live session rotation and bounded reconnect backoff", () => {
+test("uses resumable sockets without server-side context compression", () => {
   assert.deepEqual(buildSessionLifecycleConfig(), {
-    contextWindowCompression: { slidingWindow: {} },
     sessionResumption: {},
   });
   assert.deepEqual(buildSessionLifecycleConfig(" resume-handle "), {
-    contextWindowCompression: { slidingWindow: {} },
     sessionResumption: { handle: "resume-handle" },
   });
   assert.deepEqual(buildSessionHandshakeConfig(), {
-    contextWindowCompression: { slidingWindow: {} },
     sessionResumption: {},
     historyConfig: { initialHistoryInClientContent: true },
   });
   assert.deepEqual(buildSessionHandshakeConfig(" resume-handle "), {
-    contextWindowCompression: { slidingWindow: {} },
     sessionResumption: { handle: "resume-handle" },
   });
   assert.deepEqual(
     [1, 2, 3, 4, 5, 8].map(automaticSessionReconnectDelayMs),
     [250, 500, 1000, 2000, 4000, 8000],
   );
+});
+
+test("requests a fresh context only when Live usage approaches the model limit", () => {
+  assert.equal(shouldRefreshLiveContext(), false);
+  assert.equal(shouldRefreshLiveContext({ totalTokenCount: 99999 }), false);
+  assert.equal(shouldRefreshLiveContext({ promptTokenCount: 100000 }), true);
+  assert.equal(shouldRefreshLiveContext({
+    promptTokenCount: 90000,
+    totalTokenCount: 101000,
+  }), true);
 });
 
 test("grounds self-references and searches in the Lumi Live product identity", () => {

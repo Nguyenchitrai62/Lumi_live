@@ -27,3 +27,8 @@ export function getTranscriptRevealDurationMs(characterCount) {
     (count / TRANSCRIPT_REVEAL_CHARACTERS_PER_SECOND) * 1000,
   );
 }
+
+export function getLiveModelPartTranscriptRole(part) {
+  if (!String(part?.text || "").trim()) return null;
+  return part.thought === true ? "thinking" : "lumi";
+}

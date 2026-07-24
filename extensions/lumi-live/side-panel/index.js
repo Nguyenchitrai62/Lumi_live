@@ -24,6 +24,8 @@ import {
   normalizeThinkingLevel,
   SESSION_CONNECTION_ROTATION_MS,
   SESSION_ROTATION_RETRY_MS,
+  shouldRefreshLiveContext,
+  trimConversationHistory,
   WS_ENDPOINT,
 } from "../live/session-config.js";
 import {
@@ -34,6 +36,7 @@ import {
 import { mergeTranscriptText } from "../live/audio-utils.js";
 import {
   findCommonCharacterPrefix,
+  getLiveModelPartTranscriptRole,
   getTranscriptRevealDurationMs,
   splitTranscriptCharacters,
 } from "./transcript-presentation.js";
@@ -183,6 +186,7 @@ let automaticSessionReconnectAttempt = 0;
 let automaticSessionReconnectTimerId = null;
 let sessionRotationTimerId = null;
 let serverRotationPending = false;
+let contextRefreshPending = false;
 let backgroundSessionReconnectPending = false;
 let pendingSessionHandoffSocket = null;
 const AUTOMATIC_TAB_CAPTURE_ORIGINS = ["<all_urls>"];
@@ -835,6 +839,8 @@ function rememberConversationTurn(role, text) {
   const previous = conversationHistory.at(-1);
   if (previous?.role === normalizedRole && previous.text === clean) return;
   conversationHistory.push({ role: normalizedRole, text: clean });
+  const recentHistory = trimConversationHistory(conversationHistory);
+  conversationHistory.splice(0, conversationHistory.length, ...recentHistory);
 }
 
 function clearConversationContext() {
@@ -1099,18 +1105,6 @@ function updateTranscript(role, incoming) {
   scrollTranscriptToLatest();
 }
 
-function startThinkingTranscript() {
-  if (partialMessages.thinking) return;
-  partialMessages.thinking = createMessage("thinking", "Thinking…");
-  partialMessages.thinking.placeholder = true;
-}
-
-function collapseThinkingTranscript() {
-  const message = partialMessages.thinking;
-  if (!message) return;
-  message.disclosure.setExpanded(false);
-}
-
 function finalizeTranscript(role) {
   const message = partialMessages[role];
   if ((role === "user" || role === "lumi") && message?.text) {
@@ -1123,10 +1117,13 @@ function finalizeTranscript(role) {
     message.visibleText = message.text;
     scrollTranscriptToLatest();
   }
-  if (role === "thinking" && partialMessages.thinking) {
-    partialMessages.thinking.article.dataset.state = "complete";
-    partialMessages.thinking.status.textContent = "Complete";
-    partialMessages.thinking.disclosure.setExpanded(false);
+  if (role === "thinking" && message) {
+    cancelAnimationFrame(message.revealFrameId);
+    activeTranscriptReveals.delete(message);
+    setVisibleTranscriptText(message, message.text);
+    message.article.dataset.state = "complete";
+    message.status.textContent = "Complete";
+    scrollTranscriptToLatest();
   }
   partialMessages[role] = null;
 }
@@ -1188,18 +1185,27 @@ function armSessionRotation(delayMs = SESSION_CONNECTION_ROTATION_MS) {
       || websocket?.readyState !== WebSocket.OPEN
       || pendingSessionHandoffSocket
       || sessionHasInFlightWork()
-      || !sessionResumptionHandle
+      || (!sessionResumptionHandle && !contextRefreshPending)
     ) {
       armSessionRotation(SESSION_ROTATION_RETRY_MS);
       return;
     }
-    scheduleAutomaticSessionReconnect("Refreshing Gemini Live before its connection limit.");
+    scheduleAutomaticSessionReconnect(
+      contextRefreshPending
+        ? "Refreshing Gemini Live with recent context only."
+        : "Refreshing Gemini Live before its connection limit.",
+      { discardOldContext: contextRefreshPending },
+    );
   }, delayMs);
 }
 
 function scheduleAutomaticSessionReconnect(
   reason,
-  { delayMs = null, allowInFlight = false } = {},
+  {
+    delayMs = null,
+    allowInFlight = false,
+    discardOldContext = false,
+  } = {},
 ) {
   if (
     !shouldMaintainGeminiSession
@@ -1216,7 +1222,7 @@ function scheduleAutomaticSessionReconnect(
     && sessionStatus === "ready"
     && previousSocket?.readyState === WebSocket.OPEN
     && previousSocket.lumiSetupComplete
-    && sessionResumptionHandle,
+    && (discardOldContext || sessionResumptionHandle),
   );
   if (
     !allowInFlight
@@ -1240,6 +1246,7 @@ function scheduleAutomaticSessionReconnect(
     backgroundSessionReconnectPending = true;
     openGeminiSocket(sessionConnectionOptions, {
       background: true,
+      discardOldContext,
       predecessorSocket: previousSocket,
     });
     return true;
@@ -1261,7 +1268,10 @@ function scheduleAutomaticSessionReconnect(
   automaticSessionReconnectTimerId = setTimeout(() => {
     automaticSessionReconnectTimerId = null;
     if (!shouldMaintainGeminiSession || !sessionConnectionOptions) return;
-    openGeminiSocket(sessionConnectionOptions, { background: reconnectInBackground });
+    openGeminiSocket(sessionConnectionOptions, {
+      background: reconnectInBackground,
+      discardOldContext,
+    });
   }, reconnectDelayMs);
   return true;
 }
@@ -1289,6 +1299,7 @@ function resetSessionRecoveryState() {
   sessionResumptionHandle = "";
   automaticSessionReconnectAttempt = 0;
   serverRotationPending = false;
+  contextRefreshPending = false;
   backgroundSessionReconnectPending = false;
 }
 
@@ -1452,10 +1463,14 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
   const response = JSON.parse(raw);
   const completingHandoff = sourceSocket === pendingSessionHandoffSocket;
   if (sourceSocket !== websocket && !completingHandoff) return;
+  if (shouldRefreshLiveContext(response.usageMetadata)) {
+    contextRefreshPending = true;
+  }
 
   const resumptionUpdate = response.sessionResumptionUpdate;
   if (resumptionUpdate?.resumable && resumptionUpdate.newHandle) {
-    sessionResumptionHandle = resumptionUpdate.newHandle;
+    sourceSocket.lumiLatestResumptionHandle = resumptionUpdate.newHandle;
+    if (!completingHandoff) sessionResumptionHandle = resumptionUpdate.newHandle;
   }
   if (response.goAway) serverRotationPending = true;
   if (completingHandoff && !response.setupComplete) return;
@@ -1478,6 +1493,11 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
       pendingSessionHandoffSocket = null;
       websocket = sourceSocket;
       sourceSocket.lumiPredecessorSocket = null;
+      sessionResumptionHandle = sourceSocket.lumiLatestResumptionHandle || "";
+    }
+    if (sourceSocket.lumiDiscardOldContext) {
+      contextRefreshPending = false;
+      sessionResumptionHandle = sourceSocket.lumiLatestResumptionHandle || "";
     }
     sourceSocket.lumiSetupComplete = true;
     const completedInBackground = sourceSocket.lumiBackgroundReconnect === true;
@@ -1591,21 +1611,24 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
   ) setAgentTurnActive(true);
   if (serverContent?.inputTranscription?.text) {
     updateTranscript("user", serverContent.inputTranscription.text);
-    startThinkingTranscript();
   }
   for (const part of serverContent?.modelTurn?.parts || []) {
-    if (part.thought && part.text) {
-      updateTranscript("thinking", part.text);
+    const transcriptRole = getLiveModelPartTranscriptRole(part);
+    if (transcriptRole) {
+      updateTranscript(transcriptRole, part.text);
+    }
+    if (transcriptRole === "thinking") {
       avatarController.transitionState("thinking");
     }
     if (part.inlineData?.data && responseAudioGate.shouldPlay()) {
-      collapseThinkingTranscript();
       panelAudio.playPcmChunk(part.inlineData.data);
     }
   }
   if (serverContent?.outputTranscription?.text) {
-    collapseThinkingTranscript();
     updateTranscript("lumi", serverContent.outputTranscription.text);
+  }
+  if (serverContent?.generationComplete || functionCalls.length) {
+    finalizeTranscript("thinking");
   }
   if (serverContent?.interrupted) {
     const wasUserCancellation = turnCancellationPending;
@@ -1726,14 +1749,23 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
     }
   }
   if (serverContent?.turnComplete && !functionCalls.length) responseAudioGate.reset();
-  if (serverRotationPending && !sessionHasInFlightWork()) {
+  if (contextRefreshPending && !sessionHasInFlightWork()) {
+    scheduleAutomaticSessionReconnect(
+      "Refreshing Gemini Live with recent context only.",
+      { discardOldContext: true },
+    );
+  } else if (serverRotationPending && !sessionHasInFlightWork()) {
     scheduleAutomaticSessionReconnect("Gemini Live requested a connection rotation.");
   }
 }
 
 function openGeminiSocket(
   options,
-  { background = false, predecessorSocket = null } = {},
+  {
+    background = false,
+    discardOldContext = false,
+    predecessorSocket = null,
+  } = {},
 ) {
   const {
     apiKey,
@@ -1758,8 +1790,10 @@ function openGeminiSocket(
   const sessionSocket = new WebSocket(`${WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`);
   if (handoffPredecessor) pendingSessionHandoffSocket = sessionSocket;
   else websocket = sessionSocket;
-  const resumptionHandle = sessionResumptionHandle;
+  const resumptionHandle = discardOldContext ? "" : sessionResumptionHandle;
   sessionSocket.lumiResumptionHandle = resumptionHandle;
+  sessionSocket.lumiLatestResumptionHandle = resumptionHandle;
+  sessionSocket.lumiDiscardOldContext = discardOldContext;
   sessionSocket.lumiBackgroundReconnect = reconnectInBackground;
   sessionSocket.lumiPredecessorSocket = handoffPredecessor;
   sessionSocket.lumiSetupComplete = false;
@@ -1861,6 +1895,7 @@ function openGeminiSocket(
         activeTabContext,
       }, {
         background: sessionSocket.lumiBackgroundReconnect,
+        discardOldContext: sessionSocket.lumiDiscardOldContext,
         predecessorSocket: handoffPredecessorSocket,
       });
       return;
@@ -1888,6 +1923,7 @@ function openGeminiSocket(
       && handoffPredecessorSocket?.readyState === WebSocket.OPEN
       && shouldMaintainGeminiSession
     ) {
+      if (sessionSocket.lumiDiscardOldContext) contextRefreshPending = true;
       websocket = handoffPredecessorSocket;
       backgroundSessionReconnectPending = false;
       const retryDelay = automaticSessionReconnectAttempt
@@ -2276,7 +2312,6 @@ async function sendText(
       selectedAttachment ? `${modelText} [Attached image: ${selectedAttachment.name}]` : modelText,
     );
   }
-  startThinkingTranscript();
   avatarController.transitionState("thinking");
   turnCancellationPending = false;
   setAgentTurnActive(true);

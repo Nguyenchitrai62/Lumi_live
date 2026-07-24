@@ -13,6 +13,7 @@ export const MIC_CAPTURE_PROCESSOR = "lumi-pcm-capture";
 export const MAX_MCP_TOOL_RESPONSE_CHARS = 64000;
 export const MAX_INITIAL_HISTORY_TURNS = 32;
 export const MAX_INITIAL_HISTORY_CHARS = 24000;
+export const LIVE_CONTEXT_REFRESH_TRIGGER_TOKENS = 100000;
 export const THINKING_LEVELS = Object.freeze(["minimal", "low", "medium", "high"]);
 export const SESSION_CONNECTION_ROTATION_MS = 8 * 60 * 1000;
 export const SESSION_ROTATION_RETRY_MS = 15000;
@@ -33,7 +34,6 @@ export function buildThinkingConfig(value) {
 export function buildSessionLifecycleConfig(resumptionHandle = "") {
   const handle = String(resumptionHandle || "").trim();
   return {
-    contextWindowCompression: { slidingWindow: {} },
     sessionResumption: handle ? { handle } : {},
   };
 }
@@ -53,24 +53,54 @@ export function automaticSessionReconnectDelayMs(attempt) {
   return Math.min(8000, 250 * (2 ** (safeAttempt - 1)));
 }
 
-export function buildInitialHistoryClientContent(history = []) {
-  const normalized = [];
-  let remainingChars = MAX_INITIAL_HISTORY_CHARS;
+export function shouldRefreshLiveContext(usageMetadata) {
+  const totalTokens = Number(usageMetadata?.totalTokenCount);
+  const promptTokens = Number(usageMetadata?.promptTokenCount);
+  const activeTokens = Math.max(
+    Number.isFinite(totalTokens) ? totalTokens : 0,
+    Number.isFinite(promptTokens) ? promptTokens : 0,
+  );
+  return activeTokens >= LIVE_CONTEXT_REFRESH_TRIGGER_TOKENS;
+}
 
-  for (let index = history.length - 1; index >= 0 && normalized.length < MAX_INITIAL_HISTORY_TURNS; index -= 1) {
+export function trimConversationHistory(
+  history = [],
+  {
+    maxTurns = MAX_INITIAL_HISTORY_TURNS,
+    maxChars = MAX_INITIAL_HISTORY_CHARS,
+  } = {},
+) {
+  const normalized = [];
+  const turnLimit = Math.max(0, Math.trunc(Number(maxTurns) || 0));
+  let remainingChars = Math.max(0, Math.trunc(Number(maxChars) || 0));
+
+  for (let index = history.length - 1; index >= 0 && normalized.length < turnLimit; index -= 1) {
     const turn = history[index];
     const role = turn?.role === "model" ? "model" : turn?.role === "user" ? "user" : "";
     const text = String(turn?.text || "").replace(/\s+/g, " ").trim();
     if (!role || !text || remainingChars <= 0) continue;
     const retainedText = text.slice(-remainingChars);
-    normalized.push({ role, parts: [{ text: retainedText }] });
+    normalized.push({ role, text: retainedText });
     remainingChars -= retainedText.length;
   }
 
   normalized.reverse();
+  while (normalized[0]?.role === "model") normalized.shift();
+  return normalized;
+}
+
+export function buildInitialHistoryClientContent(history = []) {
+  const normalized = trimConversationHistory(history);
   return {
     clientContent: {
-      ...(normalized.length ? { turns: normalized } : {}),
+      ...(normalized.length
+        ? {
+            turns: normalized.map(({ role, text }) => ({
+              role,
+              parts: [{ text }],
+            })),
+          }
+        : {}),
       turnComplete: true,
     },
   };
