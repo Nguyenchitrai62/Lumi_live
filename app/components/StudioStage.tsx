@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import type { CSSProperties, RefObject } from "react";
 import { PetalLayer } from "./PetalLayer";
 import { PixelAvatar } from "./PixelAvatar";
 import { VtuberAvatar } from "./VtuberAvatar";
@@ -13,6 +13,7 @@ type StudioStageProps = {
   petalsEnabled: boolean;
   status: SessionStatus;
   isMuted: boolean;
+  micLevel: number;
   mouthFrame: number;
   pixelAvatarState: PixelAvatarState;
   liveTranslationState: LiveTranslationState;
@@ -30,6 +31,7 @@ export function StudioStage({
   petalsEnabled,
   status,
   isMuted,
+  micLevel,
   mouthFrame,
   pixelAvatarState,
   liveTranslationState,
@@ -43,6 +45,15 @@ export function StudioStage({
   const translating = liveTranslationState === "active"
     || liveTranslationState === "connecting"
     || liveTranslationState === "reconnecting";
+  const visibleMicLevel = isMuted ? 0 : Math.min(1, Math.max(0, micLevel));
+  const micStyle = {
+    "--mic-level": visibleMicLevel,
+    "--mic-glow-opacity": Math.min(.72, visibleMicLevel * .9),
+    "--mic-glow-scale": .82 + visibleMicLevel * .42,
+    "--mic-wave-opacity": Math.min(.96, .28 + visibleMicLevel * .68),
+    "--mic-wave-left-offset": `${-(1 + visibleMicLevel * 2)}px`,
+    "--mic-wave-right-offset": `${1 + visibleMicLevel * 2}px`,
+  } as CSSProperties;
 
   return (
     <section className={`stage scene-${scene} ${petalsEnabled ? "petals-enabled" : "petals-disabled"}`} aria-label={`${scenes.find((item) => item.id === scene)?.name} character stage`}>
@@ -114,8 +125,27 @@ export function StudioStage({
 
       <div className="call-dock">
         {status === "ready" && (
-          <button className={`round-control ${isMuted ? "round-control-muted" : ""}`} type="button" onClick={onToggleMute} aria-label={isMuted ? "Unmute microphone" : "Mute microphone"}>
-            {isMuted ? "×" : "⌁"}
+          <button
+            className={`round-control mic-level-control ${isMuted ? "round-control-muted" : ""} ${visibleMicLevel >= .06 ? "is-hearing" : ""}`}
+            type="button"
+            onClick={onToggleMute}
+            aria-label={isMuted ? "Unmute microphone" : "Mute microphone"}
+            aria-pressed={isMuted}
+            title={isMuted ? "Turn microphone on" : "Turn microphone off"}
+            style={micStyle}
+          >
+            <span className="audio-mic-energy" aria-hidden="true" />
+            <span className="audio-mic" aria-hidden="true">
+              <span className="audio-mic-body">
+                <span className="audio-mic-fill" />
+              </span>
+              <span className="audio-mic-cradle" />
+              <span className="audio-mic-stem" />
+              <span className="audio-mic-base" />
+              <span className="audio-mic-wave audio-mic-wave-left" />
+              <span className="audio-mic-wave audio-mic-wave-right" />
+              <span className="audio-mic-slash" />
+            </span>
           </button>
         )}
         <button className={`voice-button voice-button-${status}`} type="button" onClick={onStartSession} disabled={status === "connecting"}>

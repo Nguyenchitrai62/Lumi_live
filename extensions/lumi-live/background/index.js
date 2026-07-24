@@ -16,6 +16,7 @@ const ELEMENT_HIGHLIGHTS_STORAGE_KEY = STORAGE_KEYS.elementHighlights;
 const OFFSCREEN_DOCUMENT_PATH = "offscreen/index.html";
 const OFFSCREEN_TARGET = "lumi_live_offscreen";
 const TAB_TRANSITION_FALLBACK_URL = "https://www.google.com/";
+const TAB_CAPTURE_RETRY_DELAY_MS = 550;
 
 let connectedTabId = null;
 let listedTabIds = new Set();
@@ -171,6 +172,18 @@ function isWebPage(url = "") {
   return /^https?:\/\//i.test(url);
 }
 
+function isFilePage(url = "") {
+  return /^file:\/\//i.test(url);
+}
+
+function isControllablePage(url = "") {
+  return isWebPage(url) || isFilePage(url);
+}
+
+function isCapturableTab(tab) {
+  return Number.isInteger(tab?.id) && Boolean(String(tab.url || ""));
+}
+
 function notifyTargetChanged() {
   void chrome.runtime.sendMessage({ type: TARGET_CHANGED_MESSAGE }).catch(() => {});
 }
@@ -250,7 +263,7 @@ async function getActiveTab(windowId) {
 async function followActiveTab(windowId) {
   await ready;
   const tab = await getActiveTab(windowId);
-  if (!tab?.id || !isWebPage(tab.url)) {
+  if (!tab?.id || !isControllablePage(tab.url)) {
     await setConnectedTab(null);
     return null;
   }
@@ -265,12 +278,12 @@ async function getStatus() {
     return {
       connected: false,
       navigationReady: true,
-      reason: "This tab cannot expose page content, but Lumi can open or switch to a website from here.",
+      reason: "This tab cannot expose PageAgent content, but Lumi can still identify, capture, open, or switch tabs when Chrome permits it.",
     };
   }
   try {
     const tab = await chrome.tabs.get(connectedTabId);
-    if (!isWebPage(tab.url)) {
+    if (!isControllablePage(tab.url)) {
       await setConnectedTab(null);
       return { connected: false };
     }
@@ -316,7 +329,7 @@ async function sendBrowserTool(tool, args, action) {
   const status = await getStatus();
   assertBrowserActionActive(action);
   if (!status.connected || !status.tabId) {
-    throw new Error("No controllable web page is active. Switch to a normal http/https tab and try again.");
+    throw new Error("No controllable page is active. Use an http, https, or permitted file tab and try again.");
   }
   trackBrowserActionTab(action, status.tabId);
   if (!(await ensureController(status.tabId, 4))) {
@@ -350,15 +363,29 @@ function serializeTab(tab) {
     title: tab.title || "Untitled page",
     url: tab.url || "",
     active: Boolean(tab.active),
+    controllable: isControllablePage(tab.url),
   };
 }
 
 async function getActivePageContext() {
   const status = await getStatus();
   if (!status.connected) {
+    const tab = await getActiveTab();
+    if (isCapturableTab(tab)) {
+      const url = sanitizeActiveContextUrl(tab.url);
+      return {
+        connected: false,
+        controllable: false,
+        tabId: tab.id,
+        title: tab.title || "Active tab",
+        url,
+        ...extractActiveContextIdentifiers(url),
+        reason: status.reason || "Chrome exposes this tab's identity, but not controllable page content.",
+      };
+    }
     return {
       connected: false,
-      reason: status.reason || "No controllable http/https tab is active.",
+      reason: status.reason || "No controllable http/https/file tab is active.",
       identifiers: [],
       pathSegments: [],
     };
@@ -378,24 +405,24 @@ async function getActivePageContext() {
 async function listBrowserTabs() {
   const focusedWindow = await chrome.windows.getLastFocused();
   const tabs = await chrome.tabs.query({ windowId: focusedWindow.id });
-  const controllableTabs = tabs.filter((tab) => Number.isInteger(tab.id) && isWebPage(tab.url));
-  listedTabIds = new Set(controllableTabs.map((tab) => tab.id));
+  const listedTabs = tabs.filter((tab) => Number.isInteger(tab.id));
+  listedTabIds = new Set(listedTabs.map((tab) => tab.id));
   listedTabsExpireAt = Date.now() + 30000;
   return {
     windowId: focusedWindow.id,
-    tabs: controllableTabs.map(serializeTab),
+    tabs: listedTabs.map(serializeTab),
   };
 }
 
-function requireWebUrl(rawUrl) {
+function requirePageUrl(rawUrl) {
   let url;
   try {
     url = new URL(String(rawUrl || ""));
   } catch {
-    throw new Error("Open-tab URL must be an absolute http/https address.");
+    throw new Error("Open-tab URL must be an absolute http, https, or file address.");
   }
-  if (!isWebPage(url.href)) {
-    throw new Error("Lumi can open only normal http/https pages.");
+  if (!isControllablePage(url.href)) {
+    throw new Error("Lumi can open only http, https, or file pages.");
   }
   return url.href;
 }
@@ -414,17 +441,64 @@ function capturedTabFilename(requestedName, tabTitle) {
   return /\.(?:jpe?g)$/i.test(baseName) ? baseName : `${baseName}.jpg`;
 }
 
+function isTabCaptureRateLimitError(error) {
+  const detail = error instanceof Error ? error.message : String(error || "");
+  return /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND|quota|too many capture/i.test(detail);
+}
+
+function describeTabCaptureError(error, tab = null) {
+  const detail = error instanceof Error ? error.message : String(error || "");
+  if (isTabCaptureRateLimitError(error)) {
+    return "Chrome's screenshot limit was reached. Wait a moment and try again.";
+  }
+  if (/activeTab.*not in effect|cannot access contents|permission/i.test(detail)) {
+    if (isFilePage(tab?.url)) {
+      return "Chrome has not granted Lumi access to local files. Open Lumi's extension details and enable Allow access to file URLs.";
+    }
+    return "Chrome has not granted Lumi screenshot access to this page. Click the Lumi toolbar icon on this tab, then try again.";
+  }
+  if (/screenshots?.*disabled/i.test(detail)) {
+    return "Screenshots are disabled by Chrome or an administrator policy.";
+  }
+  return detail
+    ? `Chrome could not capture the active tab: ${detail}`
+    : "Chrome could not capture the active tab.";
+}
+
+async function captureContextDataUrl(tab) {
+  const options = {
+    format: "jpeg",
+    quality: 72,
+  };
+  try {
+    return await chrome.tabs.captureVisibleTab(tab.windowId, options);
+  } catch (error) {
+    if (!isTabCaptureRateLimitError(error)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, TAB_CAPTURE_RETRY_DELAY_MS));
+    const activeTab = await getActiveTab(tab.windowId);
+    if (activeTab?.id !== tab.id) {
+      throw new Error("The active tab changed while Lumi was waiting to retry the screenshot.");
+    }
+    return chrome.tabs.captureVisibleTab(tab.windowId, options);
+  }
+}
+
 async function captureVisibleTab(args = {}, action) {
   const tab = await getActiveTab();
-  if (!tab?.id || !isWebPage(tab.url)) {
-    throw new Error("No normal http/https tab is active to capture.");
+  if (!isCapturableTab(tab)) {
+    throw new Error("No visible active Chrome tab is available to capture.");
   }
   trackBrowserActionTab(action, tab.id);
   assertBrowserActionActive(action);
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-    format: "jpeg",
-    quality: 88,
-  });
+  let dataUrl;
+  try {
+    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+      format: "jpeg",
+      quality: 88,
+    });
+  } catch (error) {
+    throw new Error(describeTabCaptureError(error, tab));
+  }
   assertBrowserActionActive(action);
   const activeTab = await getActiveTab(tab.windowId);
   if (activeTab?.id !== tab.id) {
@@ -452,19 +526,24 @@ async function captureVisibleTab(args = {}, action) {
   };
 }
 
-async function captureActiveTabContextFrame() {
-  const tab = await getActiveTab();
-  if (!tab?.id || !isWebPage(tab.url)) {
+async function captureActiveTabContextFrame(windowId) {
+  const tab = await getActiveTab(windowId);
+  if (!isCapturableTab(tab)) {
     return {
       captured: false,
-      reason: "The active tab does not expose capturable http/https content.",
+      reason: "This Lumi window does not have a visible active tab to capture.",
     };
   }
 
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-    format: "jpeg",
-    quality: 72,
-  });
+  let dataUrl;
+  try {
+    dataUrl = await captureContextDataUrl(tab);
+  } catch (error) {
+    return {
+      captured: false,
+      reason: describeTabCaptureError(error, tab),
+    };
+  }
   const activeTab = await getActiveTab(tab.windowId);
   if (activeTab?.id !== tab.id) {
     return {
@@ -496,10 +575,10 @@ async function captureActiveTabContextFrame() {
 async function findExistingTabForUrl(url) {
   const focusedWindow = await chrome.windows.getLastFocused();
   const tabs = await chrome.tabs.query({ windowId: focusedWindow.id });
-  const controllableTabs = tabs.filter((tab) => Number.isInteger(tab.id) && isWebPage(tab.url));
-  listedTabIds = new Set(controllableTabs.map((tab) => tab.id));
+  const listedTabs = tabs.filter((tab) => Number.isInteger(tab.id));
+  listedTabIds = new Set(listedTabs.map((tab) => tab.id));
   listedTabsExpireAt = Date.now() + 30000;
-  return controllableTabs.find((tab) => {
+  return listedTabs.find((tab) => {
     try {
       return new URL(tab.url).href === url;
     } catch {
@@ -519,7 +598,7 @@ async function waitForTabToSettle(tabId, action) {
 }
 
 async function openBrowserTab(args = {}, action) {
-  const url = requireWebUrl(args.url);
+  const url = requirePageUrl(args.url);
   const existingTab = await findExistingTabForUrl(url);
   assertBrowserActionActive(action);
   if (existingTab?.id) {
@@ -572,9 +651,17 @@ async function openBrowserTab(args = {}, action) {
     await chrome.windows.update(createdTab.windowId, { focused: true });
     await setConnectedTab(createdTab.id);
     await waitForTabToSettle(createdTab.id, action);
-    const controllerReady = await ensureController(createdTab.id, 5);
+    const settledTab = await chrome.tabs.get(createdTab.id);
+    const controllerReady = isControllablePage(settledTab.url)
+      ? await ensureController(createdTab.id, 5)
+      : false;
     assertBrowserActionActive(action);
-    if (!controllerReady) throw new Error("The new tab could not prepare Lumi's page controller.");
+    if (!controllerReady) {
+      const detail = isFilePage(settledTab.url)
+        ? " Enable Allow access to file URLs in Lumi's extension details."
+        : "";
+      throw new Error(`The new tab could not prepare Lumi's page controller.${detail}`);
+    }
     assertBrowserActionActive(action);
     return {
       opened: true,
@@ -601,28 +688,35 @@ async function switchBrowserTab(args = {}, action) {
     throw new Error("That tabId is stale or was not returned by the latest browser_list_tabs call. List tabs again.");
   }
   const tab = await chrome.tabs.get(tabId);
-  if (!isWebPage(tab.url)) throw new Error("The selected tab is not a controllable http/https page.");
+  const controllable = isControllablePage(tab.url);
   const previousTab = await getActiveTab(tab.windowId);
   if (previousTab?.id === tabId) {
-    await setConnectedTab(tabId);
+    await setConnectedTab(controllable ? tabId : null);
     return {
       switched: true,
-      controllerReady: await ensureController(tabId, 3),
+      controllable,
+      controllerReady: controllable ? await ensureController(tabId, 3) : false,
       ...serializeTab(tab),
     };
   }
 
   trackBrowserActionTab(action, tabId);
-  const controllerReady = await ensureController(tabId, 5);
+  const controllerReady = controllable ? await ensureController(tabId, 5) : false;
   assertBrowserActionActive(action);
-  if (!controllerReady) throw new Error("The destination tab could not prepare Lumi's page controller.");
+  if (controllable && !controllerReady) {
+    const detail = isFilePage(tab.url)
+      ? " Enable Allow access to file URLs in Lumi's extension details."
+      : "";
+    throw new Error(`The destination tab could not prepare Lumi's page controller.${detail}`);
+  }
   await chrome.tabs.update(tabId, { active: true });
   await chrome.windows.update(tab.windowId, { focused: true });
-  await setConnectedTab(tabId);
+  await setConnectedTab(controllable ? tabId : null);
   assertBrowserActionActive(action);
   const activeTab = await chrome.tabs.get(tabId);
   return {
     switched: true,
+    controllable,
     controllerReady,
     ...serializeTab(activeTab),
   };
@@ -696,7 +790,7 @@ async function handleMessage(message) {
     if (status.prepared && status.source?.mode === "sharedTab") {
       return startPreparedTranslation(status, tab || {}, message);
     }
-    if (!tab?.id || !isWebPage(tab.url)) {
+    if (!tab?.id || !isControllablePage(tab.url)) {
       return {
         requiresSharedTabAudio: true,
         reason: "No active web video could be captured automatically.",
@@ -740,7 +834,7 @@ async function handleMessage(message) {
     return executeBrowserTool(message.tool, message.args || {});
   }
   if (message.command === "capture_tab_context_frame") {
-    return captureActiveTabContextFrame();
+    return captureActiveTabContextFrame(message.windowId);
   }
   if (message.command === "mcp_list_servers") return listMcpServers();
   if (message.command === "mcp_add_server") return addMcpServer(message.url);
@@ -788,7 +882,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   }
   if (changeInfo.status !== "complete") return;
   void getActiveTab().then(async (tab) => {
-    if (tab?.id !== tabId || !isWebPage(tab.url)) return;
+    if (tab?.id !== tabId || !isControllablePage(tab.url)) return;
     await setConnectedTab(tabId);
     const controllerReady = await ensureController(tabId, 5);
     if (tabId !== connectedTabId) return;
@@ -801,7 +895,7 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   void releaseCaptureForDifferentTab(tabId).catch(() => {});
   void getActiveTab(windowId).then(async (tab) => {
     if (tab?.id !== tabId) return;
-    if (!isWebPage(tab.url)) {
+    if (!isControllablePage(tab.url)) {
       await setConnectedTab(null);
       return;
     }

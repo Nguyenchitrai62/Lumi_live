@@ -10,15 +10,20 @@ import {
   BROWSER_TOOLS,
   BUILTIN_TOOLS,
   BROWSER_UI_ACTION_TOOLS,
+  automaticSessionReconnectDelayMs,
   buildInitialHistoryClientContent,
+  buildSessionLifecycleConfig,
   buildThinkingConfig,
   buildSessionInstruction,
   configureMcpTools,
   DEFAULT_THINKING_LEVEL,
   findRejectedMcpDeclaration,
+  MAX_AUTOMATIC_SESSION_RECONNECT_ATTEMPTS,
   MAX_MCP_TOOL_RESPONSE_CHARS,
   MODEL,
   normalizeThinkingLevel,
+  SESSION_CONNECTION_ROTATION_MS,
+  SESSION_ROTATION_RETRY_MS,
   WS_ENDPOINT,
 } from "../live/session-config.js";
 import {
@@ -159,6 +164,14 @@ let pendingThinkingReconnect = false;
 let hasConnectedInPanelLifetime = false;
 let activeTabFrameCapture = null;
 let textSendPending = false;
+let shouldMaintainGeminiSession = false;
+let sessionConnectionOptions = null;
+let sessionResumptionHandle = "";
+let automaticSessionReconnectAttempt = 0;
+let automaticSessionReconnectTimerId = null;
+let sessionRotationTimerId = null;
+let serverRotationPending = false;
+const AUTOMATIC_TAB_CAPTURE_ORIGINS = ["<all_urls>"];
 const conversationHistory = [];
 const queuedUserMessages = [];
 const initialTranscriptMarkup = elements.transcript.innerHTML;
@@ -203,6 +216,9 @@ const panelAudio = createPanelAudioController({
     finalizeTranscript("lumi");
     finalizeTranscript("thinking");
   },
+  onInputLevel: (level) => {
+    syncMicrophoneLevel(level);
+  },
   onUserSpeechStart: () => {
     void captureAndSendCurrentTabFrame();
   },
@@ -229,18 +245,63 @@ function sendRuntime(command, payload = {}) {
   });
 }
 
+function automaticTabCaptureAccessResult(granted, error = null) {
+  if (granted) return { granted: true, reason: "" };
+  const detail = error instanceof Error ? error.message : String(error || "");
+  return {
+    granted: false,
+    reason: detail
+      ? `Chrome did not grant automatic screenshot access: ${detail}`
+      : "Chrome needs one-time approval for Lumi to capture normal web tabs automatically.",
+  };
+}
+
+function requestAutomaticTabCaptureAccess() {
+  return chrome.permissions.request({
+    origins: AUTOMATIC_TAB_CAPTURE_ORIGINS,
+  }).then(
+    (granted) => automaticTabCaptureAccessResult(granted),
+    (error) => automaticTabCaptureAccessResult(false, error),
+  );
+}
+
+async function getAutomaticTabCaptureAccess() {
+  try {
+    const granted = await chrome.permissions.contains({
+      origins: AUTOMATIC_TAB_CAPTURE_ORIGINS,
+    });
+    return automaticTabCaptureAccessResult(granted);
+  } catch (error) {
+    return automaticTabCaptureAccessResult(false, error);
+  }
+}
+
 async function captureCurrentTabFrame() {
   if (activeTabFrameCapture) return activeTabFrameCapture;
   activeTabFrameCapture = (async () => {
     try {
-      const frame = await sendRuntime("capture_tab_context_frame");
-      if (!frame?.captured || !frame.data || !frame.mimeType) return null;
+      const currentWindow = await chrome.windows.getCurrent();
+      const frame = await sendRuntime("capture_tab_context_frame", {
+        windowId: currentWindow?.id,
+      });
+      if (!frame?.captured || !frame.data || !frame.mimeType) {
+        return {
+          frame: null,
+          reason: frame?.reason || "Chrome returned no screenshot data.",
+        };
+      }
       return {
-        data: frame.data,
-        mimeType: frame.mimeType,
+        frame: {
+          data: frame.data,
+          mimeType: frame.mimeType,
+        },
+        reason: "",
       };
-    } catch {
-      return null;
+    } catch (error) {
+      return {
+        frame: null,
+        reason: error instanceof Error ? error.message : "Chrome could not capture the active tab.",
+      };
     }
   })();
   try {
@@ -251,7 +312,7 @@ async function captureCurrentTabFrame() {
 }
 
 async function captureAndSendCurrentTabFrame() {
-  const frame = await captureCurrentTabFrame();
+  const { frame } = await captureCurrentTabFrame();
   if (!frame || sessionStatus !== "ready" || websocket?.readyState !== WebSocket.OPEN) {
     return false;
   }
@@ -950,6 +1011,92 @@ function sendJson(payload, targetSocket = websocket) {
   return true;
 }
 
+function clearAutomaticSessionReconnectTimer() {
+  if (automaticSessionReconnectTimerId === null) return;
+  clearTimeout(automaticSessionReconnectTimerId);
+  automaticSessionReconnectTimerId = null;
+}
+
+function clearSessionRotationTimer() {
+  if (sessionRotationTimerId === null) return;
+  clearTimeout(sessionRotationTimerId);
+  sessionRotationTimerId = null;
+}
+
+function sessionHasInFlightWork() {
+  return Boolean(
+    agentTurnActive
+    || turnCancellationPending
+    || browserToolRunning
+    || pendingToolCallIds.size
+    || pendingLiveTranslationStart
+    || textSendPending
+  );
+}
+
+function armSessionRotation(delayMs = SESSION_CONNECTION_ROTATION_MS) {
+  clearSessionRotationTimer();
+  if (!shouldMaintainGeminiSession) return;
+  sessionRotationTimerId = setTimeout(() => {
+    sessionRotationTimerId = null;
+    if (
+      sessionStatus !== "ready"
+      || websocket?.readyState !== WebSocket.OPEN
+      || sessionHasInFlightWork()
+      || !sessionResumptionHandle
+    ) {
+      armSessionRotation(SESSION_ROTATION_RETRY_MS);
+      return;
+    }
+    scheduleAutomaticSessionReconnect("Refreshing Gemini Live before its connection limit.");
+  }, delayMs);
+}
+
+function scheduleAutomaticSessionReconnect(reason, { delayMs = null } = {}) {
+  if (
+    !shouldMaintainGeminiSession
+    || !sessionConnectionOptions
+    || automaticSessionReconnectTimerId !== null
+    || sessionHasInFlightWork()
+    || automaticSessionReconnectAttempt >= MAX_AUTOMATIC_SESSION_RECONNECT_ATTEMPTS
+  ) return false;
+
+  automaticSessionReconnectAttempt += 1;
+  const reconnectDelayMs = delayMs ?? automaticSessionReconnectDelayMs(
+    automaticSessionReconnectAttempt,
+  );
+  clearSessionRotationTimer();
+  serverRotationPending = false;
+
+  const previousSocket = websocket;
+  websocket = null;
+  if (previousSocket && previousSocket.readyState < WebSocket.CLOSING) {
+    const closeReason = String(reason || "Refreshing Gemini Live session")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80);
+    previousSocket.close(1000, closeReason);
+  }
+
+  setSessionStatus("connecting", "Lumi is quietly restoring the Live connectionâ€¦");
+  automaticSessionReconnectTimerId = setTimeout(() => {
+    automaticSessionReconnectTimerId = null;
+    if (!shouldMaintainGeminiSession || !sessionConnectionOptions) return;
+    openGeminiSocket(sessionConnectionOptions);
+  }, reconnectDelayMs);
+  return true;
+}
+
+function resetSessionRecoveryState() {
+  clearAutomaticSessionReconnectTimer();
+  clearSessionRotationTimer();
+  shouldMaintainGeminiSession = false;
+  sessionConnectionOptions = null;
+  sessionResumptionHandle = "";
+  automaticSessionReconnectAttempt = 0;
+  serverRotationPending = false;
+}
+
 function setLiveTranslationBadge(state, detail = "") {
   const languageCode = normalizeLiveTranslationLanguageCode(detail)
     || liveTranslationTargetLanguageCode
@@ -1110,6 +1257,12 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
   const response = JSON.parse(raw);
   if (sourceSocket !== websocket) return;
 
+  const resumptionUpdate = response.sessionResumptionUpdate;
+  if (resumptionUpdate?.resumable && resumptionUpdate.newHandle) {
+    sessionResumptionHandle = resumptionUpdate.newHandle;
+  }
+  if (response.goAway) serverRotationPending = true;
+
   for (const id of response.toolCallCancellation?.ids || []) {
     if (pendingToolCallNames.get(id) === LIVE_TRANSLATE_TOOL_NAME && pendingLiveTranslationStart) {
       pendingLiveTranslationStart = false;
@@ -1121,6 +1274,10 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
     finishMcpActivity(id, "cancelled", "Gemini cancelled this tool call because the conversation turn was interrupted.");
   }
   if (response.setupComplete) {
+    sourceSocket.lumiSetupComplete = true;
+    automaticSessionReconnectAttempt = 0;
+    clearAutomaticSessionReconnectTimer();
+    armSessionRotation();
     sessionReadyAt = performance.now();
     hideConnectionNotice();
     clearSetupTimeout();
@@ -1136,8 +1293,11 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
       return;
     }
     pendingThinkingReconnect = false;
+    const resumedExistingSession = Boolean(sourceSocket.lumiResumptionHandle);
     const reconnectingExistingConversation = hasConnectedInPanelLifetime;
-    sendJson(buildInitialHistoryClientContent(conversationHistory), sourceSocket);
+    if (!resumedExistingSession) {
+      sendJson(buildInitialHistoryClientContent(conversationHistory), sourceSocket);
+    }
     hasConnectedInPanelLifetime = true;
     const readyMessage = microphoneWarning
       || (isMuted
@@ -1346,14 +1506,28 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
     }
   }
   if (serverContent?.turnComplete && !functionCalls.length) responseAudioGate.reset();
+  if (serverRotationPending && !sessionHasInFlightWork()) {
+    scheduleAutomaticSessionReconnect("Gemini Live requested a connection rotation.");
+  }
 }
 
-function openGeminiSocket({ apiKey, voiceName, thinkingLevel: sessionThinkingLevel, mcpInfo, mcpFunctionDeclarations, activeTabContext }) {
+function openGeminiSocket(options) {
+  const {
+    apiKey,
+    voiceName,
+    thinkingLevel: sessionThinkingLevel,
+    mcpInfo,
+    mcpFunctionDeclarations,
+    activeTabContext,
+  } = options;
+  sessionConnectionOptions = options;
   setSessionStatus("connecting", "Opening Gemini Live...");
   sessionReadyAt = 0;
   const functionDeclarations = [...BUILTIN_TOOLS, ...mcpFunctionDeclarations];
   websocket = new WebSocket(`${WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`);
   const sessionSocket = websocket;
+  const resumptionHandle = sessionResumptionHandle;
+  sessionSocket.lumiResumptionHandle = resumptionHandle;
   setupTimeoutId = setTimeout(() => {
     if (sessionStatus !== "connecting" || websocket !== sessionSocket) return;
     intentionalClose = true;
@@ -1370,6 +1544,7 @@ function openGeminiSocket({ apiKey, voiceName, thinkingLevel: sessionThinkingLev
     sendJson({
       setup: {
         model: `models/${MODEL}`,
+        ...buildSessionLifecycleConfig(resumptionHandle),
         generationConfig: {
           responseModalities: ["AUDIO"],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
@@ -1454,6 +1629,19 @@ function openGeminiSocket({ apiKey, voiceName, thinkingLevel: sessionThinkingLev
       return;
     }
 
+    websocket = null;
+    if (!sessionSocket.lumiSetupComplete && resumptionHandle) {
+      sessionResumptionHandle = "";
+    }
+    if (
+      !expected
+      && !isGeminiKeyIssue(reason)
+      && !sessionHasInFlightWork()
+      && scheduleAutomaticSessionReconnect(
+        reason || "Gemini Live closed the idle connection.",
+      )
+    ) return;
+
     cleanupMedia();
     if (!expected) {
       const message = reason
@@ -1496,6 +1684,8 @@ async function startSession() {
       return;
     }
 
+    resetSessionRecoveryState();
+    shouldMaintainGeminiSession = true;
     intentionalClose = false;
     cancelledToolCallIds.clear();
     pendingToolCallIds.clear();
@@ -1578,9 +1768,37 @@ function syncMuteButton() {
   elements.muteButton.setAttribute("aria-pressed", String(isMuted));
   elements.muteButton.setAttribute("aria-label", label);
   elements.muteButton.title = label;
+  if (isMuted) syncMicrophoneLevel(0);
+}
+
+function syncMicrophoneLevel(level) {
+  const visibleLevel = isMuted ? 0 : Math.min(1, Math.max(0, Number(level) || 0));
+  elements.muteButton.style.setProperty("--mic-level", visibleLevel.toFixed(3));
+  elements.muteButton.style.setProperty(
+    "--mic-glow-opacity",
+    Math.min(.72, visibleLevel * .9).toFixed(3),
+  );
+  elements.muteButton.style.setProperty(
+    "--mic-glow-scale",
+    (.82 + visibleLevel * .42).toFixed(3),
+  );
+  elements.muteButton.style.setProperty(
+    "--mic-wave-opacity",
+    Math.min(.96, .28 + visibleLevel * .68).toFixed(3),
+  );
+  elements.muteButton.style.setProperty(
+    "--mic-wave-left-offset",
+    `${-(1 + visibleLevel * 2).toFixed(2)}px`,
+  );
+  elements.muteButton.style.setProperty(
+    "--mic-wave-right-offset",
+    `${(1 + visibleLevel * 2).toFixed(2)}px`,
+  );
+  elements.muteButton.classList.toggle("is-hearing", visibleLevel >= .06);
 }
 
 function cleanupMedia() {
+  resetSessionRecoveryState();
   sessionReadyAt = 0;
   clearSetupTimeout();
   clearTurnCancellationTimers();
@@ -1691,7 +1909,15 @@ async function toggleMute() {
   avatarController.syncState();
 }
 
-async function sendText(text, { clearComposer = true, render = true, remember = true } = {}) {
+async function sendText(
+  text,
+  {
+    clearComposer = true,
+    render = true,
+    remember = true,
+    screenshotAccessRequest = null,
+  } = {},
+) {
   const clean = text.trim();
   if (
     !clean
@@ -1702,10 +1928,20 @@ async function sendText(text, { clearComposer = true, render = true, remember = 
   ) return false;
   textSendPending = true;
   syncMessageComposer();
-  const frame = await captureCurrentTabFrame();
+  const screenshotAccess = screenshotAccessRequest
+    ? await screenshotAccessRequest
+    : await getAutomaticTabCaptureAccess();
+  if (!screenshotAccess.granted) {
+    textSendPending = false;
+    elements.statusLine.textContent = `Message not sent: ${screenshotAccess.reason}`;
+    syncMessageComposer();
+    return false;
+  }
+  const capture = await captureCurrentTabFrame();
+  const { frame } = capture;
   textSendPending = false;
   if (!frame) {
-    elements.statusLine.textContent = "Message not sent: Lumi could not capture the visible active tab. Open a normal http/https tab and try again.";
+    elements.statusLine.textContent = `Message not sent: ${capture.reason || "Lumi could not capture the visible active tab."}`;
     syncMessageComposer();
     return false;
   }
@@ -1932,10 +2168,14 @@ elements.messageInput.addEventListener("keydown", (event) => {
 elements.messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const message = elements.messageInput.value.trim();
+  const screenshotAccessRequest = message ? requestAutomaticTabCaptureAccess() : null;
   if (message && (sessionStatus !== "ready" || agentTurnActive || turnCancellationPending)) {
     queueUserMessage(message);
+    void screenshotAccessRequest.then((access) => {
+      if (!access.granted) elements.statusLine.textContent = `Queued message needs access: ${access.reason}`;
+    });
   } else if (message) {
-    void sendText(message);
+    void sendText(message, { screenshotAccessRequest });
   } else if (agentTurnActive) {
     cancelCurrentTurn();
   }

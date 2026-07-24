@@ -21,6 +21,7 @@ export function createPanelAudioController({
   elements,
   getInputState,
   onFreshUserInput,
+  onInputLevel,
   onUserSpeechStart,
   sendJson,
 }) {
@@ -34,6 +35,8 @@ export function createPanelAudioController({
   let blinkTimeoutId = null;
   let userSpeechActive = false;
   let lastUserSpeechAt = 0;
+  let smoothedInputLevel = 0;
+  let lastInputLevelUpdateAt = 0;
   const playbackSources = new Set();
 
   async function prepareOutput() {
@@ -59,13 +62,20 @@ export function createPanelAudioController({
       channelCountMode: "explicit",
     });
     micProcessor.port.onmessage = (event) => {
-      const inputState = getInputState();
-      if (!inputState.canSendAudio) return;
       const mono = event.data;
       let energy = 0;
       for (const sample of mono) energy += sample * sample;
       const rms = Math.sqrt(energy / mono.length);
       const now = performance.now();
+      const rawInputLevel = Math.min(1, Math.max(0, (rms - .0035) * 16));
+      const smoothing = rawInputLevel > smoothedInputLevel ? .48 : .16;
+      smoothedInputLevel += (rawInputLevel - smoothedInputLevel) * smoothing;
+      if (now - lastInputLevelUpdateAt >= 60) {
+        onInputLevel?.(smoothedInputLevel);
+        lastInputLevelUpdateAt = now;
+      }
+      const inputState = getInputState();
+      if (!inputState.canSendAudio) return;
       if (rms >= 0.012) {
         lastUserSpeechAt = now;
         if (!userSpeechActive) {
@@ -205,6 +215,9 @@ export function createPanelAudioController({
     micSource = null;
     userSpeechActive = false;
     lastUserSpeechAt = 0;
+    smoothedInputLevel = 0;
+    lastInputLevelUpdateAt = 0;
+    onInputLevel?.(0);
   }
 
   function closeSession() {

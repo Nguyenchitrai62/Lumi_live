@@ -486,8 +486,31 @@ button { -webkit-tap-highlight-color: transparent; }
 .mic-icon::after { content: ""; position: absolute; left: 50%; bottom: -11px; width: 8px; height: 2px; border-radius: 3px; background: currentColor; transform: translateX(-50%); }
 .mic-icon-muted::before { transform: translateX(-50%) rotate(-18deg); }
 .stop-symbol { width: 11px; height: 11px; border-radius: 3px; background: currentColor; }
-.round-control { width: 44px; height: 44px; border: 1px solid rgba(255,255,255,.52); border-radius: 50%; color: #605385; background: rgba(255,255,255,.72); box-shadow: 0 10px 24px rgba(69,59,108,.15); cursor: pointer; backdrop-filter: blur(10px); }
-.round-control-muted { color: #d05f79; background: #fff0f2; }
+.round-control { position: relative; width: 44px; height: 44px; display: grid; place-items: center; overflow: visible; border: 1px solid rgba(255,255,255,.52); border-radius: 50%; padding: 0; color: #605385; background: rgba(255,255,255,.78); box-shadow: 0 10px 24px rgba(69,59,108,.15); cursor: pointer; backdrop-filter: blur(10px); transition: color .18s ease, border-color .18s ease, background .18s ease, transform .18s ease, box-shadow .18s ease; }
+.round-control:hover { transform: translateY(-1px); }
+.round-control:focus-visible { outline: 2px solid rgba(123,224,185,.95); outline-offset: 3px; }
+.mic-level-control { --mic-level: 0; --mic-glow-opacity: 0; --mic-glow-scale: .82; --mic-wave-opacity: 0; --mic-wave-left-offset: -1px; --mic-wave-right-offset: 1px; }
+.audio-mic-energy { position: absolute; inset: 4px; border-radius: 50%; background: radial-gradient(circle, rgba(87,218,166,.3), rgba(87,218,166,0) 68%); opacity: var(--mic-glow-opacity); transform: scale(var(--mic-glow-scale)); transition: opacity .12s linear, transform .12s ease-out; pointer-events: none; }
+.audio-mic { position: relative; z-index: 1; width: 22px; height: 25px; display: block; color: #665b83; transition: color .18s ease; }
+.audio-mic-body { position: absolute; left: 7px; top: 1px; width: 8px; height: 13px; overflow: hidden; border: 1.8px solid currentColor; border-radius: 6px; background: rgba(102,91,131,.08); }
+.audio-mic-fill { position: absolute; inset: 0; border-radius: 4px; background: linear-gradient(180deg, #8ce7c4 0%, #39bd8b 100%); box-shadow: 0 0 8px rgba(57,189,139,.62); transform: scaleY(var(--mic-level)); transform-origin: center bottom; transition: transform .1s ease-out; }
+.audio-mic-cradle { position: absolute; left: 3px; top: 8px; width: 14px; height: 10px; border: 1.8px solid currentColor; border-top: 0; border-radius: 0 0 10px 10px; }
+.audio-mic-stem { position: absolute; left: 10px; top: 18px; width: 1.8px; height: 4px; border-radius: 2px; background: currentColor; }
+.audio-mic-base { position: absolute; left: 6px; top: 22px; width: 10px; height: 1.8px; border-radius: 2px; background: currentColor; }
+.audio-mic-wave { position: absolute; top: 8px; width: 4px; height: 7px; opacity: 0; border-color: #45c996; transition: opacity .12s ease, transform .12s ease; }
+.audio-mic-wave-left { left: -1px; border-left: 1.4px solid; border-radius: 7px 0 0 7px; transform: translateX(2px) scale(.72); }
+.audio-mic-wave-right { right: -1px; border-right: 1.4px solid; border-radius: 0 7px 7px 0; transform: translateX(-2px) scale(.72); }
+.mic-level-control.is-hearing { color: #347d67; border-color: rgba(92,218,169,.72); background: rgba(244,255,251,.9); box-shadow: 0 10px 24px rgba(69,59,108,.12), 0 0 0 4px rgba(82,211,160,.1); }
+.mic-level-control.is-hearing .audio-mic { color: #347d67; }
+.mic-level-control.is-hearing .audio-mic-wave { opacity: var(--mic-wave-opacity); }
+.mic-level-control.is-hearing .audio-mic-wave-left { transform: translateX(var(--mic-wave-left-offset)) scale(1); }
+.mic-level-control.is-hearing .audio-mic-wave-right { transform: translateX(var(--mic-wave-right-offset)) scale(1); }
+.mic-level-control.is-hearing .audio-mic-energy { animation: audio-mic-breathe .9s ease-in-out infinite alternate; }
+.audio-mic-slash { position: absolute; left: 1px; top: 11px; width: 21px; height: 2px; border-radius: 3px; background: #d05f79; box-shadow: 0 0 0 2px rgba(255,240,242,.88); opacity: 0; transform: rotate(48deg) scaleX(.7); transition: opacity .18s ease, transform .18s ease; }
+.round-control-muted { color: #d05f79; border-color: rgba(208,95,121,.34); background: rgba(255,240,242,.94); box-shadow: 0 10px 24px rgba(113,56,77,.13); }
+.round-control-muted .audio-mic { color: #c46177; }
+.round-control-muted .audio-mic-fill, .round-control-muted .audio-mic-wave { opacity: 0; }
+.round-control-muted .audio-mic-slash { opacity: 1; transform: rotate(48deg) scaleX(1); }
 
 .conversation-panel { grid-area: conversation; position: relative; min-width: 0; display: flex; flex-direction: column; overflow: hidden; isolation: isolate; border-radius: 30px; padding: 24px 24px 18px; background: var(--surface); backdrop-filter: blur(20px); }
 .conversation-panel > :not(.web-petal-field) { position: relative; z-index: 1; }
@@ -691,6 +714,7 @@ h1 { margin: 0; font-size: clamp(23px, 2vw, 29px); letter-spacing: -.05em; line-
 @keyframes wave { from { height: 5px; } to { height: 22px; } }
 @keyframes mcp-activity-spin { to { transform: rotate(360deg); } }
 @keyframes message-cancel-pulse { 0%,100% { box-shadow:0 0 0 0 rgba(206,107,130,.32); } 50% { box-shadow:0 0 0 5px rgba(206,107,130,0); } }
+@keyframes audio-mic-breathe { from { filter: saturate(.92); } to { filter: saturate(1.2) brightness(1.08); } }
 @keyframes settings-enter { from { opacity: 0; transform: translateX(10px) scale(.985); } to { opacity: 1; transform: none; } }
 @keyframes mcp-modal-enter { from { opacity: 0; } to { opacity: 1; } }
 

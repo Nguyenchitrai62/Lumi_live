@@ -1488,6 +1488,7 @@ export default function Home() {
           petalsEnabled={petalsEnabled}
           status={status}
           isMuted={isMuted}
+          micLevel={micLevel}
           mouthFrame={mouthFrame}
           pixelAvatarState={pixelAvatarState}
           liveTranslationState={liveTranslationState}

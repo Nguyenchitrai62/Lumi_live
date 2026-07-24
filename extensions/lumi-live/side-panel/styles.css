@@ -230,11 +230,26 @@ body.vtuber-expanded .transcript { opacity: 0; visibility: hidden; }
 .primary.live { background: linear-gradient(135deg, #d8758b, #bd526b); }
 .primary:disabled, .secondary:disabled { opacity: .52; cursor: not-allowed; }
 .secondary { min-width: 70px; border: 1px solid var(--line); background: var(--surface-strong); }
-.mute-control { display: grid; place-items: center; width: 40px; min-width: 40px; padding: 0; }
-.mute-control-icon { width: 19px; height: 19px; overflow: visible; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.mute-control-slash { opacity: 0; color: var(--danger); stroke-width: 2.2; transition: opacity var(--ui-motion-fast) ease; }
-.mute-control[aria-pressed="true"] { color: var(--danger); border-color: rgba(206,107,130,.3); background: rgba(206,107,130,.1); }
-.mute-control[aria-pressed="true"] .mute-control-slash { opacity: 1; }
+.mute-control { --mic-level: 0; --mic-glow-opacity: 0; --mic-glow-scale: .82; --mic-wave-opacity: 0; --mic-wave-left-offset: -1px; --mic-wave-right-offset: 1px; position: relative; display: grid; place-items: center; width: 40px; min-width: 40px; overflow: visible; padding: 0; transition: color var(--ui-motion-fast) ease, border-color var(--ui-motion-fast) ease, background-color var(--ui-motion-fast) ease, box-shadow var(--ui-motion-fast) ease; }
+.mute-control-energy { position: absolute; inset: 3px; border-radius: 50%; background: radial-gradient(circle, rgba(87,218,166,.32), rgba(87,218,166,0) 68%); opacity: var(--mic-glow-opacity); transform: scale(var(--mic-glow-scale)); transition: opacity .12s linear, transform .12s ease-out; pointer-events: none; }
+.mute-control-icon { position: relative; z-index: 1; display: block; width: 21px; height: 24px; color: currentColor; transition: color var(--ui-motion-fast) ease; }
+.mute-control-body { position: absolute; left: 6.5px; top: 1px; width: 8px; height: 12.5px; overflow: hidden; border: 1.7px solid currentColor; border-radius: 6px; background: color-mix(in srgb, currentColor 8%, transparent); }
+.mute-control-fill { position: absolute; inset: 0; border-radius: 4px; background: linear-gradient(180deg, #8ce7c4 0%, #39bd8b 100%); box-shadow: 0 0 7px rgba(57,189,139,.62); transform: scaleY(var(--mic-level)); transform-origin: center bottom; transition: transform .1s ease-out, opacity var(--ui-motion-fast) ease; }
+.mute-control-cradle { position: absolute; left: 2.5px; top: 7.5px; width: 14px; height: 10px; border: 1.7px solid currentColor; border-top: 0; border-radius: 0 0 10px 10px; }
+.mute-control-stem { position: absolute; left: 9.7px; top: 17.5px; width: 1.7px; height: 4px; border-radius: 2px; background: currentColor; }
+.mute-control-base { position: absolute; left: 5.5px; top: 21.3px; width: 10px; height: 1.7px; border-radius: 2px; background: currentColor; }
+.mute-control-wave { position: absolute; top: 7.5px; width: 4px; height: 7px; opacity: 0; border-color: #45c996; transition: opacity .12s ease, transform .12s ease; }
+.mute-control-wave-left { left: -1px; border-left: 1.4px solid; border-radius: 7px 0 0 7px; transform: translateX(2px) scale(.72); }
+.mute-control-wave-right { right: -1px; border-right: 1.4px solid; border-radius: 0 7px 7px 0; transform: translateX(-2px) scale(.72); }
+.mute-control.is-hearing { color: #347d67; border-color: rgba(92,218,169,.68); background: color-mix(in srgb, var(--surface-strong) 82%, #d9f8ec 18%); box-shadow: 0 0 0 3px rgba(82,211,160,.1); }
+.mute-control.is-hearing .mute-control-wave { opacity: var(--mic-wave-opacity); }
+.mute-control.is-hearing .mute-control-wave-left { transform: translateX(var(--mic-wave-left-offset)) scale(1); }
+.mute-control.is-hearing .mute-control-wave-right { transform: translateX(var(--mic-wave-right-offset)) scale(1); }
+.mute-control.is-hearing .mute-control-energy { animation: mic-level-breathe .9s ease-in-out infinite alternate; }
+.mute-control-slash { position: absolute; left: .5px; top: 10.5px; width: 21px; height: 2px; border-radius: 3px; background: var(--danger); box-shadow: 0 0 0 2px color-mix(in srgb, var(--surface-strong) 86%, transparent); opacity: 0; transform: rotate(48deg) scaleX(.7); transition: opacity var(--ui-motion-fast) ease, transform var(--ui-motion-fast) ease; }
+.mute-control[aria-pressed="true"] { color: var(--danger); border-color: rgba(206,107,130,.3); background: rgba(206,107,130,.1); box-shadow: none; }
+.mute-control[aria-pressed="true"] .mute-control-fill, .mute-control[aria-pressed="true"] .mute-control-wave { opacity: 0; }
+.mute-control[aria-pressed="true"] .mute-control-slash { opacity: 1; transform: rotate(48deg) scaleX(1); }
 .mic-mark { width: 9px; height: 13px; border: 2px solid currentColor; border-radius: 7px; }
 .message-queue { display: grid; grid-template-columns: auto minmax(0,1fr) auto auto auto; align-items: center; gap: 7px; min-height: 38px; border: 1px solid rgba(128,104,207,.2); border-radius: 12px; padding: 5px 6px 5px 9px; color: var(--muted); background: rgba(248,246,253,.92); box-shadow: 0 5px 16px rgba(61,50,89,.06); }
 .message-queue[hidden] { display: none; }
@@ -343,5 +358,6 @@ body.vtuber-expanded .transcript { opacity: 0; visibility: hidden; }
 @keyframes thinking-stream-pulse { 50% { opacity: .35; transform: scale(.72); } }
 @keyframes mcp-activity-spin { to { transform: rotate(360deg); } }
 @keyframes message-cancel-pulse { 0%,100% { box-shadow:0 0 0 0 rgba(206,107,130,.32); } 50% { box-shadow:0 0 0 5px rgba(206,107,130,0); } }
+@keyframes mic-level-breathe { from { filter: saturate(.92); } to { filter: saturate(1.2) brightness(1.08); } }
 @keyframes panel-petal-field-enter { from { opacity: 0; } to { opacity: 1; } }
 @keyframes panel-petal-fall { 0% { transform: translate3d(0, -18px, 0) rotate(0deg) scale(var(--petal-scale)); opacity: 0; } 6% { opacity: var(--petal-opacity); } 32% { transform: translate3d(var(--drift-a), 32dvh, 0) rotate(var(--turn-a)) scale(var(--petal-scale)); } 67% { transform: translate3d(var(--drift-b), 67dvh, 0) rotate(var(--turn-b)) scale(var(--petal-scale)); } 84% { opacity: var(--petal-opacity); } 95% { opacity: var(--petal-fade-opacity); } 100% { transform: translate3d(var(--drift-c), calc(100dvh + 36px), 0) rotate(var(--turn-c)) scale(var(--petal-scale)); opacity: 0; } }

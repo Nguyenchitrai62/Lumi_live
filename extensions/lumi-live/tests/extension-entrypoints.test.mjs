@@ -106,6 +106,11 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /scrollTranscriptToLatest\(\)/);
   assert.match(controller, /revealTranscriptText\(message,\s*message\.text\)/);
   assert.match(controller, /!reconnectingExistingConversation\s*&&\s*!conversationHistory\.length/);
+  assert.match(controller, /buildSessionLifecycleConfig\(resumptionHandle\)/);
+  assert.match(controller, /response\.sessionResumptionUpdate/);
+  assert.match(controller, /response\.goAway/);
+  assert.match(controller, /scheduleAutomaticSessionReconnect/);
+  assert.match(controller, /armSessionRotation/);
   assert.match(controller, /window\.addEventListener\("unload"[^]*clearConversationContext\(\)/);
   assert.match(controller, /part\.thought\s*&&\s*part\.text/);
   assert.match(controller, /updateTranscript\("thinking",\s*part\.text\)/);
@@ -183,11 +188,33 @@ test("captures the active tab without a new permission and renders rich conversa
 
   assert.ok(manifest.permissions.includes("activeTab"));
   assert.ok(manifest.permissions.includes("tabs"));
+  assert.deepEqual(manifest.host_permissions, ["<all_urls>"]);
+  for (const unrelatedPermission of [
+    "clipboardRead",
+    "clipboardWrite",
+    "cookies",
+    "debugger",
+    "downloads",
+    "history",
+  ]) {
+    assert.equal(manifest.permissions.includes(unrelatedPermission), false);
+  }
   assert.match(sessionConfig, /name:\s*"browser_capture_screenshot"/);
   assert.match(worker, /chrome\.tabs\.captureVisibleTab/);
   assert.match(worker, /saveCapturedTabAsset/);
   assert.match(worker, /capture_tab_context_frame/);
+  assert.match(worker, /captureActiveTabContextFrame\(message\.windowId\)/);
+  assert.match(worker, /function isControllablePage[\s\S]+isWebPage\(url\) \|\| isFilePage\(url\)/);
+  assert.match(worker, /tabs:\s*listedTabs\.map\(serializeTab\)/);
+  assert.match(worker, /controllable:\s*isControllablePage\(tab\.url\)/);
+  assert.match(worker, /Allow access to file URLs/);
+  assert.match(worker, /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND/);
+  assert.match(worker, /describeTabCaptureError/);
   assert.match(controller, /captureCurrentTabFrame\(\)/);
+  assert.match(controller, /chrome\.windows\.getCurrent\(\)/);
+  assert.match(controller, /chrome\.permissions\.request\(\{\s*origins:\s*AUTOMATIC_TAB_CAPTURE_ORIGINS/);
+  assert.match(controller, /chrome\.permissions\.contains\(\{\s*origins:\s*AUTOMATIC_TAB_CAPTURE_ORIGINS/);
+  assert.match(controller, /screenshotAccessRequest/);
   assert.match(controller, /realtimeInput:\s*\{\s*video:\s*frame\s*\}/);
   assert.match(controller, /if\s*\(!frame\)[^]*Message not sent:[^]*return false/);
   assert.match(controller, /realtimeInput:\s*\{\s*video:\s*frame,\s*text:\s*clean/);

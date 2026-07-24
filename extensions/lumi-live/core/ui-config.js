@@ -1,6 +1,6 @@
 // Default settings
 // Thinking mặc định. Options: "minimal", "low", "medium", "high".
-export const DEFAULT_THINKING_LEVEL = "minimal";
+export const DEFAULT_THINKING_LEVEL = "low";
 // Giọng Gemini mặc định. Options: tên bất kỳ trong danh sách voice của Gemini Live.
 export const DEFAULT_VOICE_NAME = "Zephyr";
 // Avatar mặc định. Options: "pixel", "vtuber".

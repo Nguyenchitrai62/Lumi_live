@@ -103,11 +103,16 @@
             title="Turn on microphone"
             disabled
           >
-            <svg class="mute-control-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M8.5 10.5V6a3.5 3.5 0 0 1 7 0v4.5a3.5 3.5 0 0 1-7 0Z" />
-              <path d="M5.5 10.5a6.5 6.5 0 0 0 13 0M12 17v3M9 20h6" />
-              <path class="mute-control-slash" d="m5 4 14 16" />
-            </svg>
+            <span class="mute-control-energy" aria-hidden="true"></span>
+            <span class="mute-control-icon" aria-hidden="true">
+              <span class="mute-control-body"><span class="mute-control-fill"></span></span>
+              <span class="mute-control-cradle"></span>
+              <span class="mute-control-stem"></span>
+              <span class="mute-control-base"></span>
+              <span class="mute-control-wave mute-control-wave-left"></span>
+              <span class="mute-control-wave mute-control-wave-right"></span>
+              <span class="mute-control-slash"></span>
+            </span>
           </button>
         </div>
         <div id="messageQueue" class="message-queue" aria-live="polite" hidden>
