@@ -22,7 +22,9 @@ If the Gemini key is missing or invalid, a centered warning opens Lumi Settings 
 
 The chat box remains editable while Lumi is responding or reconnecting. Sending during an active response adds the message to a visible queue and sends it automatically when the current turn finishes. Choose **Steer** on the queue row to interrupt the current turn and send that message immediately, or use the trash icon to remove it. Voice transcripts and typed turns are kept only in the side panel's memory and are supplied as initial history after a WebSocket reconnect, so Lumi stays silent instead of greeting again. Closing the side panel clears that conversation context.
 
-Long-running Live sessions use Gemini's context-window compression and session-resumption handles. While idle, Lumi rotates the underlying WebSocket before its normal connection lifetime expires, handles server `GoAway` messages, and retries transient disconnects in the background. This does not send fake user turns or heartbeat prompts to the model. If native resumption is unavailable, Lumi falls back to the panel's bounded conversation history.
+The chat composer accepts one JPEG, PNG, WebP, or GIF image per message from the attachment button, the clipboard, or drag and drop. Lumi shows a removable preview, resizes the image locally before sending it as a Gemini Live video frame, and omits the automatic active-tab screenshot for that message so the attached image remains the only visual context.
+
+Long-running Live sessions use Gemini's context-window compression and session-resumption handles. While idle, Lumi opens and completes a resumed successor WebSocket before closing its predecessor, handles server `GoAway` messages, and retries transient disconnects in the background. This does not send fake user turns or heartbeat prompts to the model. If native resumption is unavailable, Lumi falls back to the panel's bounded conversation history.
 
 ## Live video translation
 

@@ -130,6 +130,24 @@
           </button>
         </div>
         <form id="messageForm" class="message-form">
+          <input
+            id="imageAttachmentInput"
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/gif"
+            hidden
+          />
+          <div id="imageAttachmentTray" class="image-attachment-tray" aria-live="polite" hidden></div>
+          <button
+            id="imageAttachmentButton"
+            class="image-attachment-button"
+            type="button"
+            aria-label="Attach image"
+            title="Attach an image, or paste and drop one here"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M8.5 12.5l5.9-5.9a3.2 3.2 0 014.5 4.5l-7.8 7.8a5 5 0 01-7.1-7.1l8.1-8.1" />
+            </svg>
+          </button>
           <label class="sr-only" for="messageInput">Message Lumi</label>
           <div class="message-input-wrap">
             <textarea
@@ -143,6 +161,10 @@
             <span class="message-send-icon" aria-hidden="true">↑</span>
             <span class="message-cancel-icon" aria-hidden="true"></span>
           </button>
+          <div id="imageDropHint" class="image-drop-hint" aria-hidden="true">
+            <strong>Drop image here</strong>
+            <span>JPEG, PNG, WebP, or GIF up to 12 MB</span>
+          </div>
         </form>
         <div class="status-row">
           <p id="statusLine" class="status-line" role="status" aria-live="polite" aria-atomic="true">Open settings and save your Gemini API key.</p>

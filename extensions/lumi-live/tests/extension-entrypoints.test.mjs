@@ -94,10 +94,9 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(styles, /\.connection-notice-backdrop[^}]+place-items:\s*center/);
   assert.match(controller, /thinkingConfig:\s*buildThinkingConfig\(sessionThinkingLevel\)/);
   assert.match(controller, /tools:\s*\[\{ functionDeclarations \}\]/);
-  assert.match(controller, /historyConfig:\s*\{\s*initialHistoryInClientContent:\s*true\s*\}/);
   assert.match(controller, /sendJson\(buildInitialHistoryClientContent\(conversationHistory\),\s*sourceSocket\)/);
   assert.match(controller, /elements\.messageInput\.disabled\s*=\s*textSendPending/);
-  assert.match(controller, /queueUserMessage\(message\)/);
+  assert.match(controller, /queueUserMessage\(message,\s*attachment\)/);
   assert.match(controller, /function steerQueuedUserMessage\(\)/);
   assert.match(controller, /getTranscriptRevealDurationMs\(remainingCharacterCount\)/);
   assert.match(controller, /function setVisibleTranscriptText\(message,\s*text\)[^]*message\.role === "lumi"[^]*renderMarkdown\(message\.content,\s*visibleText\)/);
@@ -106,18 +105,29 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /scrollTranscriptToLatest\(\)/);
   assert.match(controller, /revealTranscriptText\(message,\s*message\.text\)/);
   assert.match(controller, /!reconnectingExistingConversation\s*&&\s*!conversationHistory\.length/);
-  assert.match(controller, /buildSessionLifecycleConfig\(resumptionHandle\)/);
+  assert.match(controller, /buildSessionHandshakeConfig\(resumptionHandle\)/);
   assert.match(controller, /response\.sessionResumptionUpdate/);
   assert.match(controller, /response\.goAway/);
   assert.match(controller, /scheduleAutomaticSessionReconnect/);
   assert.match(controller, /armSessionRotation/);
+  const reconnectSource = controller.slice(
+    controller.indexOf("function scheduleAutomaticSessionReconnect"),
+    controller.indexOf("function resetSessionRecoveryState"),
+  );
+  assert.match(reconnectSource, /reconnectInBackground\s*=\s*sessionStatus === "ready"/);
+  assert.match(reconnectSource, /canHandoffBeforeClosing/);
+  assert.match(reconnectSource, /predecessorSocket:\s*previousSocket/);
+  assert.match(reconnectSource, /if \(!reconnectInBackground\)\s*\{\s*setSessionStatus\("connecting"/);
+  assert.match(reconnectSource, /openGeminiSocket\(sessionConnectionOptions,\s*\{ background: reconnectInBackground \}\)/);
+  assert.match(controller, /pendingSessionHandoffSocket\s*=\s*sessionSocket/);
+  assert.match(controller, /predecessorSocket\.close\(1000,\s*"Gemini Live handoff complete"\)/);
   assert.match(controller, /window\.addEventListener\("unload"[^]*clearConversationContext\(\)/);
   assert.match(controller, /part\.thought\s*&&\s*part\.text/);
   assert.match(controller, /updateTranscript\("thinking",\s*part\.text\)/);
   assert.match(controller, /document\.createElement\("details"\)/);
   assert.match(controller, /collapseThinkingTranscript\(\);\s*updateTranscript\("lumi"/);
   assert.match(controller, /showMissingKeyNotice\(message\)/);
-  assert.match(controller, /showReconnectNotice\(message\)/);
+  assert.match(controller, /showReconnectNotice\(message/);
   assert.match(controller, /EARLY_CONNECTION_DROP_MS\s*=\s*3000/);
   assert.match(controller, /performance\.now\(\) - sessionReadyAt <= EARLY_CONNECTION_DROP_MS/);
   assert.match(controller, /showReconnectNotice\(message,\s*\{ earlyDisconnect: disconnectedSoonAfterConnect \}\)/);
@@ -174,7 +184,9 @@ test("side panel connects chat without requiring a microphone and remembers mic 
   assert.match(toggleSource, /\[MICROPHONE_ENABLED_STORAGE_KEY\]: false/);
   assert.match(toggleSource, /panelAudio\.stopMicrophone\(\)/);
   assert.match(audioController, /async function prepareOutput\(\)/);
+  assert.match(audioController, /function isUserSpeechActive\(\)/);
   assert.match(audioController, /function stopMicrophone\(\)/);
+  assert.match(controller, /sessionHasInFlightWork\(\)[^]*panelAudio\.isUserSpeechActive\(\)/);
 });
 
 test("captures the active tab without a new permission and renders rich conversation Markdown", async () => {
@@ -206,7 +218,8 @@ test("captures the active tab without a new permission and renders rich conversa
   assert.match(worker, /captureActiveTabContextFrame\(message\.windowId\)/);
   assert.match(worker, /function isControllablePage[\s\S]+isWebPage\(url\) \|\| isFilePage\(url\)/);
   assert.match(worker, /tabs:\s*listedTabs\.map\(serializeTab\)/);
-  assert.match(worker, /controllable:\s*isControllablePage\(tab\.url\)/);
+  assert.match(worker, /function serializeTab\(tab\)[^]*sanitizeActiveContextUrl\(tab\.url/);
+  assert.match(worker, /controllable:\s*isControllablePage\(url\)/);
   assert.match(worker, /Allow access to file URLs/);
   assert.match(worker, /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND/);
   assert.match(worker, /describeTabCaptureError/);
@@ -217,7 +230,9 @@ test("captures the active tab without a new permission and renders rich conversa
   assert.match(controller, /screenshotAccessRequest/);
   assert.match(controller, /realtimeInput:\s*\{\s*video:\s*frame\s*\}/);
   assert.match(controller, /if\s*\(!frame\)[^]*Message not sent:[^]*return false/);
-  assert.match(controller, /realtimeInput:\s*\{\s*video:\s*frame,\s*text:\s*clean/);
+  assert.match(controller, /sendJson\(\{\s*realtimeInput:\s*\{\s*video:\s*frame\s*\}\s*\}\)/);
+  assert.match(controller, /sendJson\(\{\s*realtimeInput:\s*\{\s*text:\s*modelText\s*\}\s*\}\)/);
+  assert.match(controller, /if \(!videoSent \|\| !textSent\)[^]*failedSocket\.close\(4002/);
   assert.match(controller, /onUserSpeechStart:[^]*captureAndSendCurrentTabFrame\(\)/);
   assert.match(audioController, /onUserSpeechStart\?\.\(\)/);
   assert.match(controller, /createCapturedTabMessage\(result\)/);
@@ -230,6 +245,9 @@ test("captures the active tab without a new permission and renders rich conversa
   assert.match(styles, /\.markdown-table-scroll/);
   assert.match(styles, /\.markdown-body a:hover[^}]+background/);
   assert.match(styles, /\.message-capture/);
+  assert.match(worker, /target:\s*\{\s*tabId,\s*allFrames:\s*true\s*\}/);
+  assert.match(worker, /waitForClickedTabToSettle\(tab\.id,\s*action\)/);
+  assert.match(worker, /if \(!openedTab && !clickError\)/);
 });
 
 test("opens a requested website even when the current tab cannot host PageAgent", async () => {

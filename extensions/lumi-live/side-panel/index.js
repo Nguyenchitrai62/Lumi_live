@@ -12,7 +12,7 @@ import {
   BROWSER_UI_ACTION_TOOLS,
   automaticSessionReconnectDelayMs,
   buildInitialHistoryClientContent,
-  buildSessionLifecycleConfig,
+  buildSessionHandshakeConfig,
   buildThinkingConfig,
   buildSessionInstruction,
   configureMcpTools,
@@ -58,6 +58,12 @@ import {
   registerPendingFunctionCalls,
   settlePendingFunctionCalls,
 } from "../live/tool-call-ledger.js";
+import {
+  imageFilesFromClipboard,
+  imageFilesFromDrop,
+  prepareImageAttachment,
+  queuedImageMessagePreview,
+} from "./image-attachments.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
@@ -121,6 +127,9 @@ const elements = {
   messageQueueSteer: document.querySelector("#messageQueueSteer"),
   messageQueueRemove: document.querySelector("#messageQueueRemove"),
   messageForm: document.querySelector("#messageForm"),
+  imageAttachmentButton: document.querySelector("#imageAttachmentButton"),
+  imageAttachmentInput: document.querySelector("#imageAttachmentInput"),
+  imageAttachmentTray: document.querySelector("#imageAttachmentTray"),
   messageInput: document.querySelector("#messageInput"),
   messageSubmit: document.querySelector("#messageForm button[type='submit']"),
   statusLine: document.querySelector("#statusLine"),
@@ -164,6 +173,9 @@ let pendingThinkingReconnect = false;
 let hasConnectedInPanelLifetime = false;
 let activeTabFrameCapture = null;
 let textSendPending = false;
+let imageAttachmentPending = false;
+let pendingImageAttachment = null;
+let imageDragDepth = 0;
 let shouldMaintainGeminiSession = false;
 let sessionConnectionOptions = null;
 let sessionResumptionHandle = "";
@@ -171,6 +183,8 @@ let automaticSessionReconnectAttempt = 0;
 let automaticSessionReconnectTimerId = null;
 let sessionRotationTimerId = null;
 let serverRotationPending = false;
+let backgroundSessionReconnectPending = false;
+let pendingSessionHandoffSocket = null;
 const AUTOMATIC_TAB_CAPTURE_ORIGINS = ["<all_urls>"];
 const conversationHistory = [];
 const queuedUserMessages = [];
@@ -179,7 +193,7 @@ const activeTranscriptReveals = new Set();
 
 let petalsEnabled = DEFAULT_FALLING_PETALS_ENABLED;
 
-let setupTimeoutId = null;
+const setupTimeoutIds = new Set();
 
 const partialMessages = { user: null, lumi: null, thinking: null };
 
@@ -203,10 +217,10 @@ const panelAudio = createPanelAudioController({
   avatarController,
   elements,
   getInputState: () => ({
-    canSendAudio: sessionStatus === "ready"
+    canSendAudio: isGeminiTransportReady()
       && !isMuted
       && !turnCancellationPending
-      && websocket?.readyState === WebSocket.OPEN,
+      && !pendingSessionHandoffSocket,
     freshUserInputStarted,
     suppressServerOutputUntilNextUserTurn,
   }),
@@ -409,14 +423,99 @@ function requestSharedTabAudio(targetLanguageCode, failureReason = "") {
   });
 }
 
+function formatImageAttachmentSize(byteSize) {
+  const size = Math.max(0, Number(byteSize) || 0);
+  return size >= 1024 * 1024
+    ? `${(size / (1024 * 1024)).toFixed(1)} MB`
+    : `${Math.max(1, Math.round(size / 1024))} KB`;
+}
+
+function renderPendingImageAttachment() {
+  elements.imageAttachmentTray.replaceChildren();
+  elements.imageAttachmentTray.hidden = !pendingImageAttachment;
+  if (!pendingImageAttachment) return;
+
+  const card = document.createElement("div");
+  card.className = "image-attachment-card";
+  const preview = document.createElement("img");
+  preview.src = pendingImageAttachment.previewDataUrl;
+  preview.alt = `Attached image ${pendingImageAttachment.name}`;
+  const copy = document.createElement("div");
+  copy.className = "image-attachment-copy";
+  const name = document.createElement("strong");
+  name.textContent = pendingImageAttachment.name;
+  const details = document.createElement("span");
+  details.textContent = `${pendingImageAttachment.width} × ${pendingImageAttachment.height} · ${formatImageAttachmentSize(pendingImageAttachment.byteSize)}`;
+  copy.append(name, details);
+  const remove = document.createElement("button");
+  remove.className = "image-attachment-remove";
+  remove.type = "button";
+  remove.setAttribute("aria-label", "Remove attached image");
+  remove.title = "Remove attached image";
+  remove.innerHTML = `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M6 6l12 12M18 6L6 18"></path>
+    </svg>
+  `;
+  remove.addEventListener("click", () => {
+    pendingImageAttachment = null;
+    renderPendingImageAttachment();
+    syncMessageComposer();
+    elements.messageInput.focus();
+  });
+  card.append(preview, copy, remove);
+  elements.imageAttachmentTray.append(card);
+}
+
+function clearPendingImageAttachment() {
+  pendingImageAttachment = null;
+  elements.imageAttachmentInput.value = "";
+  renderPendingImageAttachment();
+}
+
+async function attachImageFiles(files) {
+  const selectedFiles = Array.from(files || []);
+  const file = selectedFiles[0];
+  if (!file || imageAttachmentPending) {
+    if (!file) elements.statusLine.textContent = "Drop or paste a JPEG, PNG, WebP, or GIF image.";
+    return false;
+  }
+
+  imageAttachmentPending = true;
+  syncMessageComposer();
+  elements.statusLine.textContent = "Preparing image attachment…";
+  try {
+    const attachment = await prepareImageAttachment(file);
+    pendingImageAttachment = attachment;
+    renderPendingImageAttachment();
+    elements.statusLine.textContent = selectedFiles.length > 1
+      ? `Attached ${attachment.name}. Lumi sends one image per message, so the remaining images were skipped.`
+      : `Attached ${attachment.name}. Add a message or send the image now.`;
+    return true;
+  } catch (error) {
+    elements.statusLine.textContent = error instanceof Error
+      ? `Could not attach image: ${error.message}`
+      : "Could not attach this image.";
+    return false;
+  } finally {
+    imageAttachmentPending = false;
+    elements.imageAttachmentInput.value = "";
+    syncMessageComposer();
+  }
+}
+
 function syncMessageComposer() {
   const ready = sessionStatus === "ready";
+  const transportReady = isGeminiTransportReady();
   const hasText = Boolean(elements.messageInput.value.trim());
-  const cancelMode = ready && agentTurnActive && !turnCancellationPending && !hasText;
-  const queueMode = ready && (agentTurnActive || turnCancellationPending) && hasText;
+  const hasContent = hasText || Boolean(pendingImageAttachment);
+  const cancelMode = ready && agentTurnActive && !turnCancellationPending && !hasContent;
+  const queueMode = ready
+    && (agentTurnActive || turnCancellationPending || !transportReady)
+    && hasContent;
   elements.messageInput.disabled = textSendPending;
   elements.messageInput.placeholder = textSendPending
-    ? "Capturing the current tab…"
+    ? "Preparing your message…"
     : ready
     ? turnCancellationPending
       ? "Type your next message while Lumi stops…"
@@ -430,18 +529,23 @@ function syncMessageComposer() {
     : queueMode ? "Add message to queue" : "Send message";
   elements.messageSubmit.setAttribute("aria-label", submitLabel);
   elements.messageSubmit.title = submitLabel;
-  elements.messageSubmit.disabled = textSendPending || (!hasText && !cancelMode);
+  elements.imageAttachmentButton.disabled = textSendPending || imageAttachmentPending;
+  elements.messageSubmit.disabled =
+    textSendPending
+    || imageAttachmentPending
+    || (!hasContent && !cancelMode);
 }
 
 function syncQueuedMessagePanel() {
   const count = queuedUserMessages.length;
   elements.messageQueue.hidden = count === 0;
   if (!count) return;
-  elements.messageQueuePreview.textContent = queuedUserMessages[0];
-  elements.messageQueuePreview.title = queuedUserMessages[0];
+  const preview = queuedImageMessagePreview(queuedUserMessages[0]);
+  elements.messageQueuePreview.textContent = preview;
+  elements.messageQueuePreview.title = preview;
   elements.messageQueueCount.textContent = count > 1 ? `+${count - 1}` : "";
-  elements.messageQueueSteer.disabled = turnCancellationPending;
-  elements.messageQueueSteer.title = sessionStatus === "ready"
+  elements.messageQueueSteer.disabled = turnCancellationPending || !isGeminiTransportReady();
+  elements.messageQueueSteer.title = isGeminiTransportReady()
     ? "Interrupt the current turn and send this now"
     : "Send this as soon as Lumi reconnects";
 }
@@ -613,11 +717,20 @@ function setSessionStatus(nextStatus, message) {
   avatarController.syncState();
 }
 
-function clearSetupTimeout() {
-  if (setupTimeoutId !== null) {
-    clearTimeout(setupTimeoutId);
-    setupTimeoutId = null;
+function clearSetupTimeout(socket = null) {
+  if (socket) {
+    const timeoutId = socket.lumiSetupTimeoutId;
+    if (timeoutId !== null && timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+      setupTimeoutIds.delete(timeoutId);
+      socket.lumiSetupTimeoutId = null;
+    }
+    return;
   }
+  for (const timeoutId of setupTimeoutIds) clearTimeout(timeoutId);
+  setupTimeoutIds.clear();
+  if (websocket) websocket.lumiSetupTimeoutId = null;
+  if (pendingSessionHandoffSocket) pendingSessionHandoffSocket.lumiSetupTimeoutId = null;
 }
 
 function describeStartError(error) {
@@ -739,6 +852,10 @@ function clearConversationContext() {
   }
   elements.transcript.innerHTML = initialTranscriptMarkup;
   elements.messageInput.value = "";
+  imageAttachmentPending = false;
+  imageDragDepth = 0;
+  elements.messageForm.classList.remove("is-image-dragging");
+  clearPendingImageAttachment();
   resizeMessageInput();
   syncMessageComposer();
   syncQueuedMessagePanel();
@@ -866,7 +983,7 @@ function revealTranscriptText(message, targetText) {
   message.revealFrameId = requestAnimationFrame(revealFrame);
 }
 
-function createMessage(role, text) {
+function createMessage(role, text, { attachment = null } = {}) {
   if (role === "thinking") {
     const details = document.createElement("details");
     details.className = "message-thinking";
@@ -913,12 +1030,21 @@ function createMessage(role, text) {
   }
   const article = document.createElement("article");
   article.className = `message message-${role}`;
+  if (role === "user" && attachment) article.classList.add("message-attachment");
   const author = document.createElement("span");
   author.textContent = role === "lumi" ? "Lumi" : "You";
   const content = document.createElement(role === "lumi" ? "div" : "p");
   if (role === "lumi") content.className = "message-content";
   content.textContent = text;
-  article.append(author, content);
+  article.append(author);
+  if (role === "user" && attachment) {
+    const image = document.createElement("img");
+    image.className = "message-attachment-preview";
+    image.src = attachment.previewDataUrl;
+    image.alt = attachment.name || "Attached image";
+    article.append(image);
+  }
+  article.append(content);
   elements.transcript.append(article);
   scrollTranscriptToLatest();
   return { article, content, role, text, visibleText: text };
@@ -1007,8 +1133,25 @@ function finalizeTranscript(role) {
 
 function sendJson(payload, targetSocket = websocket) {
   if (targetSocket?.readyState !== WebSocket.OPEN) return false;
-  targetSocket.send(JSON.stringify(payload));
-  return true;
+  try {
+    targetSocket.send(JSON.stringify(payload));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isTrackedGeminiSocket(socket) {
+  return socket === websocket || socket === pendingSessionHandoffSocket;
+}
+
+function isGeminiTransportReady() {
+  return Boolean(
+    sessionStatus === "ready"
+    && !backgroundSessionReconnectPending
+    && websocket?.readyState === WebSocket.OPEN
+    && websocket.lumiSetupComplete,
+  );
 }
 
 function clearAutomaticSessionReconnectTimer() {
@@ -1027,6 +1170,7 @@ function sessionHasInFlightWork() {
   return Boolean(
     agentTurnActive
     || turnCancellationPending
+    || panelAudio.isUserSpeechActive()
     || browserToolRunning
     || pendingToolCallIds.size
     || pendingLiveTranslationStart
@@ -1042,6 +1186,7 @@ function armSessionRotation(delayMs = SESSION_CONNECTION_ROTATION_MS) {
     if (
       sessionStatus !== "ready"
       || websocket?.readyState !== WebSocket.OPEN
+      || pendingSessionHandoffSocket
       || sessionHasInFlightWork()
       || !sessionResumptionHandle
     ) {
@@ -1052,15 +1197,38 @@ function armSessionRotation(delayMs = SESSION_CONNECTION_ROTATION_MS) {
   }, delayMs);
 }
 
-function scheduleAutomaticSessionReconnect(reason, { delayMs = null } = {}) {
+function scheduleAutomaticSessionReconnect(
+  reason,
+  { delayMs = null, allowInFlight = false } = {},
+) {
   if (
     !shouldMaintainGeminiSession
     || !sessionConnectionOptions
     || automaticSessionReconnectTimerId !== null
-    || sessionHasInFlightWork()
+    || pendingSessionHandoffSocket
+    || (!allowInFlight && sessionHasInFlightWork())
     || automaticSessionReconnectAttempt >= MAX_AUTOMATIC_SESSION_RECONNECT_ATTEMPTS
   ) return false;
 
+  const previousSocket = websocket;
+  const canHandoffBeforeClosing = Boolean(
+    !allowInFlight
+    && sessionStatus === "ready"
+    && previousSocket?.readyState === WebSocket.OPEN
+    && previousSocket.lumiSetupComplete
+    && sessionResumptionHandle,
+  );
+  if (
+    !allowInFlight
+    && previousSocket?.readyState === WebSocket.OPEN
+    && !canHandoffBeforeClosing
+  ) {
+    armSessionRotation(SESSION_ROTATION_RETRY_MS);
+    return false;
+  }
+
+  const reconnectInBackground = sessionStatus === "ready"
+    || backgroundSessionReconnectPending;
   automaticSessionReconnectAttempt += 1;
   const reconnectDelayMs = delayMs ?? automaticSessionReconnectDelayMs(
     automaticSessionReconnectAttempt,
@@ -1068,7 +1236,15 @@ function scheduleAutomaticSessionReconnect(reason, { delayMs = null } = {}) {
   clearSessionRotationTimer();
   serverRotationPending = false;
 
-  const previousSocket = websocket;
+  if (canHandoffBeforeClosing) {
+    backgroundSessionReconnectPending = true;
+    openGeminiSocket(sessionConnectionOptions, {
+      background: true,
+      predecessorSocket: previousSocket,
+    });
+    return true;
+  }
+
   websocket = null;
   if (previousSocket && previousSocket.readyState < WebSocket.CLOSING) {
     const closeReason = String(reason || "Refreshing Gemini Live session")
@@ -1078,23 +1254,42 @@ function scheduleAutomaticSessionReconnect(reason, { delayMs = null } = {}) {
     previousSocket.close(1000, closeReason);
   }
 
-  setSessionStatus("connecting", "Lumi is quietly restoring the Live connectionâ€¦");
+  backgroundSessionReconnectPending = reconnectInBackground;
+  if (!reconnectInBackground) {
+    setSessionStatus("connecting", "Opening Gemini Live...");
+  }
   automaticSessionReconnectTimerId = setTimeout(() => {
     automaticSessionReconnectTimerId = null;
     if (!shouldMaintainGeminiSession || !sessionConnectionOptions) return;
-    openGeminiSocket(sessionConnectionOptions);
+    openGeminiSocket(sessionConnectionOptions, { background: reconnectInBackground });
   }, reconnectDelayMs);
   return true;
+}
+
+function closePendingSessionHandoff(reason = "Ending Gemini Live handoff") {
+  const pendingSocket = pendingSessionHandoffSocket;
+  pendingSessionHandoffSocket = null;
+  if (!pendingSocket) return;
+  clearSetupTimeout(pendingSocket);
+  if (pendingSocket.readyState < WebSocket.CLOSING) {
+    try {
+      pendingSocket.close(1000, reason.slice(0, 80));
+    } catch {
+      // The socket may still be transitioning from CONNECTING to CLOSED.
+    }
+  }
 }
 
 function resetSessionRecoveryState() {
   clearAutomaticSessionReconnectTimer();
   clearSessionRotationTimer();
+  closePendingSessionHandoff();
   shouldMaintainGeminiSession = false;
   sessionConnectionOptions = null;
   sessionResumptionHandle = "";
   automaticSessionReconnectAttempt = 0;
   serverRotationPending = false;
+  backgroundSessionReconnectPending = false;
 }
 
 function setLiveTranslationBadge(state, detail = "") {
@@ -1255,13 +1450,15 @@ async function runMcpTool(tool, args, callId) {
 async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
   const raw = typeof event.data === "string" ? event.data : await event.data.text();
   const response = JSON.parse(raw);
-  if (sourceSocket !== websocket) return;
+  const completingHandoff = sourceSocket === pendingSessionHandoffSocket;
+  if (sourceSocket !== websocket && !completingHandoff) return;
 
   const resumptionUpdate = response.sessionResumptionUpdate;
   if (resumptionUpdate?.resumable && resumptionUpdate.newHandle) {
     sessionResumptionHandle = resumptionUpdate.newHandle;
   }
   if (response.goAway) serverRotationPending = true;
+  if (completingHandoff && !response.setupComplete) return;
 
   for (const id of response.toolCallCancellation?.ids || []) {
     if (pendingToolCallNames.get(id) === LIVE_TRANSLATE_TOOL_NAME && pendingLiveTranslationStart) {
@@ -1274,13 +1471,22 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
     finishMcpActivity(id, "cancelled", "Gemini cancelled this tool call because the conversation turn was interrupted.");
   }
   if (response.setupComplete) {
+    const predecessorSocket = completingHandoff
+      ? sourceSocket.lumiPredecessorSocket
+      : null;
+    if (completingHandoff) {
+      pendingSessionHandoffSocket = null;
+      websocket = sourceSocket;
+      sourceSocket.lumiPredecessorSocket = null;
+    }
     sourceSocket.lumiSetupComplete = true;
+    const completedInBackground = sourceSocket.lumiBackgroundReconnect === true;
     automaticSessionReconnectAttempt = 0;
     clearAutomaticSessionReconnectTimer();
     armSessionRotation();
     sessionReadyAt = performance.now();
     hideConnectionNotice();
-    clearSetupTimeout();
+    clearSetupTimeout(sourceSocket);
     clearTurnCancellationTimers();
     clearTurnCancellationBoundaryTimeout();
     turnCancellationPending = false;
@@ -1303,7 +1509,21 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
       || (isMuted
         ? "Chat is ready. Microphone is off; turn it on whenever you want to speak."
         : "Lumi is listening. PageAgent automatically follows your active web tab.");
-    setSessionStatus("ready", readyMessage);
+    backgroundSessionReconnectPending = false;
+    if (predecessorSocket?.readyState < WebSocket.CLOSING) {
+      try {
+        predecessorSocket.close(1000, "Gemini Live handoff complete");
+      } catch {
+        // The predecessor may have closed while the successor was finishing setup.
+      }
+    }
+    if (completedInBackground) {
+      elements.muteButton.disabled = false;
+      syncMessageComposer();
+      syncQueuedMessagePanel();
+    } else {
+      setSessionStatus("ready", readyMessage);
+    }
     elements.microphoneHelpButton.hidden = !microphonePermissionHelp;
     if (queuedUserMessages.length) {
       flushQueuedUserMessage();
@@ -1511,7 +1731,10 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
   }
 }
 
-function openGeminiSocket(options) {
+function openGeminiSocket(
+  options,
+  { background = false, predecessorSocket = null } = {},
+) {
   const {
     apiKey,
     voiceName,
@@ -1521,30 +1744,39 @@ function openGeminiSocket(options) {
     activeTabContext,
   } = options;
   sessionConnectionOptions = options;
-  setSessionStatus("connecting", "Opening Gemini Live...");
-  sessionReadyAt = 0;
+  const handoffPredecessor = predecessorSocket?.readyState === WebSocket.OPEN
+    && predecessorSocket.lumiSetupComplete
+    ? predecessorSocket
+    : null;
+  const reconnectInBackground = background === true && sessionStatus === "ready";
+  backgroundSessionReconnectPending = reconnectInBackground;
+  if (!reconnectInBackground) {
+    setSessionStatus("connecting", "Opening Gemini Live...");
+  }
+  if (!handoffPredecessor) sessionReadyAt = 0;
   const functionDeclarations = [...BUILTIN_TOOLS, ...mcpFunctionDeclarations];
-  websocket = new WebSocket(`${WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`);
-  const sessionSocket = websocket;
+  const sessionSocket = new WebSocket(`${WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`);
+  if (handoffPredecessor) pendingSessionHandoffSocket = sessionSocket;
+  else websocket = sessionSocket;
   const resumptionHandle = sessionResumptionHandle;
   sessionSocket.lumiResumptionHandle = resumptionHandle;
-  setupTimeoutId = setTimeout(() => {
-    if (sessionStatus !== "connecting" || websocket !== sessionSocket) return;
-    intentionalClose = true;
-    websocket = null;
+  sessionSocket.lumiBackgroundReconnect = reconnectInBackground;
+  sessionSocket.lumiPredecessorSocket = handoffPredecessor;
+  sessionSocket.lumiSetupComplete = false;
+  const setupTimeoutId = setTimeout(() => {
+    setupTimeoutIds.delete(setupTimeoutId);
+    sessionSocket.lumiSetupTimeoutId = null;
+    if (!isTrackedGeminiSocket(sessionSocket) || sessionSocket.lumiSetupComplete) return;
     sessionSocket.close(4000, "Gemini setup timed out");
-    cleanupMedia();
-    const seconds = GEMINI_SETUP_TIMEOUT_MS / 1000;
-    const message = `Gemini Live did not finish setup within ${seconds} seconds. Check API access, then retry.`;
-    setSessionStatus("error", message);
-    showReconnectNotice(message);
   }, GEMINI_SETUP_TIMEOUT_MS);
+  sessionSocket.lumiSetupTimeoutId = setupTimeoutId;
+  setupTimeoutIds.add(setupTimeoutId);
   sessionSocket.onopen = () => {
-    if (websocket !== sessionSocket) return;
+    if (!isTrackedGeminiSocket(sessionSocket)) return;
     sendJson({
       setup: {
         model: `models/${MODEL}`,
-        ...buildSessionLifecycleConfig(resumptionHandle),
+        ...buildSessionHandshakeConfig(resumptionHandle),
         generationConfig: {
           responseModalities: ["AUDIO"],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
@@ -1563,40 +1795,40 @@ function openGeminiSocket(options) {
         systemInstruction: { parts: [{ text: buildSessionInstruction(mcpInfo, activeTabContext) }] },
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        historyConfig: { initialHistoryInClientContent: true },
       },
     }, sessionSocket);
   };
   sessionSocket.onmessage = (event) => {
     void handleServerMessage(event, sessionSocket, sessionThinkingLevel).catch((error) => {
-      if (websocket !== sessionSocket) return;
-      intentionalClose = true;
-      websocket = null;
+      if (!isTrackedGeminiSocket(sessionSocket)) return;
+      console.warn("Gemini Live returned an unreadable response.", error);
       sessionSocket.close(4001, "Invalid Gemini response");
-      cleanupMedia();
-      const message = `Gemini Live returned an unreadable response: ${error instanceof Error ? error.message : "Unknown response"}`;
-      setSessionStatus("error", message);
-      showReconnectNotice(message);
     });
   };
   sessionSocket.onerror = () => {
-    if (websocket !== sessionSocket) return;
+    if (!isTrackedGeminiSocket(sessionSocket)) return;
+    if (sessionSocket.lumiBackgroundReconnect || sessionStatus === "ready") return;
     elements.statusLine.textContent = "Gemini Live connection failed; waiting for the server error details...";
   };
   sessionSocket.onclose = (event) => {
-    if (websocket !== sessionSocket) return;
+    if (!isTrackedGeminiSocket(sessionSocket)) return;
+    const closingActiveSocket = websocket === sessionSocket;
+    const closingHandoffSocket = pendingSessionHandoffSocket === sessionSocket;
+    const handoffPredecessorSocket = sessionSocket.lumiPredecessorSocket;
     const expected = intentionalClose;
     const reason = event.reason?.replace(/\s+/g, " ").trim() || "";
-    const disconnectedSoonAfterConnect = sessionReadyAt > 0
+    const disconnectedSoonAfterConnect = closingActiveSocket
+      && sessionReadyAt > 0
       && performance.now() - sessionReadyAt <= EARLY_CONNECTION_DROP_MS;
-    sessionReadyAt = 0;
-    clearSetupTimeout();
+    if (closingActiveSocket) sessionReadyAt = 0;
+    clearSetupTimeout(sessionSocket);
 
-    const rejected = !expected && sessionStatus === "connecting"
+    const rejected = !expected && !sessionSocket.lumiSetupComplete
       ? findRejectedMcpDeclaration(reason, functionDeclarations, activeMcpTools)
       : null;
     if (rejected) {
-      websocket = null;
+      if (closingActiveSocket) websocket = null;
+      if (closingHandoffSocket) pendingSessionHandoffSocket = null;
       activeMcpTools.delete(rejected.declaration.name);
       const declarationIndex = mcpFunctionDeclarations.findIndex(
         (declaration) => declaration.name === rejected.declaration.name,
@@ -1614,10 +1846,12 @@ function openGeminiSocket(options) {
         message: `${rejected.tool.serverName} exposed a declaration Gemini rejected. Lumi disabled only this tool and is reconnecting now; voice, chat, and other tools remain available.`,
         primaryLabel: "OK",
       });
-      setSessionStatus(
-        "connecting",
-        `Temporarily disabled incompatible MCP tool ${rejected.tool.toolName}. Retrying Gemini Live...`,
-      );
+      if (!sessionSocket.lumiBackgroundReconnect) {
+        setSessionStatus(
+          "connecting",
+          `Temporarily disabled incompatible MCP tool ${rejected.tool.toolName}. Retrying Gemini Live...`,
+        );
+      }
       openGeminiSocket({
         apiKey,
         voiceName,
@@ -1625,20 +1859,74 @@ function openGeminiSocket(options) {
         mcpInfo,
         mcpFunctionDeclarations,
         activeTabContext,
+      }, {
+        background: sessionSocket.lumiBackgroundReconnect,
+        predecessorSocket: handoffPredecessorSocket,
       });
       return;
     }
 
-    websocket = null;
-    if (!sessionSocket.lumiSetupComplete && resumptionHandle) {
-      sessionResumptionHandle = "";
+    if (closingActiveSocket) websocket = null;
+    if (closingHandoffSocket) pendingSessionHandoffSocket = null;
+    const invalidResumptionRequest = Boolean(
+      resumptionHandle
+      && event.code === 1007
+      && /invalid argument/i.test(reason)
+      && (!sessionSocket.lumiSetupComplete || disconnectedSoonAfterConnect),
+    );
+    if (
+      (!closingHandoffSocket && !sessionSocket.lumiSetupComplete && resumptionHandle)
+      || invalidResumptionRequest
+    ) {
+      if (sessionResumptionHandle === resumptionHandle) {
+        sessionResumptionHandle = "";
+      }
+    }
+
+    if (
+      closingHandoffSocket
+      && handoffPredecessorSocket?.readyState === WebSocket.OPEN
+      && shouldMaintainGeminiSession
+    ) {
+      websocket = handoffPredecessorSocket;
+      backgroundSessionReconnectPending = false;
+      const retryDelay = automaticSessionReconnectAttempt
+        >= MAX_AUTOMATIC_SESSION_RECONNECT_ATTEMPTS
+        ? SESSION_ROTATION_RETRY_MS
+        : automaticSessionReconnectDelayMs(automaticSessionReconnectAttempt);
+      if (automaticSessionReconnectAttempt >= MAX_AUTOMATIC_SESSION_RECONNECT_ATTEMPTS) {
+        automaticSessionReconnectAttempt = 0;
+      }
+      armSessionRotation(retryDelay);
+      syncMessageComposer();
+      syncQueuedMessagePanel();
+      if (queuedUserMessages.length && !sessionHasInFlightWork()) {
+        flushQueuedUserMessage();
+      }
+      return;
+    }
+
+    if (
+      closingActiveSocket
+      && pendingSessionHandoffSocket
+      && shouldMaintainGeminiSession
+    ) {
+      backgroundSessionReconnectPending = true;
+      return;
+    }
+
+    if (
+      websocket === handoffPredecessorSocket
+      && handoffPredecessorSocket?.readyState >= WebSocket.CLOSING
+    ) {
+      websocket = null;
     }
     if (
       !expected
       && !isGeminiKeyIssue(reason)
-      && !sessionHasInFlightWork()
       && scheduleAutomaticSessionReconnect(
         reason || "Gemini Live closed the idle connection.",
+        { allowInFlight: true },
       )
     ) return;
 
@@ -1912,72 +2200,92 @@ async function toggleMute() {
 async function sendText(
   text,
   {
+    attachment = null,
     clearComposer = true,
     render = true,
     remember = true,
     screenshotAccessRequest = null,
   } = {},
 ) {
-  const clean = text.trim();
+  const clean = String(text || "").trim();
+  const selectedAttachment = attachment?.frame?.data ? attachment : null;
   if (
-    !clean
+    (!clean && !selectedAttachment)
     || textSendPending
-    || sessionStatus !== "ready"
+    || !isGeminiTransportReady()
     || agentTurnActive
     || turnCancellationPending
   ) return false;
   textSendPending = true;
   syncMessageComposer();
-  const screenshotAccess = screenshotAccessRequest
-    ? await screenshotAccessRequest
-    : await getAutomaticTabCaptureAccess();
-  if (!screenshotAccess.granted) {
-    textSendPending = false;
-    elements.statusLine.textContent = `Message not sent: ${screenshotAccess.reason}`;
-    syncMessageComposer();
-    return false;
+  let frame = selectedAttachment?.frame || null;
+  if (!selectedAttachment) {
+    const screenshotAccess = screenshotAccessRequest
+      ? await screenshotAccessRequest
+      : await getAutomaticTabCaptureAccess();
+    if (!screenshotAccess.granted) {
+      textSendPending = false;
+      elements.statusLine.textContent = `Message not sent: ${screenshotAccess.reason}`;
+      syncMessageComposer();
+      return false;
+    }
+    const capture = await captureCurrentTabFrame();
+    frame = capture.frame;
+    if (!frame) {
+      textSendPending = false;
+      elements.statusLine.textContent = `Message not sent: ${capture.reason || "Lumi could not capture the visible active tab."}`;
+      syncMessageComposer();
+      return false;
+    }
   }
-  const capture = await captureCurrentTabFrame();
-  const { frame } = capture;
   textSendPending = false;
-  if (!frame) {
-    elements.statusLine.textContent = `Message not sent: ${capture.reason || "Lumi could not capture the visible active tab."}`;
+  if (!isGeminiTransportReady() || agentTurnActive || turnCancellationPending) {
     syncMessageComposer();
     return false;
   }
-  if (sessionStatus !== "ready" || agentTurnActive || turnCancellationPending) {
+  const displayText = clean || `Image · ${selectedAttachment.name}`;
+  const modelText = clean || "Please inspect the attached image and respond with the most helpful relevant analysis.";
+  const videoSent = sendJson({ realtimeInput: { video: frame } });
+  const textSent = videoSent && sendJson({ realtimeInput: { text: modelText } });
+  if (!videoSent || !textSent) {
+    const failedSocket = websocket;
+    if (failedSocket?.readyState < WebSocket.CLOSING) {
+      try {
+        failedSocket.close(4002, "Gemini realtime send failed");
+      } catch {
+        // The close event or setup timeout will recover this transport.
+      }
+    }
+    elements.statusLine.textContent = clearComposer
+      ? "Message was not sent and remains in the composer while Lumi restores the connection."
+      : "Queued message was not sent; Lumi will retry it after restoring the connection.";
     syncMessageComposer();
     return false;
   }
+
   turnExecutionSequence += 1;
-  const executionSequence = turnExecutionSequence;
   if (suppressServerOutputUntilNextUserTurn) markFreshUserInputStarted();
   responseAudioGate.reset();
   finalizeTranscript("user");
   finalizeTranscript("lumi");
   finalizeTranscript("thinking");
-  if (render) createMessage("user", clean);
-  if (remember) rememberConversationTurn("user", clean);
+  if (render) createMessage("user", displayText, { attachment: selectedAttachment });
+  if (remember) {
+    rememberConversationTurn(
+      "user",
+      selectedAttachment ? `${modelText} [Attached image: ${selectedAttachment.name}]` : modelText,
+    );
+  }
   startThinkingTranscript();
   avatarController.transitionState("thinking");
   turnCancellationPending = false;
   setAgentTurnActive(true);
   if (clearComposer) {
     elements.messageInput.value = "";
+    clearPendingImageAttachment();
     resizeMessageInput();
   }
   syncMessageComposer();
-  if (
-    executionSequence !== turnExecutionSequence
-    || turnCancellationPending
-    || sessionStatus !== "ready"
-  ) return true;
-  sendJson({
-    realtimeInput: {
-      video: frame,
-      text: clean,
-    },
-  });
   return true;
 }
 
@@ -1985,7 +2293,7 @@ async function flushQueuedUserMessage() {
   if (
     !queuedUserMessages.length
     || textSendPending
-    || sessionStatus !== "ready"
+    || !isGeminiTransportReady()
     || agentTurnActive
     || turnCancellationPending
   ) {
@@ -1993,7 +2301,10 @@ async function flushQueuedUserMessage() {
   }
   const nextMessage = queuedUserMessages.shift();
   syncQueuedMessagePanel();
-  if (!await sendText(nextMessage, { clearComposer: false })) {
+  if (!await sendText(nextMessage.text, {
+    attachment: nextMessage.attachment,
+    clearComposer: false,
+  })) {
     queuedUserMessages.unshift(nextMessage);
     syncQueuedMessagePanel();
     return false;
@@ -2004,16 +2315,22 @@ async function flushQueuedUserMessage() {
   return true;
 }
 
-function queueUserMessage(text) {
+function queueUserMessage(text, attachment = null) {
   const clean = String(text || "").trim();
-  if (!clean) return;
-  queuedUserMessages.push(clean);
+  const selectedAttachment = attachment?.frame?.data ? attachment : null;
+  if (!clean && !selectedAttachment) return;
+  queuedUserMessages.push({ text: clean, attachment: selectedAttachment });
   syncQueuedMessagePanel();
   elements.messageInput.value = "";
+  clearPendingImageAttachment();
   resizeMessageInput();
   syncMessageComposer();
 
   if (sessionStatus === "ready") {
+    if (!isGeminiTransportReady()) {
+      elements.statusLine.textContent = "Message queued and will send as soon as Lumi reconnects.";
+      return;
+    }
     elements.statusLine.textContent = agentTurnActive || turnCancellationPending
       ? "Message queued. It will send when the current turn finishes; choose Steer to send it now."
       : "Message queued. Sending now…";
@@ -2029,7 +2346,7 @@ function queueUserMessage(text) {
 
 function steerQueuedUserMessage() {
   if (!queuedUserMessages.length || turnCancellationPending) return;
-  if (sessionStatus !== "ready") {
+  if (!isGeminiTransportReady()) {
     elements.statusLine.textContent = "Steer is ready. Reconnecting Lumi, then this message will send first…";
     if (sessionStatus !== "connecting") void autoStartSessionIfReady();
     return;
@@ -2156,6 +2473,42 @@ elements.transcript.addEventListener("click", (event) => {
     elements.statusLine.textContent = `Could not open link: ${error.message}`;
   });
 });
+elements.imageAttachmentButton.addEventListener("click", () => {
+  if (!imageAttachmentPending && !textSendPending) elements.imageAttachmentInput.click();
+});
+elements.imageAttachmentInput.addEventListener("change", () => {
+  void attachImageFiles(elements.imageAttachmentInput.files);
+});
+elements.messageInput.addEventListener("paste", (event) => {
+  const files = imageFilesFromClipboard(event.clipboardData);
+  if (!files.length) return;
+  event.preventDefault();
+  void attachImageFiles(files);
+});
+elements.messageForm.addEventListener("dragenter", (event) => {
+  if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+  event.preventDefault();
+  imageDragDepth += 1;
+  elements.messageForm.classList.add("is-image-dragging");
+});
+elements.messageForm.addEventListener("dragover", (event) => {
+  if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  elements.messageForm.classList.add("is-image-dragging");
+});
+elements.messageForm.addEventListener("dragleave", (event) => {
+  if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+  imageDragDepth = Math.max(0, imageDragDepth - 1);
+  if (!imageDragDepth) elements.messageForm.classList.remove("is-image-dragging");
+});
+elements.messageForm.addEventListener("drop", (event) => {
+  if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+  event.preventDefault();
+  imageDragDepth = 0;
+  elements.messageForm.classList.remove("is-image-dragging");
+  void attachImageFiles(imageFilesFromDrop(event.dataTransfer));
+});
 elements.messageInput.addEventListener("input", () => {
   resizeMessageInput();
   syncMessageComposer();
@@ -2168,14 +2521,20 @@ elements.messageInput.addEventListener("keydown", (event) => {
 elements.messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const message = elements.messageInput.value.trim();
-  const screenshotAccessRequest = message ? requestAutomaticTabCaptureAccess() : null;
-  if (message && (sessionStatus !== "ready" || agentTurnActive || turnCancellationPending)) {
-    queueUserMessage(message);
-    void screenshotAccessRequest.then((access) => {
-      if (!access.granted) elements.statusLine.textContent = `Queued message needs access: ${access.reason}`;
-    });
-  } else if (message) {
-    void sendText(message, { screenshotAccessRequest });
+  const attachment = pendingImageAttachment;
+  const hasContent = Boolean(message || attachment);
+  const screenshotAccessRequest = message && !attachment
+    ? requestAutomaticTabCaptureAccess()
+    : null;
+  if (hasContent && (!isGeminiTransportReady() || agentTurnActive || turnCancellationPending)) {
+    queueUserMessage(message, attachment);
+    if (screenshotAccessRequest) {
+      void screenshotAccessRequest.then((access) => {
+        if (!access.granted) elements.statusLine.textContent = `Queued message needs access: ${access.reason}`;
+      });
+    }
+  } else if (hasContent) {
+    void sendText(message, { attachment, screenshotAccessRequest });
   } else if (agentTurnActive) {
     cancelCurrentTurn();
   }

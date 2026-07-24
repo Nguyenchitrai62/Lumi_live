@@ -16,7 +16,7 @@ import {
 import * as uiConfig from "../core/ui-config.js";
 
 test("central UI config contains only tunable variables for visible behavior", () => {
-  assert.equal(DEFAULT_THINKING_LEVEL, "minimal");
+  assert.equal(DEFAULT_THINKING_LEVEL, "low");
   assert.equal(BROWSER_CLICK_RIPPLE_DURATION_MS, 300);
   assert.equal(BROWSER_ACTION_CLEANUP_DELAY_MS, 420);
   assert.equal(FORM_INPUT_REVEAL_DURATION_MS, 500);

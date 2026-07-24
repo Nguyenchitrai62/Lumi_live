@@ -5,6 +5,7 @@ import {
   automaticSessionReconnectDelayMs,
   BUILTIN_TOOLS,
   buildInitialHistoryClientContent,
+  buildSessionHandshakeConfig,
   buildSessionLifecycleConfig,
   buildThinkingConfig,
   buildSessionInstruction,
@@ -35,12 +36,12 @@ test("builds bounded initial history without triggering a model turn", () => {
   });
 });
 
-test("defaults Gemini Live thinking to the lowest supported level", () => {
+test("uses the configured Gemini Live thinking level and normalizes invalid values", () => {
   assert.deepEqual(THINKING_LEVELS, ["minimal", "low", "medium", "high"]);
-  assert.equal(DEFAULT_THINKING_LEVEL, "minimal");
-  assert.equal(normalizeThinkingLevel(undefined), "minimal");
+  assert.equal(DEFAULT_THINKING_LEVEL, "low");
+  assert.equal(normalizeThinkingLevel(undefined), "low");
   assert.equal(normalizeThinkingLevel(" HIGH "), "high");
-  assert.equal(normalizeThinkingLevel("unsupported"), "minimal");
+  assert.equal(normalizeThinkingLevel("unsupported"), "low");
   assert.deepEqual(buildThinkingConfig("medium"), {
     thinkingLevel: "MEDIUM",
     includeThoughts: true,
@@ -53,6 +54,15 @@ test("configures token-free Live session rotation and bounded reconnect backoff"
     sessionResumption: {},
   });
   assert.deepEqual(buildSessionLifecycleConfig(" resume-handle "), {
+    contextWindowCompression: { slidingWindow: {} },
+    sessionResumption: { handle: "resume-handle" },
+  });
+  assert.deepEqual(buildSessionHandshakeConfig(), {
+    contextWindowCompression: { slidingWindow: {} },
+    sessionResumption: {},
+    historyConfig: { initialHistoryInClientContent: true },
+  });
+  assert.deepEqual(buildSessionHandshakeConfig(" resume-handle "), {
     contextWindowCompression: { slidingWindow: {} },
     sessionResumption: { handle: "resume-handle" },
   });

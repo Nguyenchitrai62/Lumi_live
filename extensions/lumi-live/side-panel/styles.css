@@ -262,7 +262,7 @@ body.vtuber-expanded .transcript { opacity: 0; visibility: hidden; }
 .message-queue-remove { width: 28px; padding: 0; color: var(--muted); background: transparent; }
 .message-queue-remove:hover { color: var(--danger); background: rgba(206,107,130,.1); }
 .message-queue-remove svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.message-form { display: flex; align-items: flex-end; gap: 8px; min-height: 60px; padding: 8px; border: 1px solid rgba(101,86,139,.22); border-radius: 16px; background: rgba(255,255,255,.96); box-shadow: 0 8px 24px rgba(61,50,89,.07); transition: border-color var(--ui-motion-fast) ease, box-shadow var(--ui-motion-fast) ease, background-color var(--ui-motion-fast) ease; }
+.message-form { position: relative; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: end; gap: 8px; min-height: 60px; padding: 8px; border: 1px solid rgba(101,86,139,.22); border-radius: 16px; background: rgba(255,255,255,.96); box-shadow: 0 8px 24px rgba(61,50,89,.07); transition: border-color var(--ui-motion-fast) ease, box-shadow var(--ui-motion-fast) ease, background-color var(--ui-motion-fast) ease; }
 .message-form:focus-within { border-color: rgba(128,104,207,.66); box-shadow: 0 0 0 3px rgba(128,104,207,.12), 0 10px 28px rgba(61,50,89,.09); }
 .message-input-wrap { display: grid; min-width: 0; flex: 1; }
 .message-form textarea { width: 100%; min-height: 42px; max-height: 132px; resize: none; overflow-y: auto; border: 0; outline: 0; padding: 10px 4px; color: var(--ink); background: transparent; font-size: 14px; line-height: 20px; scrollbar-width: thin; }
@@ -270,6 +270,25 @@ body.vtuber-expanded .transcript { opacity: 0; visibility: hidden; }
 .message-form textarea:disabled { cursor: not-allowed; opacity: .72; }
 .message-form button { position: relative; display: grid; place-items: center; width: 42px; height: 42px; flex: 0 0 auto; border: 0; border-radius: 12px; color: #fff; background: var(--lavender); cursor: pointer; transition: border-radius var(--ui-motion-standard) ease, background-color var(--ui-motion-standard) ease, transform var(--ui-motion-standard) ease, box-shadow var(--ui-motion-standard) ease; }
 .message-form button:disabled { color: #aaa4b2; background: #eeeaf2; cursor: not-allowed; }
+.message-form .image-attachment-button { color: var(--lavender); background: rgba(128,104,207,.1); }
+.message-form .image-attachment-button:hover { background: rgba(128,104,207,.18); }
+.image-attachment-button svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.image-attachment-tray { grid-column: 1 / -1; display: grid; }
+.image-attachment-tray[hidden] { display: none; }
+.image-attachment-card { display: grid; grid-template-columns: 50px minmax(0,1fr) auto; align-items: center; gap: 9px; min-width: 0; border: 1px solid rgba(128,104,207,.2); border-radius: 12px; padding: 6px; background: rgba(248,246,253,.92); }
+.image-attachment-card img { width: 50px; height: 42px; border-radius: 8px; object-fit: cover; background: rgba(128,104,207,.08); }
+.image-attachment-copy { display: grid; gap: 2px; min-width: 0; }
+.image-attachment-copy strong { overflow: hidden; color: var(--ink); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.image-attachment-copy span { color: var(--muted); font-size: 9px; }
+.message-form .image-attachment-remove { width: 30px; height: 30px; border-radius: 9px; color: var(--muted); background: transparent; }
+.message-form .image-attachment-remove:hover { color: var(--danger); background: rgba(206,107,130,.1); }
+.image-attachment-remove svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.image-drop-hint { position: absolute; z-index: 5; inset: 5px; display: none; place-items: center; align-content: center; gap: 3px; border: 1.5px dashed var(--lavender); border-radius: 12px; color: var(--lavender); background: color-mix(in srgb, var(--surface-strong) 92%, transparent); pointer-events: none; }
+.image-drop-hint strong { font-size: 12px; }
+.image-drop-hint span { color: var(--muted); font-size: 9px; }
+.message-form.is-image-dragging .image-drop-hint { display: grid; }
+.message-attachment { width: min(92%, 420px); }
+.message-attachment-preview { display: block; width: min(100%, 360px); max-height: 360px; margin: 2px 0 8px; border: 1px solid rgba(255,255,255,.24); border-radius: 11px; object-fit: contain; background: rgba(255,255,255,.1); }
 .message-send-icon { font-size: 20px; line-height: 1; transform: translateY(-1px); }
 .message-cancel-icon { position: relative; display: none; width: 18px; height: 18px; border: 2px solid currentColor; border-radius: 50%; }
 .message-cancel-icon::after { content: ""; position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; border-radius: 1px; background: currentColor; transform: translate(-50%,-50%); }
@@ -313,6 +332,7 @@ body.vtuber-expanded .transcript { opacity: 0; visibility: hidden; }
   .markdown-body a:active { color: #e8e1ff; }
   .message-thinking { background: rgba(50,41,67,.88); }
   .message-queue { background: rgba(44,37,58,.95); }
+  .image-attachment-card { background: rgba(44,37,58,.95); }
   .connection-notice { background: rgba(41,34,55,.98); }
   .connection-notice .connection-notice-settings { color: #c9bcf3; }
   .composer-area { background: rgba(32,27,44,.78); }

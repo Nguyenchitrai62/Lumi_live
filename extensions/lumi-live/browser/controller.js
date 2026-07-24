@@ -105,6 +105,15 @@ if (!globalThis[GLOBAL_KEY]) {
     return getController().selectorMap?.get(index)?.ref || null;
   }
 
+  function getDeclarativeNewTabIntent(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
+    const link = element.closest?.("a[href], area[href]");
+    if (link?.getAttribute("target")?.toLowerCase() === "_blank" && link.href) {
+      return { url: link.href, target: "_blank", source: "link" };
+    }
+    return null;
+  }
+
   function assertSafeInput(index) {
     const element = indexedElement(index);
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
@@ -218,12 +227,19 @@ if (!globalThis[GLOBAL_KEY]) {
     if (tool === "browser_click") {
       const index = requireIndex(args);
       assertConfirmedHighImpactClick(index, args.confirmed);
-      const videoClick = captureYouTubeVideoClick(indexedElement(index));
+      const element = indexedElement(index);
+      const videoClick = captureYouTubeVideoClick(element);
+      const newTabIntent = getDeclarativeNewTabIntent(element);
       return withVisualAction(async (activeController) => {
         const result = await activeController.clickElement(index);
-        if (result?.success === false || !didClickOpenYouTubeVideo(videoClick)) return result;
+        const enrichedResult = newTabIntent && result?.success !== false
+          ? { ...result, newTabIntent }
+          : result;
+        if (result?.success === false || !didClickOpenYouTubeVideo(videoClick)) {
+          return enrichedResult;
+        }
         return {
-          ...result,
+          ...enrichedResult,
           [RESPONSE_AUDIO_DIRECTIVE_KEY]: {
             suppressForTurn: true,
             reason: "youtube_video_opened",

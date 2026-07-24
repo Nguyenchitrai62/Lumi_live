@@ -6,6 +6,14 @@ import {
 import { EXTENSION_EVENTS, STORAGE_KEYS } from "../core/extension-config.js";
 import { normalizeVisualPreferences } from "../core/visual-preferences.js";
 import { saveCapturedTabAsset } from "./captured-tab-assets.js";
+import {
+  collectWindowOpenCallsInPage,
+  findWindowOpenNewTabUrl,
+  installWindowOpenProbeInPage,
+  resolveNewTabUrl,
+  selectNewlyOpenedTab,
+  watchForNewTabCreation,
+} from "../browser/new-tab-navigation.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
@@ -17,6 +25,8 @@ const OFFSCREEN_DOCUMENT_PATH = "offscreen/index.html";
 const OFFSCREEN_TARGET = "lumi_live_offscreen";
 const TAB_TRANSITION_FALLBACK_URL = "https://www.google.com/";
 const TAB_CAPTURE_RETRY_DELAY_MS = 550;
+const WINDOW_OPEN_PROBE_KEY = "__LUMI_WINDOW_OPEN_PROBE__";
+const CLICK_NEW_TAB_WATCH_MS = 2500;
 
 let connectedTabId = null;
 let listedTabIds = new Set();
@@ -348,6 +358,156 @@ async function sendBrowserTool(tool, args, action) {
   return result;
 }
 
+async function installWindowOpenProbe(tabId, token) {
+  try {
+    const executions = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      world: "MAIN",
+      func: installWindowOpenProbeInPage,
+      args: [WINDOW_OPEN_PROBE_KEY, token],
+    });
+    return executions.some((execution) => execution?.result === true);
+  } catch {
+    return false;
+  }
+}
+
+async function collectWindowOpenCalls(tabId, token) {
+  try {
+    const executions = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      world: "MAIN",
+      func: collectWindowOpenCallsInPage,
+      args: [WINDOW_OPEN_PROBE_KEY, token],
+    });
+    return executions.flatMap((execution) =>
+      Array.isArray(execution?.result) ? execution.result : []);
+  } catch {
+    return [];
+  }
+}
+
+async function activateClickedNewTab(tab, action) {
+  if (!Number.isInteger(tab?.id)) {
+    throw new Error("Chrome reported a new tab without an ID.");
+  }
+  trackBrowserActionTab(action, tab.id);
+  await chrome.tabs.update(tab.id, { active: true });
+  await chrome.windows.update(tab.windowId, { focused: true });
+  const settledTab = await waitForClickedTabToSettle(tab.id, action);
+  const controllable = isControllablePage(settledTab.url);
+  await setConnectedTab(controllable ? tab.id : null);
+  const controllerReady = controllable ? await ensureController(tab.id, 5) : false;
+  assertBrowserActionActive(action);
+  return {
+    ...serializeTab(await chrome.tabs.get(tab.id)),
+    controllerReady,
+  };
+}
+
+async function executeBrowserClick(args, action) {
+  const status = await getStatus();
+  assertBrowserActionActive(action);
+  if (!status.connected || !status.tabId) {
+    throw new Error("No controllable page is active. Use an http, https, or permitted file tab and try again.");
+  }
+  trackBrowserActionTab(action, status.tabId);
+  if (!(await ensureController(status.tabId, 4))) {
+    throw new Error("The PageAgent controller is still recovering after navigation.");
+  }
+
+  const sourceTab = await chrome.tabs.get(status.tabId);
+  const tabsBeforeClick = await chrome.tabs.query({});
+  const beforeTabIds = new Set(tabsBeforeClick.map((tab) => tab.id).filter(Number.isInteger));
+  const probeToken = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random()}`;
+  const newTabWatcher = watchForNewTabCreation({
+    tabsApi: chrome.tabs,
+    beforeTabIds,
+    sourceTab,
+    timeoutMs: CLICK_NEW_TAB_WATCH_MS,
+  });
+  let probeInstalled = false;
+  let probeCollected = false;
+  let result = null;
+  let clickError = null;
+  let windowOpenCalls = [];
+  let openedTab = null;
+  let popupRecovered = false;
+
+  try {
+    probeInstalled = await installWindowOpenProbe(status.tabId, probeToken);
+    try {
+      result = await chrome.tabs.sendMessage(status.tabId, {
+        source: CONTENT_REQUEST_SOURCE,
+        tool: "browser_click",
+        args: args || {},
+      });
+      if (result?.success === false) {
+        clickError = new Error(result.error || result.message || "PageAgent action failed.");
+      }
+    } catch (error) {
+      clickError = error;
+    }
+    assertBrowserActionActive(action);
+
+    const tabsAfterClick = await chrome.tabs.query({});
+    openedTab = selectNewlyOpenedTab(beforeTabIds, tabsAfterClick, sourceTab);
+    if (!openedTab) openedTab = await newTabWatcher.promise;
+    assertBrowserActionActive(action);
+
+    if (probeInstalled) {
+      windowOpenCalls = await collectWindowOpenCalls(status.tabId, probeToken);
+      probeCollected = true;
+    }
+
+    if (!openedTab && !clickError) {
+      const fallbackUrl =
+        findWindowOpenNewTabUrl(windowOpenCalls, sourceTab.url)
+        || resolveNewTabUrl(result?.newTabIntent?.url, sourceTab.url);
+      if (fallbackUrl) {
+        const createProperties = {
+          url: fallbackUrl,
+          active: true,
+          windowId: sourceTab.windowId,
+          openerTabId: sourceTab.id,
+        };
+        if (Number.isInteger(sourceTab.index)) {
+          createProperties.index = sourceTab.index + 1;
+        }
+        openedTab = await chrome.tabs.create(createProperties);
+        popupRecovered = true;
+      }
+    }
+
+    if (openedTab) {
+      const newTab = await activateClickedNewTab(openedTab, action);
+      return {
+        ...(result || {
+          success: true,
+          message: "Clicked the element and followed the new tab.",
+        }),
+        success: true,
+        openedNewTab: true,
+        popupRecovered,
+        newTab,
+        message: popupRecovered
+          ? "Clicked the element. Chrome blocked its scripted popup, so Lumi opened and switched to the intended tab."
+          : "Clicked the element and switched to the newly opened tab.",
+      };
+    }
+
+    if (clickError) throw clickError;
+    return result;
+  } finally {
+    newTabWatcher.stop();
+    if (probeInstalled && !probeCollected) {
+      await collectWindowOpenCalls(status.tabId, probeToken);
+    }
+  }
+}
+
 async function sendControllerBridge(tabId, tool, args = {}) {
   return chrome.tabs.sendMessage(tabId, {
     source: CONTENT_REQUEST_SOURCE,
@@ -357,13 +517,14 @@ async function sendControllerBridge(tabId, tool, args = {}) {
 }
 
 function serializeTab(tab) {
+  const url = sanitizeActiveContextUrl(tab.url || "");
   return {
     tabId: tab.id,
     windowId: tab.windowId,
     title: tab.title || "Untitled page",
-    url: tab.url || "",
+    url,
     active: Boolean(tab.active),
-    controllable: isControllablePage(tab.url),
+    controllable: isControllablePage(url),
   };
 }
 
@@ -597,6 +758,19 @@ async function waitForTabToSettle(tabId, action) {
   return chrome.tabs.get(tabId);
 }
 
+async function waitForClickedTabToSettle(tabId, action) {
+  let latestTab = null;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    assertBrowserActionActive(action);
+    latestTab = await chrome.tabs.get(tabId);
+    const destinationUrl = String(latestTab.pendingUrl || latestTab.url || "").trim();
+    const waitingForDestination = !destinationUrl || destinationUrl === "about:blank";
+    if (!waitingForDestination && latestTab.status === "complete") return latestTab;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return latestTab || chrome.tabs.get(tabId);
+}
+
 async function openBrowserTab(args = {}, action) {
   const url = requirePageUrl(args.url);
   const existingTab = await findExistingTabForUrl(url);
@@ -732,9 +906,14 @@ async function executeBrowserTool(tool, args = {}) {
     if (tool === "browser_list_tabs") return listBrowserTabs();
     if (tool === "browser_open_tab") return openBrowserTab(args, action);
     if (tool === "browser_switch_tab") return switchBrowserTab(args, action);
+    if (tool === "browser_click") return executeBrowserClick(args, action);
     return sendBrowserTool(tool, args, action);
   };
-  const timeoutMs = tool === "browser_open_tab" ? 30000 : 12000;
+  const timeoutMs = tool === "browser_open_tab"
+    ? 30000
+    : tool === "browser_click"
+      ? 18000
+      : 12000;
   try {
     return await Promise.race([
       execute(),

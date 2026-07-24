@@ -233,6 +233,10 @@ export function createPanelAudioController({
     animateMouth();
   }
 
+  function isUserSpeechActive() {
+    return userSpeechActive;
+  }
+
   function dispose() {
     closeSession();
     if (mouthAnimationId) cancelAnimationFrame(mouthAnimationId);
@@ -242,6 +246,7 @@ export function createPanelAudioController({
   return {
     closeSession,
     dispose,
+    isUserSpeechActive,
     playPcmChunk,
     prepareOutput,
     requestMicrophone,

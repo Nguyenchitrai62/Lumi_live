@@ -3874,6 +3874,13 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       return index;
     }, indexedElement = function(index) {
       return getController().selectorMap?.get(index)?.ref || null;
+    }, getDeclarativeNewTabIntent = function(element) {
+      if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
+      const link = element.closest?.("a[href], area[href]");
+      if (link?.getAttribute("target")?.toLowerCase() === "_blank" && link.href) {
+        return { url: link.href, target: "_blank", source: "link" };
+      }
+      return null;
     }, assertSafeInput = function(index) {
       const element = indexedElement(index);
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
@@ -3883,7 +3890,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
       assertConfirmedPageAgentClick(element, confirmed);
     };
-    getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
+    getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, getDeclarativeNewTabIntent2 = getDeclarativeNewTabIntent, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
     const runtime = {
       controller: null,
       stateIndexed: false,
@@ -3983,12 +3990,17 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       if (tool === "browser_click") {
         const index = requireIndex(args);
         assertConfirmedHighImpactClick(index, args.confirmed);
-        const videoClick = captureYouTubeVideoClick(indexedElement(index));
+        const element = indexedElement(index);
+        const videoClick = captureYouTubeVideoClick(element);
+        const newTabIntent = getDeclarativeNewTabIntent(element);
         return withVisualAction(async (activeController) => {
           const result2 = await activeController.clickElement(index);
-          if (result2?.success === false || !didClickOpenYouTubeVideo(videoClick)) return result2;
+          const enrichedResult = newTabIntent && result2?.success !== false ? { ...result2, newTabIntent } : result2;
+          if (result2?.success === false || !didClickOpenYouTubeVideo(videoClick)) {
+            return enrichedResult;
+          }
           return {
-            ...result2,
+            ...enrichedResult,
             [RESPONSE_AUDIO_DIRECTIVE_KEY]: {
               suppressForTurn: true,
               reason: "youtube_video_opened"
@@ -4080,6 +4092,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
   var applyVisualPreferences2;
   var requireIndex2;
   var indexedElement2;
+  var getDeclarativeNewTabIntent2;
   var assertSafeInput2;
   var assertConfirmedHighImpactClick2;
 })();
