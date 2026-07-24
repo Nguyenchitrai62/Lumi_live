@@ -452,6 +452,47 @@ async function captureVisibleTab(args = {}, action) {
   };
 }
 
+async function captureActiveTabContextFrame() {
+  const tab = await getActiveTab();
+  if (!tab?.id || !isWebPage(tab.url)) {
+    return {
+      captured: false,
+      reason: "The active tab does not expose capturable http/https content.",
+    };
+  }
+
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+    format: "jpeg",
+    quality: 72,
+  });
+  const activeTab = await getActiveTab(tab.windowId);
+  if (activeTab?.id !== tab.id) {
+    return {
+      captured: false,
+      reason: "The active tab changed while Lumi was capturing visual context.",
+    };
+  }
+
+  const separatorIndex = dataUrl.indexOf(",");
+  if (!dataUrl.startsWith("data:image/jpeg;base64,") || separatorIndex < 0) {
+    return {
+      captured: false,
+      reason: "Chrome returned an unsupported visual context format.",
+    };
+  }
+
+  return {
+    captured: true,
+    data: dataUrl.slice(separatorIndex + 1),
+    mimeType: "image/jpeg",
+    source: {
+      tabId: tab.id,
+      title: tab.title || "Active tab",
+      url: sanitizeActiveContextUrl(tab.url || ""),
+    },
+  };
+}
+
 async function findExistingTabForUrl(url) {
   const focusedWindow = await chrome.windows.getLastFocused();
   const tabs = await chrome.tabs.query({ windowId: focusedWindow.id });
@@ -697,6 +738,9 @@ async function handleMessage(message) {
   }
   if (message.command === "browser_tool") {
     return executeBrowserTool(message.tool, message.args || {});
+  }
+  if (message.command === "capture_tab_context_frame") {
+    return captureActiveTabContextFrame();
   }
   if (message.command === "mcp_list_servers") return listMcpServers();
   if (message.command === "mcp_add_server") return addMcpServer(message.url);

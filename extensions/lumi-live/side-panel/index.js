@@ -157,6 +157,8 @@ let cancelPendingSharedTabAudioPrompt = null;
 let thinkingLevel = DEFAULT_THINKING_LEVEL;
 let pendingThinkingReconnect = false;
 let hasConnectedInPanelLifetime = false;
+let activeTabFrameCapture = null;
+let textSendPending = false;
 const conversationHistory = [];
 const queuedUserMessages = [];
 const initialTranscriptMarkup = elements.transcript.innerHTML;
@@ -201,6 +203,9 @@ const panelAudio = createPanelAudioController({
     finalizeTranscript("lumi");
     finalizeTranscript("thinking");
   },
+  onUserSpeechStart: () => {
+    void captureAndSendCurrentTabFrame();
+  },
   sendJson,
 });
 const sharedTabAudio = createSharedTabAudioController({
@@ -222,6 +227,35 @@ function sendRuntime(command, payload = {}) {
     if (!response?.ok) throw new Error(response?.error || "The Lumi extension did not respond.");
     return response.result;
   });
+}
+
+async function captureCurrentTabFrame() {
+  if (activeTabFrameCapture) return activeTabFrameCapture;
+  activeTabFrameCapture = (async () => {
+    try {
+      const frame = await sendRuntime("capture_tab_context_frame");
+      if (!frame?.captured || !frame.data || !frame.mimeType) return null;
+      return {
+        data: frame.data,
+        mimeType: frame.mimeType,
+      };
+    } catch {
+      return null;
+    }
+  })();
+  try {
+    return await activeTabFrameCapture;
+  } finally {
+    activeTabFrameCapture = null;
+  }
+}
+
+async function captureAndSendCurrentTabFrame() {
+  const frame = await captureCurrentTabFrame();
+  if (!frame || sessionStatus !== "ready" || websocket?.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+  return sendJson({ realtimeInput: { video: frame } });
 }
 
 const {
@@ -319,8 +353,10 @@ function syncMessageComposer() {
   const hasText = Boolean(elements.messageInput.value.trim());
   const cancelMode = ready && agentTurnActive && !turnCancellationPending && !hasText;
   const queueMode = ready && (agentTurnActive || turnCancellationPending) && hasText;
-  elements.messageInput.disabled = false;
-  elements.messageInput.placeholder = ready
+  elements.messageInput.disabled = textSendPending;
+  elements.messageInput.placeholder = textSendPending
+    ? "Capturing the current tab…"
+    : ready
     ? turnCancellationPending
       ? "Type your next message while Lumi stops…"
       : agentTurnActive ? "Type to queue your next message…" : "Type a message to Lumi…"
@@ -333,7 +369,7 @@ function syncMessageComposer() {
     : queueMode ? "Add message to queue" : "Send message";
   elements.messageSubmit.setAttribute("aria-label", submitLabel);
   elements.messageSubmit.title = submitLabel;
-  elements.messageSubmit.disabled = !hasText && !cancelMode;
+  elements.messageSubmit.disabled = textSendPending || (!hasText && !cancelMode);
 }
 
 function syncQueuedMessagePanel() {
@@ -1655,10 +1691,30 @@ async function toggleMute() {
   avatarController.syncState();
 }
 
-function sendText(text, { clearComposer = true, render = true, remember = true } = {}) {
+async function sendText(text, { clearComposer = true, render = true, remember = true } = {}) {
   const clean = text.trim();
-  if (!clean || sessionStatus !== "ready" || agentTurnActive || turnCancellationPending) return false;
+  if (
+    !clean
+    || textSendPending
+    || sessionStatus !== "ready"
+    || agentTurnActive
+    || turnCancellationPending
+  ) return false;
+  textSendPending = true;
+  syncMessageComposer();
+  const frame = await captureCurrentTabFrame();
+  textSendPending = false;
+  if (!frame) {
+    elements.statusLine.textContent = "Message not sent: Lumi could not capture the visible active tab. Open a normal http/https tab and try again.";
+    syncMessageComposer();
+    return false;
+  }
+  if (sessionStatus !== "ready" || agentTurnActive || turnCancellationPending) {
+    syncMessageComposer();
+    return false;
+  }
   turnExecutionSequence += 1;
+  const executionSequence = turnExecutionSequence;
   if (suppressServerOutputUntilNextUserTurn) markFreshUserInputStarted();
   responseAudioGate.reset();
   finalizeTranscript("user");
@@ -1670,22 +1726,38 @@ function sendText(text, { clearComposer = true, render = true, remember = true }
   avatarController.transitionState("thinking");
   turnCancellationPending = false;
   setAgentTurnActive(true);
-  sendJson({ realtimeInput: { text: clean } });
   if (clearComposer) {
     elements.messageInput.value = "";
     resizeMessageInput();
   }
   syncMessageComposer();
+  if (
+    executionSequence !== turnExecutionSequence
+    || turnCancellationPending
+    || sessionStatus !== "ready"
+  ) return true;
+  sendJson({
+    realtimeInput: {
+      video: frame,
+      text: clean,
+    },
+  });
   return true;
 }
 
-function flushQueuedUserMessage() {
-  if (!queuedUserMessages.length || sessionStatus !== "ready" || agentTurnActive || turnCancellationPending) {
+async function flushQueuedUserMessage() {
+  if (
+    !queuedUserMessages.length
+    || textSendPending
+    || sessionStatus !== "ready"
+    || agentTurnActive
+    || turnCancellationPending
+  ) {
     return false;
   }
   const nextMessage = queuedUserMessages.shift();
   syncQueuedMessagePanel();
-  if (!sendText(nextMessage, { clearComposer: false })) {
+  if (!await sendText(nextMessage, { clearComposer: false })) {
     queuedUserMessages.unshift(nextMessage);
     syncQueuedMessagePanel();
     return false;
@@ -1863,7 +1935,7 @@ elements.messageForm.addEventListener("submit", (event) => {
   if (message && (sessionStatus !== "ready" || agentTurnActive || turnCancellationPending)) {
     queueUserMessage(message);
   } else if (message) {
-    sendText(message);
+    void sendText(message);
   } else if (agentTurnActive) {
     cancelCurrentTurn();
   }

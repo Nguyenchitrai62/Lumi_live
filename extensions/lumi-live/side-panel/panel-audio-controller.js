@@ -21,6 +21,7 @@ export function createPanelAudioController({
   elements,
   getInputState,
   onFreshUserInput,
+  onUserSpeechStart,
   sendJson,
 }) {
   let audioContext = null;
@@ -31,6 +32,8 @@ export function createPanelAudioController({
   let nextPlaybackTime = 0;
   let mouthAnimationId = null;
   let blinkTimeoutId = null;
+  let userSpeechActive = false;
+  let lastUserSpeechAt = 0;
   const playbackSources = new Set();
 
   async function prepareOutput() {
@@ -59,10 +62,21 @@ export function createPanelAudioController({
       const inputState = getInputState();
       if (!inputState.canSendAudio) return;
       const mono = event.data;
+      let energy = 0;
+      for (const sample of mono) energy += sample * sample;
+      const rms = Math.sqrt(energy / mono.length);
+      const now = performance.now();
+      if (rms >= 0.012) {
+        lastUserSpeechAt = now;
+        if (!userSpeechActive) {
+          userSpeechActive = true;
+          onUserSpeechStart?.();
+        }
+      } else if (userSpeechActive && now - lastUserSpeechAt >= 800) {
+        userSpeechActive = false;
+      }
       if (inputState.suppressServerOutputUntilNextUserTurn && !inputState.freshUserInputStarted) {
-        let energy = 0;
-        for (const sample of mono) energy += sample * sample;
-        if (Math.sqrt(energy / mono.length) < 0.012) return;
+        if (rms < 0.012) return;
         onFreshUserInput();
       }
       const pcm = floatToPcm16(resampleTo16k(mono, audioContext.sampleRate));
@@ -189,6 +203,8 @@ export function createPanelAudioController({
     micStream = null;
     micProcessor = null;
     micSource = null;
+    userSpeechActive = false;
+    lastUserSpeechAt = 0;
   }
 
   function closeSession() {

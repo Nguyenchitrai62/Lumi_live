@@ -96,7 +96,7 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /tools:\s*\[\{ functionDeclarations \}\]/);
   assert.match(controller, /historyConfig:\s*\{\s*initialHistoryInClientContent:\s*true\s*\}/);
   assert.match(controller, /sendJson\(buildInitialHistoryClientContent\(conversationHistory\),\s*sourceSocket\)/);
-  assert.match(controller, /elements\.messageInput\.disabled\s*=\s*false/);
+  assert.match(controller, /elements\.messageInput\.disabled\s*=\s*textSendPending/);
   assert.match(controller, /queueUserMessage\(message\)/);
   assert.match(controller, /function steerQueuedUserMessage\(\)/);
   assert.match(controller, /getTranscriptRevealDurationMs\(remainingCharacterCount\)/);
@@ -177,6 +177,7 @@ test("captures the active tab without a new permission and renders rich conversa
   const worker = await readFile(new URL("background/index.js", extensionRoot), "utf8");
   const sessionConfig = await readFile(new URL("live/session-config.js", extensionRoot), "utf8");
   const controller = await readFile(new URL("side-panel/index.js", extensionRoot), "utf8");
+  const audioController = await readFile(new URL("side-panel/panel-audio-controller.js", extensionRoot), "utf8");
   const markdown = await readFile(new URL("side-panel/markdown-renderer.js", extensionRoot), "utf8");
   const styles = await readFile(new URL("side-panel/styles.css", extensionRoot), "utf8");
 
@@ -185,6 +186,13 @@ test("captures the active tab without a new permission and renders rich conversa
   assert.match(sessionConfig, /name:\s*"browser_capture_screenshot"/);
   assert.match(worker, /chrome\.tabs\.captureVisibleTab/);
   assert.match(worker, /saveCapturedTabAsset/);
+  assert.match(worker, /capture_tab_context_frame/);
+  assert.match(controller, /captureCurrentTabFrame\(\)/);
+  assert.match(controller, /realtimeInput:\s*\{\s*video:\s*frame\s*\}/);
+  assert.match(controller, /if\s*\(!frame\)[^]*Message not sent:[^]*return false/);
+  assert.match(controller, /realtimeInput:\s*\{\s*video:\s*frame,\s*text:\s*clean/);
+  assert.match(controller, /onUserSpeechStart:[^]*captureAndSendCurrentTabFrame\(\)/);
+  assert.match(audioController, /onUserSpeechStart\?\.\(\)/);
   assert.match(controller, /createCapturedTabMessage\(result\)/);
   assert.match(controller, /renderMarkdown\(message\.content,\s*message\.text\)/);
   assert.match(controller, /elements\.transcript\.addEventListener\("click"[\s\S]+chrome\.tabs\.create\(\{\s*url,\s*active:\s*true\s*\}\)/);
