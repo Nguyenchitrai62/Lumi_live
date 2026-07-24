@@ -333,26 +333,28 @@ function openMcpToolsView(serverId) {
   renderMcpToolsView();
   elements.mcpToolsView.scrollTop = 0;
   document.body.classList.add("is-mcp-tools-view");
-  elements.settingsShell.inert = true;
   elements.mcpToolsView.inert = false;
   elements.backToMcpServersButton.disabled = false;
   elements.mcpToolsView.setAttribute("aria-hidden", "false");
-  window.setTimeout(() => elements.backToMcpServersButton.focus(), 260);
+  elements.backToMcpServersButton.focus({ preventScroll: true });
+  elements.settingsShell.inert = true;
 }
 
 function closeMcpToolsView() {
   const previousServerId = selectedMcpServerId;
+  const serverRow = previousServerId
+    ? elements.mcpServerList.querySelector(`[data-server-id="${CSS.escape(previousServerId)}"]`)
+    : null;
   selectedMcpServerId = null;
   document.body.classList.remove("is-mcp-tools-view");
   elements.settingsShell.inert = false;
+  if (serverRow instanceof HTMLElement) {
+    serverRow.focus({ preventScroll: true });
+  } else if (elements.mcpToolsView.contains(document.activeElement)) {
+    document.activeElement.blur();
+  }
   elements.mcpToolsView.inert = true;
   elements.mcpToolsView.setAttribute("aria-hidden", "true");
-  window.setTimeout(() => {
-    const serverRow = previousServerId
-      ? elements.mcpServerList.querySelector(`[data-server-id="${CSS.escape(previousServerId)}"]`)
-      : null;
-    serverRow?.focus();
-  }, 260);
 }
 
 function renderMcpServers() {

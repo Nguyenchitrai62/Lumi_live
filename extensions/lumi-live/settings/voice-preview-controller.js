@@ -115,7 +115,9 @@ export function createVoicePreviewController({
                 speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
               },
               systemInstruction: {
-                parts: [{ text: "You are a voice preview. Read the requested English sentence naturally and do not add any other words." }],
+                parts: [{
+                  text: "You are a voice preview. Reply naturally and warmly to the user's greeting in one short English sentence of no more than 12 words.",
+                }],
               },
             },
           }));
@@ -127,7 +129,7 @@ export function createVoicePreviewController({
           const response = JSON.parse(raw);
           if (response.setupComplete) {
             websocket.send(JSON.stringify({
-              realtimeInput: { text: "Have a wonderful day!" },
+              realtimeInput: { text: "Hello!" },
             }));
           }
 
