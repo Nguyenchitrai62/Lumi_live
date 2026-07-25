@@ -571,10 +571,9 @@ async function removeMcp(serverId) {
   }
 }
 
-async function connectNotion(button) {
-  const connector = MCP_CONNECTORS.find((item) => item.id === "notion");
+async function connectOauthConnector(button, connector) {
   const row = button.closest(".mcp-connector");
-  if (!connector || !row) return;
+  if (!connector || connector.auth !== "oauth-dcr" || !row) return;
   button.disabled = true;
   button.dataset.busy = "true";
   button.textContent = "Opening sign in...";
@@ -691,7 +690,7 @@ elements.mcpConnectorList.addEventListener("click", (event) => {
   if (button.dataset.action === "open-connector") {
     const connector = MCP_CONNECTORS.find((item) => item.id === button.dataset.connectorId);
     if (connector?.id === "redmine") openRedmineModal(button);
-    else if (connector?.id === "notion") void connectNotion(button);
+    else if (connector?.auth === "oauth-dcr") void connectOauthConnector(button, connector);
   }
 });
 elements.mcpConnectorModalForm.addEventListener("input", () => {

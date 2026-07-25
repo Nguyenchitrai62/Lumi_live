@@ -11,6 +11,12 @@ const MCP_DISABLED_TOOLS_STORAGE_KEY = STORAGE_KEYS.mcpDisabledTools;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
 const DEFAULT_MCP_TOOL_POLICY = "allow";
 
+export function connectorToolShouldAskByDefault(toolName) {
+  const normalized = String(toolName || "").replace(/([a-z0-9])([A-Z])/g, "$1_$2");
+  return /(?:^|[._-])(?:add|archive|assign|create|delete|draft|edit|invite|message|move|publish|remove|reply|send|set|transition|update|write)(?:[._-]|$)/i
+    .test(normalized);
+}
+
 export function createMcpService() {
   const mcpConnections = new Map();
   const activeMcpCallControllers = new Set();
@@ -321,11 +327,6 @@ async function addMcpServer(rawUrl) {
   records.push(recordFromMcpConnection(connection));
   await saveMcpServerRecords(records);
   return serializeMcpConnection(connection, true);
-}
-
-function connectorToolShouldAskByDefault(toolName) {
-  return /(?:^|[._-])(?:add|archive|assign|create|delete|draft|invite|message|move|publish|remove|reply|send|set|update|write)(?:[._-]|$)/i
-    .test(String(toolName || ""));
 }
 
 async function applyConnectorDefaultPolicies(connection) {

@@ -3732,7 +3732,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     ]);
     if (HIGH_IMPACT_CLICK_PATTERN.test(label) && confirmed !== true) {
       throw new Error(
-        `This looks like a consequential action (${label || "unlabeled control"}). Ask for explicit confirmation, then retry with confirmed=true.`
+        `This looks like a consequential action (${label || "unlabeled control"}). Retry with confirmed=true only when the current user-authored request explicitly authorizes this exact action, target, and scope, or after later explicit confirmation.`
       );
     }
   }
@@ -3814,9 +3814,199 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     return Boolean(capture?.video && capture.videoWasPaused && !capture.video.paused);
   }
 
+  // extensions/lumi-live/browser/file-upload-target.js
+  var FILE_UPLOAD_TARGET_ATTRIBUTE = "data-lumi-file-upload-target";
+  var MIME_TYPES_BY_EXTENSION = /* @__PURE__ */ new Map([
+    [".csv", ["text/csv"]],
+    [".doc", ["application/msword"]],
+    [".docx", ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]],
+    [".dwg", ["application/acad", "application/x-acad", "application/autocad_dwg", "image/vnd.dwg"]],
+    [".gif", ["image/gif"]],
+    [".jpeg", ["image/jpeg"]],
+    [".jpg", ["image/jpeg"]],
+    [".json", ["application/json"]],
+    [".pdf", ["application/pdf"]],
+    [".png", ["image/png"]],
+    [".txt", ["text/plain"]],
+    [".xls", ["application/vnd.ms-excel"]],
+    [".xlsx", ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]],
+    [".zip", ["application/zip"]]
+  ]);
+  function fileExtension(fileName) {
+    const name = String(fileName || "").trim().toLowerCase();
+    const dotIndex = name.lastIndexOf(".");
+    return dotIndex > -1 ? name.slice(dotIndex) : "";
+  }
+  function acceptTokenMatchesFile(token, fileName) {
+    const normalizedToken = String(token || "").trim().toLowerCase();
+    if (!normalizedToken) return false;
+    const extension = fileExtension(fileName);
+    if (normalizedToken.startsWith(".")) return normalizedToken === extension;
+    const mimeTypes = MIME_TYPES_BY_EXTENSION.get(extension) || [];
+    if (normalizedToken.endsWith("/*")) {
+      const prefix = normalizedToken.slice(0, -1);
+      return mimeTypes.some((mimeType) => mimeType.startsWith(prefix));
+    }
+    return mimeTypes.includes(normalizedToken);
+  }
+  function inputAcceptsFiles(input, fileNames) {
+    const accept = String(input.getAttribute?.("accept") || "").trim();
+    if (!accept) return { accepted: true, explicit: false };
+    const tokens = accept.split(",").map((token) => token.trim()).filter(Boolean);
+    return {
+      accepted: fileNames.every((fileName) => tokens.some((token) => acceptTokenMatchesFile(token, fileName))),
+      explicit: true
+    };
+  }
+  function uploadControlRelationshipScore(input, indexedElement) {
+    if (!indexedElement) return 0;
+    if (indexedElement === input) return 1e3;
+    if (indexedElement.contains?.(input) || input.contains?.(indexedElement)) return 1e3;
+    const indexedLabel = indexedElement.closest?.("label");
+    if (indexedLabel?.contains?.(input)) return 1e3;
+    const inputLabel = input.closest?.("label");
+    if (inputLabel?.contains?.(indexedElement)) return 1e3;
+    const targetId = indexedElement.getAttribute?.("for");
+    if (targetId && input.id && targetId === input.id) return 1e3;
+    const controlledId = indexedElement.getAttribute?.("aria-controls");
+    const controlledElement = controlledId ? indexedElement.ownerDocument?.getElementById?.(controlledId) : null;
+    if (controlledElement?.contains?.(input)) return 950;
+    const indexedAncestors = /* @__PURE__ */ new Map();
+    let indexedAncestor = indexedElement.parentElement;
+    for (let depth = 1; indexedAncestor && depth <= 6; depth += 1) {
+      const tagName = String(indexedAncestor.tagName || "").toUpperCase();
+      if (tagName !== "BODY" && tagName !== "HTML") indexedAncestors.set(indexedAncestor, depth);
+      indexedAncestor = indexedAncestor.parentElement;
+    }
+    let inputAncestor = input.parentElement;
+    for (let depth = 1; inputAncestor && depth <= 6; depth += 1) {
+      const indexedDepth = indexedAncestors.get(inputAncestor);
+      if (indexedDepth) return Math.max(300, 760 - (indexedDepth + depth) * 45);
+      inputAncestor = inputAncestor.parentElement;
+    }
+    return 0;
+  }
+  function isVisibleElement(element) {
+    if (!element?.getClientRects) return false;
+    return element.getClientRects().length > 0;
+  }
+  function chooseCompatibleFileInput(inputs, fileNames, indexedElement = null) {
+    const normalizedNames = Array.from(fileNames || []).map((fileName) => String(fileName || "").trim()).filter(Boolean);
+    if (!normalizedNames.length) throw new Error("At least one local file name is required.");
+    const candidates = [];
+    let order = 0;
+    for (const input of inputs || []) {
+      const currentOrder = order;
+      order += 1;
+      if (!input || String(input.type || input.getAttribute?.("type") || "").toLowerCase() !== "file") {
+        continue;
+      }
+      if (input.disabled || input.hasAttribute?.("disabled")) continue;
+      if (input.webkitdirectory || input.hasAttribute?.("webkitdirectory")) continue;
+      if (normalizedNames.length > 1 && !input.multiple && !input.hasAttribute?.("multiple")) continue;
+      const acceptance = inputAcceptsFiles(input, normalizedNames);
+      if (!acceptance.accepted) continue;
+      let score = acceptance.explicit ? 100 : 10;
+      const relationshipScore = uploadControlRelationshipScore(input, indexedElement);
+      score += relationshipScore;
+      if (isVisibleElement(input)) score += 1;
+      candidates.push({
+        input,
+        score,
+        order: currentOrder,
+        explicitAccept: acceptance.explicit,
+        relationshipScore
+      });
+    }
+    candidates.sort((left, right) => right.score - left.score || left.order - right.order);
+    const best = candidates[0];
+    if (!best) {
+      return {
+        input: null,
+        candidateCount: 0,
+        strategy: "no_compatible_existing_input"
+      };
+    }
+    if (candidates.length > 1 && best.relationshipScore === 0) {
+      return {
+        input: null,
+        candidateCount: candidates.length,
+        strategy: "ambiguous_compatible_inputs"
+      };
+    }
+    return {
+      input: best.input,
+      candidateCount: candidates.length,
+      strategy: best.score >= 1e3 ? "indexed_file_control" : best.score >= 300 ? "upload_control_container" : best.explicitAccept ? "matching_accept_attribute" : "first_generic_file_input"
+    };
+  }
+
+  // extensions/lumi-live/browser/page-state-content.js
+  var MAX_PAGE_STATE_CHARACTERS = 16e3;
+  var MAX_PAGE_STATE_QUERY_CHARACTERS = 240;
+  function clipAtLineBoundary(content, start, end) {
+    let boundedStart = Math.max(0, start);
+    let boundedEnd = Math.min(content.length, end);
+    if (boundedStart > 0) {
+      const nextNewline = content.indexOf("\n", boundedStart);
+      if (nextNewline > -1 && nextNewline < boundedEnd) boundedStart = nextNewline + 1;
+    }
+    if (boundedEnd < content.length) {
+      const previousNewline = content.lastIndexOf("\n", boundedEnd);
+      if (previousNewline > boundedStart) boundedEnd = previousNewline;
+    }
+    return content.slice(boundedStart, boundedEnd);
+  }
+  function selectPageStateContent(value, queryValue = "", maxCharacters = MAX_PAGE_STATE_CHARACTERS) {
+    const content = String(value || "");
+    const query = String(queryValue || "").trim().slice(0, MAX_PAGE_STATE_QUERY_CHARACTERS);
+    const limit = Math.max(1e3, Number(maxCharacters) || MAX_PAGE_STATE_CHARACTERS);
+    if (!query) {
+      return {
+        content: content.length > limit ? `${clipAtLineBoundary(content, 0, limit)}
+[Page state truncated]` : content,
+        originalContentLength: content.length,
+        query: "",
+        queryMatched: false
+      };
+    }
+    const matchIndex = content.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
+    if (matchIndex < 0) {
+      const prefix = content.length > limit ? `${clipAtLineBoundary(content, 0, limit)}
+[Page state truncated]` : content;
+      return {
+        content: `${prefix}
+[Requested text "${query}" was not found in the current semantic DOM.]`,
+        originalContentLength: content.length,
+        query,
+        queryMatched: false
+      };
+    }
+    if (content.length <= limit) {
+      return {
+        content,
+        originalContentLength: content.length,
+        query,
+        queryMatched: true
+      };
+    }
+    const contextBefore = Math.floor(limit * 0.42);
+    const start = Math.max(0, matchIndex - contextBefore);
+    const excerpt = clipAtLineBoundary(content, start, start + limit);
+    return {
+      content: [
+        start > 0 ? "[Earlier page state omitted]" : "",
+        excerpt,
+        start + limit < content.length ? "[Later page state omitted]" : ""
+      ].filter(Boolean).join("\n"),
+      originalContentLength: content.length,
+      query,
+      queryMatched: true
+    };
+  }
+
   // extensions/lumi-live/browser/controller.js
   var CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
-  var MAX_STATE_CHARACTERS = 16e3;
   var GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
   var HIGHLIGHT_STYLE_ID = "lumi-page-agent-highlight-preference";
   var CLICK_EFFECT_STYLE_ID = "lumi-page-agent-click-effect-preference";
@@ -3874,6 +4064,46 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       return index;
     }, indexedElement = function(index) {
       return getController().selectorMap?.get(index)?.ref || null;
+    }, collectFileInputs = function(root = document, inputs = [], visitedRoots = /* @__PURE__ */ new Set()) {
+      if (!root || visitedRoots.has(root)) return inputs;
+      visitedRoots.add(root);
+      for (const input of root.querySelectorAll?.('input[type="file"]') || []) {
+        if (!inputs.includes(input)) inputs.push(input);
+      }
+      for (const element of root.querySelectorAll?.("*") || []) {
+        if (element.shadowRoot) collectFileInputs(element.shadowRoot, inputs, visitedRoots);
+        if (element.tagName !== "IFRAME") continue;
+        try {
+          collectFileInputs(element.contentDocument, inputs, visitedRoots);
+        } catch {
+        }
+      }
+      return inputs;
+    }, isFileInput = function(element) {
+      return String(element?.type || element?.getAttribute?.("type") || "").toLowerCase() === "file";
+    }, isFileUploadTrigger = function(element) {
+      if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
+      if (isFileInput(element) || element.querySelector?.('input[type="file"]')) return true;
+      const label = element.closest?.("label");
+      const labelledControl = label?.htmlFor ? element.ownerDocument?.getElementById?.(label.htmlFor) : null;
+      if (label?.querySelector?.('input[type="file"]') || isFileInput(labelledControl)) return true;
+      const interactive = element.closest?.('button, [role="button"], a, label') || element;
+      const descriptor = [
+        interactive.textContent,
+        interactive.getAttribute?.("aria-label"),
+        interactive.getAttribute?.("title"),
+        interactive.getAttribute?.("name"),
+        interactive.getAttribute?.("id"),
+        interactive.getAttribute?.("class")
+      ].filter(Boolean).join(" ");
+      return FILE_UPLOAD_TRIGGER_PATTERN.test(descriptor);
+    }, clearPreparedFileUploadTarget = function(token = "") {
+      const target = runtime.fileUploadTarget;
+      if (!target) return;
+      if (!token || target.getAttribute(FILE_UPLOAD_TARGET_ATTRIBUTE) === token) {
+        target.removeAttribute(FILE_UPLOAD_TARGET_ATTRIBUTE);
+        runtime.fileUploadTarget = null;
+      }
     }, getDeclarativeNewTabIntent = function(element) {
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
       const link = element.closest?.("a[href], area[href]");
@@ -3890,15 +4120,28 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
       assertConfirmedPageAgentClick(element, confirmed);
     };
-    getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, getDeclarativeNewTabIntent2 = getDeclarativeNewTabIntent, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
+    getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, collectFileInputs2 = collectFileInputs, isFileInput2 = isFileInput, isFileUploadTrigger2 = isFileUploadTrigger, clearPreparedFileUploadTarget2 = clearPreparedFileUploadTarget, getDeclarativeNewTabIntent2 = getDeclarativeNewTabIntent, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
     const runtime = {
       controller: null,
       stateIndexed: false,
       visualPreferences: { ...DEFAULT_VISUAL_PREFERENCES },
-      activeVisualActionController: null
+      activeVisualActionController: null,
+      fileUploadTarget: null
     };
     globalThis[GLOBAL_KEY] = runtime;
     const mediaElementAudio = createMediaElementAudioController();
+    const FILE_UPLOAD_TRIGGER_PATTERN = /\b(upload|attach|browse|choose|import|file)\b|tải\s*lên|tai\s*len|đính\s*kèm|dinh\s*kem|chọn\s*(?:tệp|file)|chon\s*(?:tep|file)/i;
+    async function readPageState(query = "") {
+      applyVisualPreferences();
+      const pageController = getController();
+      const state = await pageController.getBrowserState();
+      runtime.stateIndexed = true;
+      if (!runtime.visualPreferences.showElementHighlights) {
+        await pageController.cleanUpHighlights();
+      }
+      const selectedContent = selectPageStateContent(state.content, query);
+      return { success: true, ...state, ...selectedContent };
+    }
     async function withVisualAction(action) {
       const pageController = getController();
       runtime.activeVisualActionController?.abort();
@@ -3968,6 +4211,69 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
         runtime.stateIndexed = false;
         return { success: true, cancelled: true };
       }
+      if (tool === "bridge_prepare_file_upload_target") {
+        const index = requireIndex(args);
+        const token = String(args.token || "").trim();
+        const fileNames = Array.isArray(args.fileNames) ? args.fileNames : [];
+        if (!/^[a-z0-9-]{8,128}$/i.test(token)) {
+          throw new Error("The file-upload target token is invalid.");
+        }
+        clearPreparedFileUploadTarget();
+        const selection = chooseCompatibleFileInput(
+          collectFileInputs(),
+          fileNames,
+          indexedElement(index)
+        );
+        if (!selection.input) {
+          return {
+            success: true,
+            prepared: false,
+            candidateCount: selection.candidateCount,
+            strategy: selection.strategy
+          };
+        }
+        selection.input.setAttribute(FILE_UPLOAD_TARGET_ATTRIBUTE, token);
+        runtime.fileUploadTarget = selection.input;
+        return {
+          success: true,
+          prepared: true,
+          candidateCount: selection.candidateCount,
+          strategy: selection.strategy,
+          accept: selection.input.getAttribute("accept") || "",
+          multiple: Boolean(selection.input.multiple)
+        };
+      }
+      if (tool === "bridge_click_file_upload_target") {
+        const index = requireIndex(args);
+        const element = indexedElement(index);
+        if (!isFileUploadTrigger(element)) {
+          throw new Error(
+            "The indexed element is not identifiable as a file-upload control. Observe fresh page state or inspect the visible page, then use the exact final upload control."
+          );
+        }
+        return withVisualAction((activeController) => activeController.clickElement(index));
+      }
+      if (tool === "bridge_finalize_file_upload_target") {
+        const token = String(args.token || "").trim();
+        const target = runtime.fileUploadTarget;
+        if (!target || target.getAttribute(FILE_UPLOAD_TARGET_ATTRIBUTE) !== token) {
+          throw new Error("The prepared file input is no longer available.");
+        }
+        const fileNames = Array.from(target.files || [], (file) => file.name);
+        clearPreparedFileUploadTarget(token);
+        if (!fileNames.length) {
+          throw new Error("Chrome did not assign any local files to the prepared file input.");
+        }
+        return {
+          success: true,
+          fileCount: fileNames.length,
+          fileNames
+        };
+      }
+      if (tool === "bridge_cleanup_file_upload_target") {
+        clearPreparedFileUploadTarget(String(args.token || "").trim());
+        return { success: true };
+      }
       if (tool === "bridge_show_google_search_departure") {
         await showGoogleSearchDeparture(String(args.searchText || "new tab"));
         return { success: true };
@@ -3977,15 +4283,31 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
         return { success: true };
       }
       if (tool === "browser_get_page_state") {
-        applyVisualPreferences();
-        const state = await pageController.getBrowserState();
-        runtime.stateIndexed = true;
-        if (!runtime.visualPreferences.showElementHighlights) {
-          await pageController.cleanUpHighlights();
+        return readPageState(args.query);
+      }
+      if (tool === "browser_wait_for_page_state") {
+        const query = String(args.query || "").trim();
+        if (!query) throw new Error("browser_wait_for_page_state requires exact visible text.");
+        const condition = args.condition === "absent" ? "absent" : "present";
+        const timeoutMs = Math.min(8e3, Math.max(500, Number(args.timeoutMs) || 5e3));
+        const startedAt = Date.now();
+        while (Date.now() - startedAt <= timeoutMs) {
+          const state = await readPageState(query);
+          const conditionMet = condition === "present" ? state.queryMatched : !state.queryMatched;
+          if (conditionMet) {
+            return {
+              ...state,
+              condition,
+              waitedMs: Date.now() - startedAt
+            };
+          }
+          runtime.stateIndexed = false;
+          await new Promise((resolve) => setTimeout(resolve, 350));
         }
-        const content = state.content.length > MAX_STATE_CHARACTERS ? `${state.content.slice(0, MAX_STATE_CHARACTERS)}
-[Page state truncated]` : state.content;
-        return { success: true, ...state, content };
+        runtime.stateIndexed = false;
+        throw new Error(
+          `Timed out waiting for "${query}" to become ${condition} in the semantic DOM.`
+        );
       }
       if (tool === "browser_click") {
         const index = requireIndex(args);
@@ -4092,6 +4414,10 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
   var applyVisualPreferences2;
   var requireIndex2;
   var indexedElement2;
+  var collectFileInputs2;
+  var isFileInput2;
+  var isFileUploadTrigger2;
+  var clearPreparedFileUploadTarget2;
   var getDeclarativeNewTabIntent2;
   var assertSafeInput2;
   var assertConfirmedHighImpactClick2;

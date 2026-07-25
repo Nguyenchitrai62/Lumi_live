@@ -14,6 +14,11 @@ import {
   selectNewlyOpenedTab,
   watchForNewTabCreation,
 } from "../browser/new-tab-navigation.js";
+import {
+  isFileChooserDebuggerEvent,
+  localFileName,
+  normalizeUploadFilePaths,
+} from "../browser/file-upload.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
@@ -27,6 +32,7 @@ const TAB_TRANSITION_FALLBACK_URL = "https://www.google.com/";
 const TAB_CAPTURE_RETRY_DELAY_MS = 550;
 const WINDOW_OPEN_PROBE_KEY = "__LUMI_WINDOW_OPEN_PROBE__";
 const CLICK_NEW_TAB_WATCH_MS = 2500;
+const FILE_CHOOSER_WAIT_MS = 10000;
 
 let connectedTabId = null;
 let listedTabIds = new Set();
@@ -323,9 +329,22 @@ function trackBrowserActionTab(action, tabId) {
   if (action && Number.isInteger(tabId)) action.tabIds.add(tabId);
 }
 
+function cancelBrowserAction(action, reason = "The browser action was cancelled by the user.") {
+  if (!action || action.cancelled) return;
+  action.cancelled = true;
+  for (const cancel of action.cancelHandlers || []) {
+    try {
+      cancel(reason);
+    } catch {
+      // Cancellation is best-effort; controller cleanup still runs below.
+    }
+  }
+  action.cancelHandlers?.clear();
+}
+
 async function cancelActiveBrowserAction() {
   const action = activeBrowserAction;
-  if (action) action.cancelled = true;
+  cancelBrowserAction(action);
   const tabIds = new Set(action ? action.tabIds : []);
   if (Number.isInteger(connectedTabId)) tabIds.add(connectedTabId);
   listedTabIds = new Set();
@@ -504,6 +523,246 @@ async function executeBrowserClick(args, action) {
     newTabWatcher.stop();
     if (probeInstalled && !probeCollected) {
       await collectWindowOpenCalls(status.tabId, probeToken);
+    }
+  }
+}
+
+function waitForFileChooser(tabId, timeoutMs = FILE_CHOOSER_WAIT_MS) {
+  let settled = false;
+  let timeoutId = null;
+  let rejectWait = null;
+
+  const cleanup = () => {
+    chrome.debugger.onEvent.removeListener(onEvent);
+    clearTimeout(timeoutId);
+  };
+  const onEvent = (source, method, params) => {
+    if (!isFileChooserDebuggerEvent(source, method, tabId) || settled) return;
+    settled = true;
+    cleanup();
+    resolveWait({ source, params });
+  };
+  let resolveWait;
+  const promise = new Promise((resolve, reject) => {
+    resolveWait = resolve;
+    rejectWait = reject;
+    chrome.debugger.onEvent.addListener(onEvent);
+    timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(
+        "The selected control did not open a file chooser. Read fresh page state, open any upload menu, and use the final upload control index.",
+      ));
+    }, timeoutMs);
+  });
+
+  return {
+    promise,
+    cancel(reason = "File upload was cancelled.") {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      rejectWait(new Error(reason));
+    },
+  };
+}
+
+function describeDebuggerAttachError(error) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (/another debugger|already attached|debuggee/i.test(message)) {
+    return "Lumi could not start the upload because this tab is already being controlled by DevTools or another debugger. Close DevTools for this tab and try again.";
+  }
+  if (/permission|not allowed/i.test(message)) {
+    return "Lumi needs Chrome's debugger permission to automate the native file chooser. Reload the unpacked extension and approve its updated permissions.";
+  }
+  return message || "Lumi could not start Chrome's file-upload controller.";
+}
+
+async function setPreparedFileInputFiles(debuggee, token, filePaths) {
+  await chrome.debugger.sendCommand(debuggee, "DOM.enable");
+  await chrome.debugger.sendCommand(
+    debuggee,
+    "DOM.getDocument",
+    { depth: 1, pierce: true },
+  );
+  const search = await chrome.debugger.sendCommand(
+    debuggee,
+    "DOM.performSearch",
+    {
+      query: `[data-lumi-file-upload-target="${token}"]`,
+      includeUserAgentShadowDOM: true,
+    },
+  );
+  const searchId = String(search?.searchId || "");
+  try {
+    if (!searchId || search?.resultCount !== 1) {
+      throw new Error(
+        `Lumi prepared a file input, but Chrome found ${Number(search?.resultCount) || 0} matching DOM targets.`,
+      );
+    }
+    const result = await chrome.debugger.sendCommand(
+      debuggee,
+      "DOM.getSearchResults",
+      { searchId, fromIndex: 0, toIndex: 1 },
+    );
+    const nodeId = Number(result?.nodeIds?.[0]);
+    if (!Number.isInteger(nodeId)) {
+      throw new Error("Chrome could not address the prepared file input.");
+    }
+    await chrome.debugger.sendCommand(
+      debuggee,
+      "DOM.setFileInputFiles",
+      { files: filePaths, nodeId },
+    );
+  } finally {
+    if (searchId) {
+      await chrome.debugger.sendCommand(
+        debuggee,
+        "DOM.discardSearchResults",
+        { searchId },
+      ).catch(() => {});
+    }
+  }
+}
+
+async function executeBrowserFileUpload(args, action) {
+  if (args?.confirmed !== true) {
+    throw new Error(
+      "Uploading transmits local files to the current website. Ask the user to authorize the exact absolute path(s) and destination, then retry with confirmed=true.",
+    );
+  }
+  const index = Number(args?.index);
+  if (!Number.isInteger(index) || index < 0) {
+    throw new Error("browser_upload_file requires a non-negative control index from the latest page state.");
+  }
+  const filePaths = normalizeUploadFilePaths(args?.filePaths);
+  const status = await getStatus();
+  assertBrowserActionActive(action);
+  if (!status.connected || !status.tabId) {
+    throw new Error("No controllable page is active. Open the destination http or https page and try again.");
+  }
+  trackBrowserActionTab(action, status.tabId);
+  if (!(await ensureController(status.tabId, 4))) {
+    throw new Error("The PageAgent controller is still recovering after navigation.");
+  }
+
+  const rootDebuggee = { tabId: status.tabId };
+  const uploadToken = crypto.randomUUID().toLowerCase();
+  const fileNames = filePaths.map(localFileName);
+  let attached = false;
+  let chooserWaiter = null;
+  const cancelUpload = (reason) => chooserWaiter?.cancel(reason);
+  action?.cancelHandlers?.add(cancelUpload);
+  try {
+    const preparedTarget = await sendControllerBridge(
+      status.tabId,
+      "bridge_prepare_file_upload_target",
+      { index, token: uploadToken, fileNames },
+    );
+    if (preparedTarget?.success === false) {
+      throw new Error(
+        preparedTarget.error
+        || preparedTarget.message
+        || "The page could not prepare a compatible file input.",
+      );
+    }
+    try {
+      await chrome.debugger.attach(rootDebuggee, "1.3");
+      attached = true;
+    } catch (error) {
+      throw new Error(describeDebuggerAttachError(error));
+    }
+    if (preparedTarget?.prepared) {
+      await setPreparedFileInputFiles(rootDebuggee, uploadToken, filePaths);
+      assertBrowserActionActive(action);
+      const finalized = await sendControllerBridge(
+        status.tabId,
+        "bridge_finalize_file_upload_target",
+        { token: uploadToken },
+      );
+      if (finalized?.success === false) {
+        throw new Error(
+          finalized.error
+          || finalized.message
+          || "The page did not retain the selected local files.",
+        );
+      }
+      return {
+        success: true,
+        fileSelectionComplete: true,
+        uploadCompletionVerified: false,
+        uploadStatus: "files_selected",
+        requiresPageVerification: true,
+        fileCount: finalized.fileCount || filePaths.length,
+        fileNames: finalized.fileNames || fileNames,
+        strategy: preparedTarget.strategy,
+        nextPageStateQuery: fileNames[0],
+        message: `Assigned ${filePaths.length} local file${filePaths.length === 1 ? "" : "s"} to the page without opening the operating-system picker. This proves file selection, not transfer completion. Observe the page with query="${fileNames[0]}", wait for any transfer/status change, and continue every remaining authorized step.`,
+      };
+    }
+
+    await chrome.debugger.sendCommand(rootDebuggee, "Page.enable");
+    await chrome.debugger.sendCommand(
+      rootDebuggee,
+      "Page.setInterceptFileChooserDialog",
+      { enabled: true },
+    );
+    chooserWaiter = waitForFileChooser(status.tabId);
+    void chooserWaiter.promise.catch(() => {});
+    const clickResult = await sendControllerBridge(
+      status.tabId,
+      "bridge_click_file_upload_target",
+      { index },
+    );
+    if (clickResult?.success === false) {
+      throw new Error(clickResult.error || clickResult.message || "The upload control could not be clicked.");
+    }
+    assertBrowserActionActive(action);
+
+    const chooser = await chooserWaiter.promise;
+    chooserWaiter = null;
+    assertBrowserActionActive(action);
+    const backendNodeId = Number(chooser.params?.backendNodeId);
+    if (!Number.isInteger(backendNodeId)) {
+      throw new Error("Chrome opened a file chooser without an addressable file input.");
+    }
+    const chooserDebuggee = chooser.source?.sessionId
+      ? { tabId: status.tabId, sessionId: chooser.source.sessionId }
+      : rootDebuggee;
+    await chrome.debugger.sendCommand(
+      chooserDebuggee,
+      "DOM.setFileInputFiles",
+      { files: filePaths, backendNodeId },
+    );
+    assertBrowserActionActive(action);
+    return {
+      success: true,
+      fileSelectionComplete: true,
+      uploadCompletionVerified: false,
+      uploadStatus: "files_selected",
+      requiresPageVerification: true,
+      fileCount: filePaths.length,
+      fileNames,
+      strategy: "intercepted_dynamic_file_chooser",
+      nextPageStateQuery: fileNames[0],
+      message: `Assigned ${filePaths.length} local file${filePaths.length === 1 ? "" : "s"} through the page's file chooser. This proves file selection, not transfer completion. Observe the page with query="${fileNames[0]}", wait for any transfer/status change, and continue every remaining authorized step.`,
+    };
+  } finally {
+    action?.cancelHandlers?.delete(cancelUpload);
+    chooserWaiter?.cancel();
+    await sendControllerBridge(
+      status.tabId,
+      "bridge_cleanup_file_upload_target",
+      { token: uploadToken },
+    ).catch(() => {});
+    if (attached) {
+      await chrome.debugger.sendCommand(
+        rootDebuggee,
+        "Page.setInterceptFileChooserDialog",
+        { enabled: false },
+      ).catch(() => {});
+      await chrome.debugger.detach(rootDebuggee).catch(() => {});
     }
   }
 }
@@ -897,7 +1156,7 @@ async function switchBrowserTab(args = {}, action) {
 }
 
 async function executeBrowserTool(tool, args = {}) {
-  const action = { cancelled: false, tabIds: new Set() };
+  const action = { cancelled: false, tabIds: new Set(), cancelHandlers: new Set() };
   activeBrowserAction = action;
   let timeoutId = null;
   const execute = async () => {
@@ -907,19 +1166,25 @@ async function executeBrowserTool(tool, args = {}) {
     if (tool === "browser_open_tab") return openBrowserTab(args, action);
     if (tool === "browser_switch_tab") return switchBrowserTab(args, action);
     if (tool === "browser_click") return executeBrowserClick(args, action);
+    if (tool === "browser_upload_file") return executeBrowserFileUpload(args, action);
     return sendBrowserTool(tool, args, action);
   };
   const timeoutMs = tool === "browser_open_tab"
     ? 30000
     : tool === "browser_click"
       ? 18000
+      : tool === "browser_upload_file"
+        ? 25000
       : 12000;
   try {
     return await Promise.race([
       execute(),
       new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
-          action.cancelled = true;
+          cancelBrowserAction(
+            action,
+            `${tool} timed out after ${Math.round(timeoutMs / 1000)} seconds.`,
+          );
           void Promise.all([...action.tabIds].map((tabId) =>
             sendControllerBridge(tabId, "bridge_cancel_active_action").catch(() => null)));
           reject(new Error(`${tool} timed out after ${Math.round(timeoutMs / 1000)} seconds. Page state was reset; observe the page again before retrying.`));

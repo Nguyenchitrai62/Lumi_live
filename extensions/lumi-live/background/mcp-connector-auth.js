@@ -105,6 +105,7 @@ async function discoverOAuthMetadata(serverUrl) {
   }
   return {
     ...metadata,
+    resource: String(protectedResource.resource || serverUrl),
     resourceScopes: Array.isArray(protectedResource.scopes_supported)
       ? protectedResource.scopes_supported.filter((scope) => typeof scope === "string" && scope)
       : [],
@@ -164,6 +165,7 @@ async function exchangeAuthorizationCode({
   redirectUri,
   code,
   verifier,
+  resource = "",
 }) {
   const parameters = new URLSearchParams({
     grant_type: "authorization_code",
@@ -173,6 +175,7 @@ async function exchangeAuthorizationCode({
     code_verifier: verifier,
   });
   if (clientSecret) parameters.set("client_secret", clientSecret);
+  if (resource) parameters.set("resource", resource);
   const response = await fetchJson(tokenEndpoint, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -184,6 +187,7 @@ async function exchangeAuthorizationCode({
 async function authorizeDcrConnector(connector) {
   const redirectUri = chrome.identity.getRedirectURL(`mcp-${connector.id}`);
   const metadata = await discoverOAuthMetadata(connector.endpoint);
+  const resource = metadata.resource;
   const scopes = metadata.resourceScopes;
   const registration = await registerDynamicClient(metadata, redirectUri, scopes);
   const { verifier, challenge } = await createPkcePair();
@@ -196,7 +200,7 @@ async function authorizeDcrConnector(connector) {
     state,
     code_challenge: challenge,
     code_challenge_method: "S256",
-    resource: connector.endpoint,
+    resource,
     prompt: "consent",
   });
   if (scopes.length) authorizationParameters.set("scope", scopes.join(" "));
@@ -213,11 +217,13 @@ async function authorizeDcrConnector(connector) {
     redirectUri,
     code,
     verifier,
+    resource,
   });
   return {
     connectorId: connector.id,
     kind: "oauth",
     tokenEndpoint: metadata.token_endpoint,
+    resource,
     clientId: registration.client_id,
     clientSecret: registration.client_secret || "",
     accessToken: token.accessToken,
@@ -280,6 +286,7 @@ export function createMcpConnectorAuth() {
       client_id: credential.clientId,
     });
     if (credential.clientSecret) parameters.set("client_secret", credential.clientSecret);
+    if (credential.resource) parameters.set("resource", credential.resource);
     const body = await fetchJson(credential.tokenEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },

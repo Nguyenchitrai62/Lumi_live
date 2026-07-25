@@ -33,6 +33,8 @@ test("manifest and HTML entrypoints keep their stable unpacked-extension paths",
   const manifest = JSON.parse(await readFile(new URL("manifest.json", extensionRoot), "utf8"));
   assert.ok(manifest.permissions.includes("identity"));
   assert.ok(manifest.permissions.includes("activeTab"));
+  assert.ok(manifest.permissions.includes("debugger"));
+  assert.match(manifest.version, /^\d+(?:\.\d+){0,3}$/);
   assert.equal(Object.hasOwn(manifest, "oauth2"), false);
   const entrypoints = [
     manifest.background.service_worker,
@@ -76,6 +78,7 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   const styles = await readFile(new URL("side-panel/styles.css", extensionRoot), "utf8");
   const controller = await readFile(new URL("side-panel/index.js", extensionRoot), "utf8");
   assert.match(html, /id="thinkingButton"/);
+  assert.match(html, /id="extensionVersion"/);
   assert.match(html, /data-thinking-level="minimal"/);
   assert.match(html, /data-thinking-level="high"/);
   assert.match(html, /class="secondary mute-control"/);
@@ -93,6 +96,7 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(styles, /\.message-queue-steer/);
   assert.match(styles, /\.connection-notice-backdrop[^}]+place-items:\s*center/);
   assert.match(controller, /thinkingConfig:\s*buildThinkingConfig\(sessionThinkingLevel\)/);
+  assert.match(controller, /chrome\.runtime\.getManifest\(\)\.version/);
   assert.match(controller, /tools:\s*\[\{ functionDeclarations \}\]/);
   assert.match(controller, /sendJson\(buildInitialHistoryClientContent\(conversationHistory\),\s*sourceSocket\)/);
   assert.match(controller, /elements\.messageInput\.disabled\s*=\s*textSendPending/);
@@ -128,6 +132,9 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /updateTranscript\(transcriptRole,\s*part\.text\)/);
   assert.match(controller, /document\.createElement\("details"\)/);
   assert.match(controller, /serverContent\?\.generationComplete\s*\|\|\s*functionCalls\.length/);
+  assert.match(controller, /message\.disclosure\?\.setExpanded\(false\)/);
+  assert.match(controller, /completedThinkingMessagesAwaitingContent\.add\(message\)/);
+  assert.match(controller, /if \(role === "lumi"\) scheduleCompletedThinkingCollapse\(\)/);
   assert.doesNotMatch(controller, /createMessage\("thinking",\s*"Thinking/);
   assert.match(controller, /showMissingKeyNotice\(message\)/);
   assert.match(controller, /showReconnectNotice\(message/);
@@ -192,7 +199,7 @@ test("side panel connects chat without requiring a microphone and remembers mic 
   assert.match(controller, /sessionHasInFlightWork\(\)[^]*panelAudio\.isUserSpeechActive\(\)/);
 });
 
-test("captures the active tab without a new permission and renders rich conversation Markdown", async () => {
+test("captures visual context only when the agent requests it and renders rich conversation Markdown", async () => {
   const manifest = JSON.parse(await readFile(new URL("manifest.json", extensionRoot), "utf8"));
   const worker = await readFile(new URL("background/index.js", extensionRoot), "utf8");
   const sessionConfig = await readFile(new URL("live/session-config.js", extensionRoot), "utf8");
@@ -208,12 +215,12 @@ test("captures the active tab without a new permission and renders rich conversa
     "clipboardRead",
     "clipboardWrite",
     "cookies",
-    "debugger",
     "downloads",
     "history",
   ]) {
     assert.equal(manifest.permissions.includes(unrelatedPermission), false);
   }
+  assert.match(sessionConfig, /name:\s*"browser_inspect_screenshot"/);
   assert.match(sessionConfig, /name:\s*"browser_capture_screenshot"/);
   assert.match(worker, /chrome\.tabs\.captureVisibleTab/);
   assert.match(worker, /saveCapturedTabAsset/);
@@ -228,15 +235,18 @@ test("captures the active tab without a new permission and renders rich conversa
   assert.match(worker, /describeTabCaptureError/);
   assert.match(controller, /captureCurrentTabFrame\(\)/);
   assert.match(controller, /chrome\.windows\.getCurrent\(\)/);
-  assert.match(controller, /chrome\.permissions\.request\(\{\s*origins:\s*AUTOMATIC_TAB_CAPTURE_ORIGINS/);
-  assert.match(controller, /chrome\.permissions\.contains\(\{\s*origins:\s*AUTOMATIC_TAB_CAPTURE_ORIGINS/);
-  assert.match(controller, /screenshotAccessRequest/);
+  assert.match(controller, /tool === "browser_inspect_screenshot"[^]*captureAndSendVisualInspectionFrame\(\)/);
+  assert.match(controller, /addBrowserWorkflowContext\(result/);
+  assert.match(controller, /activeTurnUserRequest = modelText/);
+  assert.doesNotMatch(controller, /AUTOMATIC_TAB_CAPTURE_ORIGINS|screenshotAccessRequest/);
+  assert.doesNotMatch(controller, /chrome\.permissions\.(?:request|contains)\(\{\s*origins:/);
   assert.match(controller, /realtimeInput:\s*\{\s*video:\s*frame\s*\}/);
-  assert.match(controller, /if\s*\(!frame\)[^]*Message not sent:[^]*return false/);
+  assert.match(controller, /VISUAL_CONTEXT_SETTLE_MS/);
+  assert.match(controller, /delivery:\s*"best_effort_realtime_visual_context"/);
   assert.match(controller, /sendJson\(\{\s*realtimeInput:\s*\{\s*video:\s*frame\s*\}\s*\}\)/);
   assert.match(controller, /sendJson\(\{\s*realtimeInput:\s*\{\s*text:\s*modelText\s*\}\s*\}\)/);
   assert.match(controller, /if \(!videoSent \|\| !textSent\)[^]*failedSocket\.close\(4002/);
-  assert.match(controller, /onUserSpeechStart:[^]*captureAndSendCurrentTabFrame\(\)/);
+  assert.doesNotMatch(controller, /onUserSpeechStart:[^]*captureAndSend/);
   assert.match(audioController, /onUserSpeechStart\?\.\(\)/);
   assert.match(controller, /createCapturedTabMessage\(result\)/);
   assert.match(controller, /renderMarkdown\(message\.content,\s*message\.text\)/);
@@ -267,7 +277,7 @@ test("opens a requested website even when the current tab cannot host PageAgent"
   assert.doesNotMatch(openTabSource, /needs a controllable current page/);
 });
 
-test("settings ships Notion OAuth, a Redmine popup, app icons, and a temporary server toggle", async () => {
+test("settings ships OAuth connectors, a Redmine popup, app icons, and a temporary server toggle", async () => {
   const html = await readFile(new URL("settings/index.html", extensionRoot), "utf8");
   const controller = await readFile(
     new URL("settings/mcp-settings-controller.js", extensionRoot),
@@ -289,8 +299,9 @@ test("settings ships Notion OAuth, a Redmine popup, app icons, and a temporary s
   assert.match(styles, /\.mcp-card[^}]+grid-column:\s*1 \/ -1/);
   assert.match(html, /icons\/connectors\/mcp\.svg/);
   assert.match(controller, /mcp_set_server_enabled/);
-  assert.match(controller, /connectNotion/);
+  assert.match(controller, /connectOauthConnector/);
   assert.match(controller, /connector\.id === "redmine"/);
+  assert.match(controller, /connector\?\.auth === "oauth-dcr"/);
   assert.match(controller, /availableConnectors[\s\S]*!mcpServers\.some/);
   assert.match(controller, /connector\?\.icon \|\| DEFAULT_MCP_ICON/);
   assert.match(controller, /event\.target === elements\.mcpAddModal/);

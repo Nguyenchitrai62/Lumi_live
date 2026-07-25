@@ -8,6 +8,14 @@ export const MCP_CONNECTORS = Object.freeze([
     auth: "oauth-dcr",
   }),
   Object.freeze({
+    id: "jira",
+    name: "Jira",
+    icon: "../icons/connectors/jira.svg",
+    description: "Search, read, create, and update Jira Cloud work you authorize.",
+    endpoint: "https://mcp.atlassian.com/v1/mcp",
+    auth: "oauth-dcr",
+  }),
+  Object.freeze({
     id: "redmine",
     name: "Redmine",
     icon: "../icons/connectors/redmine.svg",

@@ -112,6 +112,25 @@ test("grounds self-references and searches in the Lumi Live product identity", (
   assert.doesNotMatch(instruction, /Talk to a AI Agent That Controls Your Active Tab/i);
 });
 
+test("uses screenshots on demand and carries the current workflow authorization", () => {
+  const instruction = buildSessionInstruction();
+  const visualTool = BUILTIN_TOOLS.find((tool) => tool.name === "browser_inspect_screenshot");
+  const clickTool = BUILTIN_TOOLS.find((tool) => tool.name === "browser_click");
+
+  assert.match(visualTool.description, /private visual context/i);
+  assert.match(visualTool.description, /semantic page state is insufficient/i);
+  assert.match(instruction, /authorization envelope/i);
+  assert.match(instruction, /overwrite or replace, selection, ordinary form submission, start, run, process, and analysis/i);
+  assert.match(instruction, /do not ask "are you sure" again/i);
+  assert.match(instruction, /current request supplies authorization for the full matching chain/i);
+  assert.match(instruction, /mandatory separate-turn confirmation/i);
+  assert.match(instruction, /Call browser_inspect_screenshot only when/i);
+  assert.match(instruction, /realtime delivery is best-effort supplemental context/i);
+  assert.doesNotMatch(instruction, /Each typed user message and each detected voice turn is accompanied/i);
+  assert.match(clickTool.parameters.properties.confirmed.description, /current user-authored request/i);
+  assert.match(clickTool.parameters.properties.confirmed.description, /separate later confirmation is still mandatory/i);
+});
+
 test("keeps website navigation available from New Tab and Chrome internal pages", () => {
   const instruction = buildSessionInstruction(undefined, { connected: false });
   const openTabTool = BUILTIN_TOOLS.find((tool) => tool.name === "browser_open_tab");

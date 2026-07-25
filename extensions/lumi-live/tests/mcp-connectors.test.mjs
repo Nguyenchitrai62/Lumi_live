@@ -8,7 +8,10 @@ import {
   createMcpConnectorAuth,
   createPkcePair,
 } from "../background/mcp-connector-auth.js";
-import { createMcpService } from "../background/mcp-service.js";
+import {
+  connectorToolShouldAskByDefault,
+  createMcpService,
+} from "../background/mcp-service.js";
 import {
   normalizeRedmineBaseUrl,
   RedmineMcpClient,
@@ -16,11 +19,15 @@ import {
 import { saveCapturedTabAsset } from "../background/captured-tab-assets.js";
 
 test("ships the expected extension-only connector catalog", () => {
-  assert.deepEqual(MCP_CONNECTORS.map((connector) => connector.id), ["notion", "redmine"]);
+  assert.deepEqual(MCP_CONNECTORS.map((connector) => connector.id), ["notion", "jira", "redmine"]);
   const notion = getMcpConnector("notion");
   assert.equal(notion.endpoint, "https://mcp.notion.com/mcp");
   assert.equal(notion.auth, "oauth-dcr");
   assert.equal(notion.icon, "../icons/connectors/notion.svg");
+  const jira = getMcpConnector("jira");
+  assert.equal(jira.endpoint, "https://mcp.atlassian.com/v1/mcp");
+  assert.equal(jira.auth, "oauth-dcr");
+  assert.equal(jira.icon, "../icons/connectors/jira.svg");
   assert.equal(getMcpConnector("redmine").icon, "../icons/connectors/redmine.svg");
   assert.deepEqual(getMcpConnector("redmine").fields.map((field) => field.name), ["baseUrl", "apiKey"]);
 });
@@ -90,12 +97,27 @@ test("creates OAuth PKCE values without exposing the verifier as the challenge",
   assert.notEqual(challenge, verifier);
 });
 
-test("Notion completes the one-click DCR OAuth flow", async () => {
+test("Jira write tools default to approval while read tools remain available", () => {
+  for (const toolName of [
+    "addCommentToJiraIssue",
+    "addWorklogToJiraIssue",
+    "createJiraIssue",
+    "editJiraIssue",
+    "transitionJiraIssue",
+  ]) {
+    assert.equal(connectorToolShouldAskByDefault(toolName), true, toolName);
+  }
+  assert.equal(connectorToolShouldAskByDefault("getJiraIssue"), false);
+  assert.equal(connectorToolShouldAskByDefault("searchJiraIssuesUsingJql"), false);
+});
+
+test("Notion and Jira complete the one-click DCR OAuth flow", async () => {
   const originalChrome = globalThis.chrome;
   const originalFetch = globalThis.fetch;
   const localValues = {};
   const registrations = [];
   const authorizationUrls = [];
+  const tokenRequests = [];
 
   globalThis.fetch = async (input, options = {}) => {
     const url = new URL(String(input));
@@ -106,7 +128,7 @@ test("Notion completes the one-click DCR OAuth flow", async () => {
     if (url.pathname.endsWith("/.well-known/oauth-protected-resource")) {
       return json({ error: "not_found" }, 404);
     }
-    if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
+    if (url.pathname.startsWith("/.well-known/oauth-protected-resource/")) {
       return json({ authorization_servers: [url.origin] });
     }
     if (url.pathname === "/.well-known/oauth-authorization-server") {
@@ -122,6 +144,7 @@ test("Notion completes the one-click DCR OAuth flow", async () => {
       return json({ client_id: `client-${url.hostname}` });
     }
     if (url.pathname === "/token") {
+      tokenRequests.push(new URLSearchParams(options.body));
       return json({
         access_token: `access-${url.hostname}`,
         refresh_token: `refresh-${url.hostname}`,
@@ -157,20 +180,26 @@ test("Notion completes the one-click DCR OAuth flow", async () => {
 
   try {
     const auth = createMcpConnectorAuth();
-    const credential = await auth.authorize("server-notion", "notion");
-    assert.equal(credential.connectorId, "notion");
-    assert.match(credential.accessToken, /^access-/);
+    for (const [index, connectorId] of ["notion", "jira"].entries()) {
+      const serverId = `server-${connectorId}`;
+      const credential = await auth.authorize(serverId, connectorId);
+      assert.equal(credential.connectorId, connectorId);
+      assert.match(credential.accessToken, /^access-/);
 
-    assert.equal(registrations.length, 1);
-    assert.equal(authorizationUrls.length, 1);
-    const connector = getMcpConnector("notion");
-    const redirectUri = "https://lumi-test.chromiumapp.org/mcp-notion";
-    assert.ok(registrations[0].body.redirect_uris.includes(redirectUri));
-    assert.equal(new URL(authorizationUrls[0]).searchParams.get("resource"), connector.endpoint);
-    assert.equal(
-      localValues[STORAGE_KEYS.mcpConnectorCredentials]["server-notion"].accessToken,
-      `access-${new URL(connector.endpoint).hostname}`,
-    );
+      const connector = getMcpConnector(connectorId);
+      const redirectUri = `https://lumi-test.chromiumapp.org/mcp-${connectorId}`;
+      assert.ok(registrations[index].body.redirect_uris.includes(redirectUri));
+      assert.equal(new URL(authorizationUrls[index]).searchParams.get("resource"), connector.endpoint);
+      assert.equal(tokenRequests[index * 2].get("resource"), connector.endpoint);
+      await auth.getAccessToken(serverId, { forceRefresh: true });
+      assert.equal(tokenRequests[index * 2 + 1].get("resource"), connector.endpoint);
+      assert.equal(
+        localValues[STORAGE_KEYS.mcpConnectorCredentials][serverId].accessToken,
+        `access-${new URL(connector.endpoint).hostname}`,
+      );
+    }
+    assert.equal(registrations.length, 2);
+    assert.equal(authorizationUrls.length, 2);
   } finally {
     globalThis.chrome = originalChrome;
     globalThis.fetch = originalFetch;

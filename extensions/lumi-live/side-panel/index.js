@@ -67,6 +67,8 @@ import {
   prepareImageAttachment,
   queuedImageMessagePreview,
 } from "./image-attachments.js";
+import { buildBrowserToolFailureResponse } from "./browser-tool-recovery.js";
+import { addBrowserWorkflowContext } from "./browser-workflow-context.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
@@ -85,9 +87,11 @@ const TURN_CANCELLATION_DRAIN_MS = 120;
 const TURN_CANCELLATION_WATCHDOG_MS = 80;
 const TURN_CANCELLATION_BOUNDARY_MS = 1500;
 const TARGET_REFRESH_INTERVAL_MS = 2800;
+const VISUAL_CONTEXT_SETTLE_MS = 650;
 applyUiConfig();
 const sidePanelLifecyclePort = chrome.runtime.connect({ name: "lumi_live_side_panel" });
 const elements = {
+  extensionVersion: document.querySelector("#extensionVersion"),
   liveBadge: document.querySelector("#liveBadge"),
   translateBadge: document.querySelector("#translateBadge"),
   settingsButton: document.querySelector("#settingsButton"),
@@ -189,11 +193,14 @@ let serverRotationPending = false;
 let contextRefreshPending = false;
 let backgroundSessionReconnectPending = false;
 let pendingSessionHandoffSocket = null;
-const AUTOMATIC_TAB_CAPTURE_ORIGINS = ["<all_urls>"];
+let activeTurnUserRequest = "";
 const conversationHistory = [];
 const queuedUserMessages = [];
 const initialTranscriptMarkup = elements.transcript.innerHTML;
 const activeTranscriptReveals = new Set();
+const completedThinkingMessagesAwaitingContent = new Set();
+let lumiContentSequence = 0;
+let thinkingCollapseFrameId = null;
 
 let petalsEnabled = DEFAULT_FALLING_PETALS_ENABLED;
 
@@ -229,6 +236,7 @@ const panelAudio = createPanelAudioController({
     suppressServerOutputUntilNextUserTurn,
   }),
   onFreshUserInput: () => {
+    activeTurnUserRequest = "";
     markFreshUserInputStarted();
     finalizeTranscript("user");
     finalizeTranscript("lumi");
@@ -236,9 +244,6 @@ const panelAudio = createPanelAudioController({
   },
   onInputLevel: (level) => {
     syncMicrophoneLevel(level);
-  },
-  onUserSpeechStart: () => {
-    void captureAndSendCurrentTabFrame();
   },
   sendJson,
 });
@@ -263,37 +268,6 @@ function sendRuntime(command, payload = {}) {
   });
 }
 
-function automaticTabCaptureAccessResult(granted, error = null) {
-  if (granted) return { granted: true, reason: "" };
-  const detail = error instanceof Error ? error.message : String(error || "");
-  return {
-    granted: false,
-    reason: detail
-      ? `Chrome did not grant automatic screenshot access: ${detail}`
-      : "Chrome needs one-time approval for Lumi to capture normal web tabs automatically.",
-  };
-}
-
-function requestAutomaticTabCaptureAccess() {
-  return chrome.permissions.request({
-    origins: AUTOMATIC_TAB_CAPTURE_ORIGINS,
-  }).then(
-    (granted) => automaticTabCaptureAccessResult(granted),
-    (error) => automaticTabCaptureAccessResult(false, error),
-  );
-}
-
-async function getAutomaticTabCaptureAccess() {
-  try {
-    const granted = await chrome.permissions.contains({
-      origins: AUTOMATIC_TAB_CAPTURE_ORIGINS,
-    });
-    return automaticTabCaptureAccessResult(granted);
-  } catch (error) {
-    return automaticTabCaptureAccessResult(false, error);
-  }
-}
-
 async function captureCurrentTabFrame() {
   if (activeTabFrameCapture) return activeTabFrameCapture;
   activeTabFrameCapture = (async () => {
@@ -313,6 +287,7 @@ async function captureCurrentTabFrame() {
           data: frame.data,
           mimeType: frame.mimeType,
         },
+        source: frame.source || null,
         reason: "",
       };
     } catch (error) {
@@ -329,12 +304,22 @@ async function captureCurrentTabFrame() {
   }
 }
 
-async function captureAndSendCurrentTabFrame() {
-  const { frame } = await captureCurrentTabFrame();
+async function captureAndSendVisualInspectionFrame() {
+  const { frame, source, reason } = await captureCurrentTabFrame();
   if (!frame || sessionStatus !== "ready" || websocket?.readyState !== WebSocket.OPEN) {
-    return false;
+    throw new Error(reason || "Lumi could not capture the visible active tab for visual inspection.");
   }
-  return sendJson({ realtimeInput: { video: frame } });
+  if (!sendJson({ realtimeInput: { video: frame } })) {
+    throw new Error("Lumi captured the active tab but could not deliver the visual context to the model.");
+  }
+  await new Promise((resolve) => setTimeout(resolve, VISUAL_CONTEXT_SETTLE_MS));
+  return {
+    success: true,
+    inspected: true,
+    source,
+    delivery: "best_effort_realtime_visual_context",
+    guidance: "A fresh screenshot was sent as supplemental private visual context, but realtime media ordering is not proof that it was inspected before this response. Immediately obtain fresh semantic page state and base every indexed action on that state; use the screenshot only to resolve visual ambiguity.",
+  };
 }
 
 const {
@@ -848,6 +833,10 @@ function clearConversationContext() {
     cancelAnimationFrame(message.revealFrameId);
   }
   activeTranscriptReveals.clear();
+  if (thinkingCollapseFrameId !== null) cancelAnimationFrame(thinkingCollapseFrameId);
+  thinkingCollapseFrameId = null;
+  completedThinkingMessagesAwaitingContent.clear();
+  lumiContentSequence = 0;
   conversationHistory.length = 0;
   queuedUserMessages.length = 0;
   hasConnectedInPanelLifetime = false;
@@ -940,6 +929,17 @@ function scrollTranscriptToLatest({ smooth = false } = {}) {
   elements.transcript.scrollTop = top;
 }
 
+function scheduleCompletedThinkingCollapse() {
+  if (thinkingCollapseFrameId !== null) return;
+  thinkingCollapseFrameId = requestAnimationFrame(() => {
+    thinkingCollapseFrameId = null;
+    for (const message of completedThinkingMessagesAwaitingContent) {
+      message.disclosure?.setExpanded(false);
+    }
+    completedThinkingMessagesAwaitingContent.clear();
+  });
+}
+
 function setVisibleTranscriptText(message, text) {
   const visibleText = String(text || "");
   message.visibleText = visibleText;
@@ -1024,6 +1024,7 @@ function createMessage(role, text, { attachment = null } = {}) {
       status,
       text,
       visibleText: text,
+      lumiContentSequenceAtCreation: lumiContentSequence,
     };
     message.disclosure = attachAnimatedDisclosure({
       root: details,
@@ -1083,12 +1084,14 @@ function createCapturedTabMessage(capture) {
 function updateTranscript(role, incoming) {
   const clean = String(incoming || "").trim();
   if (!clean) return;
+  if (role === "lumi") lumiContentSequence += 1;
   if (!partialMessages[role]) {
     partialMessages[role] = createMessage(role, role === "user" ? clean : "");
   }
   const message = partialMessages[role];
   const wasPlaceholder = role === "thinking" && message.placeholder;
   message.text = wasPlaceholder ? clean : mergeTranscriptText(message.text, clean);
+  if (role === "user") activeTurnUserRequest = message.text;
   message.placeholder = false;
   if (wasPlaceholder) {
     message.content.textContent = "";
@@ -1096,6 +1099,7 @@ function updateTranscript(role, incoming) {
   }
   if (role === "thinking" || role === "lumi") revealTranscriptText(message, message.text);
   else message.content.textContent = message.text;
+  if (role === "lumi") scheduleCompletedThinkingCollapse();
   if (role === "thinking") {
     const message = partialMessages.thinking;
     message.article.dataset.state = "streaming";
@@ -1123,6 +1127,10 @@ function finalizeTranscript(role) {
     setVisibleTranscriptText(message, message.text);
     message.article.dataset.state = "complete";
     message.status.textContent = "Complete";
+    completedThinkingMessagesAwaitingContent.add(message);
+    if (lumiContentSequence > message.lumiContentSequenceAtCreation) {
+      scheduleCompletedThinkingCollapse();
+    }
     scrollTranscriptToLatest();
   }
   partialMessages[role] = null;
@@ -1404,7 +1412,9 @@ async function runBrowserTool(tool, args) {
   const isUiAction = BROWSER_UI_ACTION_TOOLS.has(tool);
   avatarController.transitionState(isUiAction ? "ui_control" : "thinking");
   try {
-    let result = await sendRuntime("browser_tool", { tool, args });
+    let result = tool === "browser_inspect_screenshot"
+      ? await captureAndSendVisualInspectionFrame()
+      : await sendRuntime("browser_tool", { tool, args });
     if (tool === "browser_capture_screenshot" && result?.previewDataUrl) {
       createCapturedTabMessage(result);
       result = { ...result };
@@ -1421,6 +1431,10 @@ async function runBrowserTool(tool, args) {
     return result;
   } catch (error) {
     avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
+    if (tool === "browser_upload_file") {
+      const detail = error instanceof Error ? error.message : String(error || "Unknown upload error.");
+      elements.statusLine.textContent = `Upload failed: ${detail}`;
+    }
     throw error;
   } finally {
     browserToolRunning = false;
@@ -1672,8 +1686,8 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
       if (!callId || cancelledToolCallIds.has(callId)) continue;
       let mcpTool = null;
       let activityTool = null;
+      const isBrowserTool = BROWSER_TOOLS.some((tool) => tool.name === functionCall.name);
       try {
-        const isBrowserTool = BROWSER_TOOLS.some((tool) => tool.name === functionCall.name);
         const isLiveTranslationTool = functionCall.name === LIVE_TRANSLATE_TOOL_NAME;
         mcpTool = activeMcpTools.get(functionCall.name) || null;
         if (!isBrowserTool && !isLiveTranslationTool && !mcpTool) {
@@ -1693,6 +1707,12 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
           : isBrowserTool
             ? await runBrowserTool(functionCall.name, functionCall.args || {})
             : normalizeMcpToolResult(await runMcpTool(mcpTool, functionCall.args || {}, callId));
+        if (isBrowserTool) {
+          result = addBrowserWorkflowContext(result, {
+            toolName: functionCall.name,
+            userRequest: activeTurnUserRequest,
+          });
+        }
         if (isBrowserTool || isLiveTranslationTool) {
           const consumed = consumeResponseAudioDirective(result);
           result = consumed.result;
@@ -1730,7 +1750,12 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
         functionResponses.push({
           id: callId,
           name: functionCall.name,
-          response: { error: (error instanceof Error ? error.message : "Tool call failed.").slice(0, 1200) },
+          response: isBrowserTool
+            ? addBrowserWorkflowContext(buildBrowserToolFailureResponse(error), {
+                toolName: functionCall.name,
+                userRequest: activeTurnUserRequest,
+              })
+            : { error: (error instanceof Error ? error.message : "Tool call failed.").slice(0, 1200) },
         });
       }
     }
@@ -2240,7 +2265,6 @@ async function sendText(
     clearComposer = true,
     render = true,
     remember = true,
-    screenshotAccessRequest = null,
   } = {},
 ) {
   const clean = String(text || "").trim();
@@ -2254,26 +2278,7 @@ async function sendText(
   ) return false;
   textSendPending = true;
   syncMessageComposer();
-  let frame = selectedAttachment?.frame || null;
-  if (!selectedAttachment) {
-    const screenshotAccess = screenshotAccessRequest
-      ? await screenshotAccessRequest
-      : await getAutomaticTabCaptureAccess();
-    if (!screenshotAccess.granted) {
-      textSendPending = false;
-      elements.statusLine.textContent = `Message not sent: ${screenshotAccess.reason}`;
-      syncMessageComposer();
-      return false;
-    }
-    const capture = await captureCurrentTabFrame();
-    frame = capture.frame;
-    if (!frame) {
-      textSendPending = false;
-      elements.statusLine.textContent = `Message not sent: ${capture.reason || "Lumi could not capture the visible active tab."}`;
-      syncMessageComposer();
-      return false;
-    }
-  }
+  const frame = selectedAttachment?.frame || null;
   textSendPending = false;
   if (!isGeminiTransportReady() || agentTurnActive || turnCancellationPending) {
     syncMessageComposer();
@@ -2281,7 +2286,7 @@ async function sendText(
   }
   const displayText = clean || `Image · ${selectedAttachment.name}`;
   const modelText = clean || "Please inspect the attached image and respond with the most helpful relevant analysis.";
-  const videoSent = sendJson({ realtimeInput: { video: frame } });
+  const videoSent = frame ? sendJson({ realtimeInput: { video: frame } }) : true;
   const textSent = videoSent && sendJson({ realtimeInput: { text: modelText } });
   if (!videoSent || !textSent) {
     const failedSocket = websocket;
@@ -2299,6 +2304,7 @@ async function sendText(
     return false;
   }
 
+  activeTurnUserRequest = modelText;
   turnExecutionSequence += 1;
   if (suppressServerOutputUntilNextUserTurn) markFreshUserInputStarted();
   responseAudioGate.reset();
@@ -2558,18 +2564,10 @@ elements.messageForm.addEventListener("submit", (event) => {
   const message = elements.messageInput.value.trim();
   const attachment = pendingImageAttachment;
   const hasContent = Boolean(message || attachment);
-  const screenshotAccessRequest = message && !attachment
-    ? requestAutomaticTabCaptureAccess()
-    : null;
   if (hasContent && (!isGeminiTransportReady() || agentTurnActive || turnCancellationPending)) {
     queueUserMessage(message, attachment);
-    if (screenshotAccessRequest) {
-      void screenshotAccessRequest.then((access) => {
-        if (!access.granted) elements.statusLine.textContent = `Queued message needs access: ${access.reason}`;
-      });
-    }
   } else if (hasContent) {
-    void sendText(message, { attachment, screenshotAccessRequest });
+    void sendText(message, { attachment });
   } else if (agentTurnActive) {
     cancelCurrentTurn();
   }
@@ -2661,6 +2659,7 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 async function initialize() {
+  elements.extensionVersion.textContent = `v${chrome.runtime.getManifest().version}`;
   const stored = await chrome.storage.local.get([
     API_KEY_STORAGE_KEY,
     PETALS_STORAGE_KEY,

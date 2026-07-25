@@ -88,7 +88,11 @@ The build copies the source atlas from `public/avatars/pixel` and the layered VT
 - Tab listing and switching include every tab Chrome exposes; the result identifies whether PageAgent can control that tab. Switching to a tab that already exists happens immediately without an overlay transition. For a destination that is not already available, Lumi completes the Google Search sequence on the current page before Chrome creates and activates the new tab. If the current page is Chrome New Tab, a `chrome://` page, a local file without file access, or another restricted page, Lumi opens exactly `https://www.google.com/` in a new active tab, runs the transition there, and reuses that same tab for the requested destination so no extra Google tab remains. Every page-scroll call is animated over 1 second with an on-screen direction/progress HUD. A `text` target reveals matching rendered content, while `position=0` is the exact top, `position=0.5` the middle, and `position=1` the exact bottom. Form text is always revealed over 0.5 seconds.
 - While Lumi is generating or running a browser/MCP tool, the send button becomes a circular stop control. Cancelling interrupts the Gemini turn, stops playback and visual actions, and aborts active MCP requests without ending the voice session.
 - If a PageAgent click opens a YouTube video link or starts a paused YouTube video, Lumi locally suppresses only its remaining response audio for that turn. Output transcription still appears, and the next turn speaks normally even while the video remains open.
-- Video fullscreen controls use PageAgent's standard click path. Lumi does not request the `debugger` permission or add a synthetic keyboard fallback that cannot provide genuine user activation.
+- Local file uploads use the built-in `browser_upload_file` tool. It resolves a compatible input from the selected trigger, nearby container, accepted file types, labels, or menu-backed controls; assigns only the exact absolute paths authorized by the user; and falls back to intercepting a dynamically created native chooser.
+- Multi-step browser requests use a generic observe-act-verify loop. Targeted semantic-DOM queries preserve the controls around an exact filename, object name, status, or action on long pages, while `browser_wait_for_page_state` handles asynchronous UI transitions without sending raw full-page HTML to the model.
+- Ordinary state and interaction failures are returned as recoverable. Lumi must try distinct fresh-state, targeted-query, waiting, prerequisite, scrolling, and alternate-interaction tactics before reporting a blocker; permission, confirmation, local-file, Chrome-policy, security, and cancellation failures remain hard blockers.
+- Thinking details remain expanded across tool calls and collapse only after visible Lumi response content begins to render.
+- Video fullscreen controls continue to use PageAgent's standard click path; the `debugger` permission is used only while Lumi is handling an authorized local-file assignment or native file chooser.
 - MCP servers are added from **Settings → Connected tools**.
 - Every MCP tool can be set to **Always allow**, **Ask every time**, or **Block**.
 - Invalid or rejected tools are isolated so voice, chat, and other tools remain available.
@@ -96,16 +100,19 @@ The build copies the source atlas from `public/avatars/pixel` and the layered VT
 
 ## Quick Connect integrations
 
-Lumi Settings includes two extension-only connector rows in addition to the existing custom MCP URL form. Redmine opens a focused URL/API-key popup, while Notion starts secure OAuth immediately:
+Lumi Settings includes three extension-only connector rows in addition to the existing custom MCP URL form. Redmine opens a focused URL/API-key popup, while Notion and Jira start secure OAuth immediately:
 
 | Connector | Transport and authentication |
 | --- | --- |
 | Notion | Official `https://mcp.notion.com/mcp` endpoint with OAuth, PKCE, and dynamic client registration |
+| Jira | Official Atlassian Rovo MCP endpoint at `https://mcp.atlassian.com/v1/mcp` with OAuth, PKCE, and dynamic client registration |
 | Redmine | Built-in REST adapter using a custom Redmine base URL and `X-Redmine-API-Key` |
 
-For Notion, Lumi discovers the provider's OAuth metadata, dynamically registers this installed extension as a public client, creates the PKCE verifier and state locally, and opens the provider's authorization page with `chrome.identity.launchWebAuthFlow`. The single-use code is exchanged directly with the provider and the resulting values are saved only in `chrome.storage.local`. No Lumi backend participates in authorization or refresh.
+For Notion and Jira, Lumi discovers the provider's OAuth metadata, dynamically registers this installed extension as a public client, creates the PKCE verifier and state locally, and opens the provider's authorization page with `chrome.identity.launchWebAuthFlow`. The single-use code is exchanged directly with the provider and the resulting values are saved only in `chrome.storage.local`. No Lumi backend participates in authorization or refresh.
 
-Notion and Redmine use their recognizable app icons throughout Settings. Generic custom URL servers use the official Model Context Protocol icon. A built-in connector disappears from **Popular work tools** as soon as it is connected, keeping Quick Connect focused only on available choices; it remains in **Connected tools** until the user removes it.
+Notion, Jira, and Redmine use their recognizable app icons throughout Settings. Generic custom URL servers use the official Model Context Protocol icon. A built-in connector disappears from **Popular work tools** as soon as it is connected, keeping Quick Connect focused only on available choices; it remains in **Connected tools** until the user removes it.
+
+The Jira connector targets Jira Cloud through Atlassian's Rovo MCP server. An Atlassian organization admin may need to allow the extension's `chromiumapp.org` OAuth redirect domain before a user can approve the connection. Jira Server and Jira Data Center require a separate REST or custom MCP connector instead.
 
 Redmine setup:
 
@@ -123,7 +130,7 @@ Each connected server also has an enable switch. Turning it off keeps the saved 
 
 The Gemini key, selected voice, thinking level, avatar preference, MCP servers, dynamically registered OAuth client metadata, OAuth tokens, Redmine API keys, and tool policies are stored in `chrome.storage.local`, which is isolated to the extension's Chrome profile and is not synchronized through `chrome.storage.sync`. Conversation context is not stored there; it remains in side-panel memory until the panel closes. Removing a connector deletes its saved connector identity and tokens. Connector authorization codes, tokens, OAuth credentials, and API keys are never sent to a Lumi-owned backend; they are sent only to the relevant provider or authorized MCP/Redmine endpoint.
 
-This local-only boundary means the extension author does not receive connector credentials or maintain user accounts. It does not mean no third party processes connector content: Notion, Redmine, or a user-configured MCP server serves the requested data, and MCP tool inputs/results needed for the agent task can be sent to the user's configured Gemini service. `chrome.storage.local` is browser-profile storage, not an operating-system encrypted credential vault, so users must still protect their Chrome profile and device.
+This local-only boundary means the extension author does not receive connector credentials or maintain user accounts. It does not mean no third party processes connector content: Notion, Atlassian, Redmine, or a user-configured MCP server serves the requested data, and MCP tool inputs/results needed for the agent task can be sent to the user's configured Gemini service. `chrome.storage.local` is browser-profile storage, not an operating-system encrypted credential vault, so users must still protect their Chrome profile and device.
 
 The first voice session opens a dedicated microphone permission page. If access was previously denied, use **Fix access** in Settings.
 

@@ -44,4 +44,8 @@ test("consequential clicks require an explicit confirmation in both languages", 
   assert.doesNotThrow(
     () => assertConfirmedPageAgentClick(vietnameseButton, true),
   );
+  assert.throws(
+    () => assertConfirmedPageAgentClick(englishButton),
+    /current user-authored request explicitly authorizes this exact action, target, and scope/,
+  );
 });

@@ -26,9 +26,13 @@ import {
   captureYouTubeVideoClick,
   didClickOpenYouTubeVideo,
 } from "./youtube-video-action.js";
+import {
+  chooseCompatibleFileInput,
+  FILE_UPLOAD_TARGET_ATTRIBUTE,
+} from "./file-upload-target.js";
+import { selectPageStateContent } from "./page-state-content.js";
 
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
-const MAX_STATE_CHARACTERS = 16000;
 const GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
 const HIGHLIGHT_STYLE_ID = "lumi-page-agent-highlight-preference";
 const CLICK_EFFECT_STYLE_ID = "lumi-page-agent-click-effect-preference";
@@ -38,6 +42,7 @@ if (!globalThis[GLOBAL_KEY]) {
     stateIndexed: false,
     visualPreferences: { ...DEFAULT_VISUAL_PREFERENCES },
     activeVisualActionController: null,
+    fileUploadTarget: null,
   };
   globalThis[GLOBAL_KEY] = runtime;
 
@@ -103,6 +108,73 @@ if (!globalThis[GLOBAL_KEY]) {
 
   function indexedElement(index) {
     return getController().selectorMap?.get(index)?.ref || null;
+  }
+
+  function collectFileInputs(root = document, inputs = [], visitedRoots = new Set()) {
+    if (!root || visitedRoots.has(root)) return inputs;
+    visitedRoots.add(root);
+    for (const input of root.querySelectorAll?.('input[type="file"]') || []) {
+      if (!inputs.includes(input)) inputs.push(input);
+    }
+    for (const element of root.querySelectorAll?.("*") || []) {
+      if (element.shadowRoot) collectFileInputs(element.shadowRoot, inputs, visitedRoots);
+      if (element.tagName !== "IFRAME") continue;
+      try {
+        collectFileInputs(element.contentDocument, inputs, visitedRoots);
+      } catch {
+        // Cross-origin frames have their own injected PageAgent controller.
+      }
+    }
+    return inputs;
+  }
+
+  const FILE_UPLOAD_TRIGGER_PATTERN = /\b(upload|attach|browse|choose|import|file)\b|tải\s*lên|tai\s*len|đính\s*kèm|dinh\s*kem|chọn\s*(?:tệp|file)|chon\s*(?:tep|file)/i;
+
+  function isFileInput(element) {
+    return String(element?.type || element?.getAttribute?.("type") || "").toLowerCase() === "file";
+  }
+
+  function isFileUploadTrigger(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
+    if (isFileInput(element) || element.querySelector?.('input[type="file"]')) return true;
+
+    const label = element.closest?.("label");
+    const labelledControl = label?.htmlFor
+      ? element.ownerDocument?.getElementById?.(label.htmlFor)
+      : null;
+    if (label?.querySelector?.('input[type="file"]') || isFileInput(labelledControl)) return true;
+
+    const interactive = element.closest?.('button, [role="button"], a, label') || element;
+    const descriptor = [
+      interactive.textContent,
+      interactive.getAttribute?.("aria-label"),
+      interactive.getAttribute?.("title"),
+      interactive.getAttribute?.("name"),
+      interactive.getAttribute?.("id"),
+      interactive.getAttribute?.("class"),
+    ].filter(Boolean).join(" ");
+    return FILE_UPLOAD_TRIGGER_PATTERN.test(descriptor);
+  }
+
+  function clearPreparedFileUploadTarget(token = "") {
+    const target = runtime.fileUploadTarget;
+    if (!target) return;
+    if (!token || target.getAttribute(FILE_UPLOAD_TARGET_ATTRIBUTE) === token) {
+      target.removeAttribute(FILE_UPLOAD_TARGET_ATTRIBUTE);
+      runtime.fileUploadTarget = null;
+    }
+  }
+
+  async function readPageState(query = "") {
+    applyVisualPreferences();
+    const pageController = getController();
+    const state = await pageController.getBrowserState();
+    runtime.stateIndexed = true;
+    if (!runtime.visualPreferences.showElementHighlights) {
+      await pageController.cleanUpHighlights();
+    }
+    const selectedContent = selectPageStateContent(state.content, query);
+    return { success: true, ...state, ...selectedContent };
   }
 
   function getDeclarativeNewTabIntent(element) {
@@ -201,6 +273,73 @@ if (!globalThis[GLOBAL_KEY]) {
       return { success: true, cancelled: true };
     }
 
+    if (tool === "bridge_prepare_file_upload_target") {
+      const index = requireIndex(args);
+      const token = String(args.token || "").trim();
+      const fileNames = Array.isArray(args.fileNames) ? args.fileNames : [];
+      if (!/^[a-z0-9-]{8,128}$/i.test(token)) {
+        throw new Error("The file-upload target token is invalid.");
+      }
+      clearPreparedFileUploadTarget();
+      const selection = chooseCompatibleFileInput(
+        collectFileInputs(),
+        fileNames,
+        indexedElement(index),
+      );
+      if (!selection.input) {
+        return {
+          success: true,
+          prepared: false,
+          candidateCount: selection.candidateCount,
+          strategy: selection.strategy,
+        };
+      }
+      selection.input.setAttribute(FILE_UPLOAD_TARGET_ATTRIBUTE, token);
+      runtime.fileUploadTarget = selection.input;
+      return {
+        success: true,
+        prepared: true,
+        candidateCount: selection.candidateCount,
+        strategy: selection.strategy,
+        accept: selection.input.getAttribute("accept") || "",
+        multiple: Boolean(selection.input.multiple),
+      };
+    }
+
+    if (tool === "bridge_click_file_upload_target") {
+      const index = requireIndex(args);
+      const element = indexedElement(index);
+      if (!isFileUploadTrigger(element)) {
+        throw new Error(
+          "The indexed element is not identifiable as a file-upload control. Observe fresh page state or inspect the visible page, then use the exact final upload control.",
+        );
+      }
+      return withVisualAction((activeController) => activeController.clickElement(index));
+    }
+
+    if (tool === "bridge_finalize_file_upload_target") {
+      const token = String(args.token || "").trim();
+      const target = runtime.fileUploadTarget;
+      if (!target || target.getAttribute(FILE_UPLOAD_TARGET_ATTRIBUTE) !== token) {
+        throw new Error("The prepared file input is no longer available.");
+      }
+      const fileNames = Array.from(target.files || [], (file) => file.name);
+      clearPreparedFileUploadTarget(token);
+      if (!fileNames.length) {
+        throw new Error("Chrome did not assign any local files to the prepared file input.");
+      }
+      return {
+        success: true,
+        fileCount: fileNames.length,
+        fileNames,
+      };
+    }
+
+    if (tool === "bridge_cleanup_file_upload_target") {
+      clearPreparedFileUploadTarget(String(args.token || "").trim());
+      return { success: true };
+    }
+
     if (tool === "bridge_show_google_search_departure") {
       await showGoogleSearchDeparture(String(args.searchText || "new tab"));
       return { success: true };
@@ -212,16 +351,34 @@ if (!globalThis[GLOBAL_KEY]) {
     }
 
     if (tool === "browser_get_page_state") {
-      applyVisualPreferences();
-      const state = await pageController.getBrowserState();
-      runtime.stateIndexed = true;
-      if (!runtime.visualPreferences.showElementHighlights) {
-        await pageController.cleanUpHighlights();
+      return readPageState(args.query);
+    }
+
+    if (tool === "browser_wait_for_page_state") {
+      const query = String(args.query || "").trim();
+      if (!query) throw new Error("browser_wait_for_page_state requires exact visible text.");
+      const condition = args.condition === "absent" ? "absent" : "present";
+      const timeoutMs = Math.min(8000, Math.max(500, Number(args.timeoutMs) || 5000));
+      const startedAt = Date.now();
+      while (Date.now() - startedAt <= timeoutMs) {
+        const state = await readPageState(query);
+        const conditionMet = condition === "present"
+          ? state.queryMatched
+          : !state.queryMatched;
+        if (conditionMet) {
+          return {
+            ...state,
+            condition,
+            waitedMs: Date.now() - startedAt,
+          };
+        }
+        runtime.stateIndexed = false;
+        await new Promise((resolve) => setTimeout(resolve, 350));
       }
-      const content = state.content.length > MAX_STATE_CHARACTERS
-        ? `${state.content.slice(0, MAX_STATE_CHARACTERS)}\n[Page state truncated]`
-        : state.content;
-      return { success: true, ...state, content };
+      runtime.stateIndexed = false;
+      throw new Error(
+        `Timed out waiting for "${query}" to become ${condition} in the semantic DOM.`,
+      );
     }
 
     if (tool === "browser_click") {

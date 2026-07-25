@@ -38,7 +38,7 @@ export function assertConfirmedPageAgentClick(element, confirmed) {
   ]);
   if (HIGH_IMPACT_CLICK_PATTERN.test(label) && confirmed !== true) {
     throw new Error(
-      `This looks like a consequential action (${label || "unlabeled control"}). Ask for explicit confirmation, then retry with confirmed=true.`,
+      `This looks like a consequential action (${label || "unlabeled control"}). Retry with confirmed=true only when the current user-authored request explicitly authorizes this exact action, target, and scope, or after later explicit confirmation.`,
     );
   }
 }
