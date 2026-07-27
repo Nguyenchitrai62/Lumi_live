@@ -12,6 +12,9 @@ import {
   SIDE_PANEL_STANDARD_FEEDBACK_DURATION_MS,
   SIDE_PANEL_THINKING_PULSE_DURATION_MS,
   SIDE_PANEL_TRANSLATION_PULSE_DURATION_MS,
+  TASK_STEP_DISCLOSURE_ANIMATION_DURATION_MS,
+  TASK_STEP_DETAIL_MAX_HEIGHT_PX,
+  TASK_STEP_DETAIL_MAX_VIEWPORT_HEIGHT_PERCENT,
 } from "../core/ui-config.js";
 
 const CSS_DURATION_VARIABLES = {
@@ -19,6 +22,7 @@ const CSS_DURATION_VARIABLES = {
   "--ui-motion-standard": SIDE_PANEL_STANDARD_FEEDBACK_DURATION_MS,
   "--ui-motion-panel": SIDE_PANEL_EXPANSION_DURATION_MS,
   "--ui-motion-disclosure": DISCLOSURE_ANIMATION_DURATION_MS,
+  "--ui-motion-task-step": TASK_STEP_DISCLOSURE_ANIMATION_DURATION_MS,
   "--ui-motion-petal-fade": SIDE_PANEL_PETAL_FADE_DURATION_MS,
   "--ui-motion-petal-entrance": SIDE_PANEL_PETAL_ENTRANCE_DURATION_MS,
   "--ui-motion-background-drift": SIDE_PANEL_BACKGROUND_DRIFT_DURATION_MS,
@@ -34,4 +38,8 @@ export function applyUiConfig(root = document.documentElement) {
   for (const [property, milliseconds] of Object.entries(CSS_DURATION_VARIABLES)) {
     root.style.setProperty(property, `${milliseconds}ms`);
   }
+  root.style.setProperty(
+    "--ui-task-step-detail-max-height",
+    `min(${TASK_STEP_DETAIL_MAX_VIEWPORT_HEIGHT_PERCENT}vh, ${TASK_STEP_DETAIL_MAX_HEIGHT_PX}px)`,
+  );
 }

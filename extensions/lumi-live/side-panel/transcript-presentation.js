@@ -1,4 +1,5 @@
 import {
+  TASK_AUTO_FOLLOW_BOTTOM_TOLERANCE_PX,
   TRANSCRIPT_REVEAL_CHARACTERS_PER_SECOND,
   TRANSCRIPT_REVEAL_MINIMUM_DURATION_MS,
 } from "../core/ui-config.js";
@@ -31,4 +32,13 @@ export function getTranscriptRevealDurationMs(characterCount) {
 export function getLiveModelPartTranscriptRole(part) {
   if (!String(part?.text || "").trim()) return null;
   return part.thought === true ? "thinking" : "lumi";
+}
+
+export function isScrollAtBottom({
+  scrollHeight = 0,
+  scrollTop = 0,
+  clientHeight = 0,
+} = {}, tolerancePx = TASK_AUTO_FOLLOW_BOTTOM_TOLERANCE_PX) {
+  const remaining = Number(scrollHeight) - Number(scrollTop) - Number(clientHeight);
+  return remaining <= Math.max(0, Number(tolerancePx) || 0);
 }

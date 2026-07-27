@@ -31,6 +31,10 @@ import {
   FILE_UPLOAD_TARGET_ATTRIBUTE,
 } from "./file-upload-target.js";
 import { selectPageStateContent } from "./page-state-content.js";
+import {
+  buildSemanticAnchorContext,
+  MAX_SEMANTIC_ANCHORS,
+} from "./semantic-anchor-context.js";
 
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
 const GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
@@ -175,6 +179,60 @@ if (!globalThis[GLOBAL_KEY]) {
     }
     const selectedContent = selectPageStateContent(state.content, query);
     return { success: true, ...state, ...selectedContent };
+  }
+
+  async function findSemanticContext(targets = [], intent = "auto") {
+    const normalizedTargets = (Array.isArray(targets) ? targets : [targets])
+      .map((target) => String(target || "").trim())
+      .filter(Boolean)
+      .slice(0, MAX_SEMANTIC_ANCHORS);
+    if (!normalizedTargets.length) {
+      throw new Error("browser_find_semantic_context requires at least one semantic anchor.");
+    }
+
+    applyVisualPreferences();
+    const pageController = getController();
+    const state = await pageController.getBrowserState();
+    runtime.stateIndexed = true;
+    if (!runtime.visualPreferences.showElementHighlights) {
+      await pageController.cleanUpHighlights();
+    }
+    const semanticContext = buildSemanticAnchorContext({
+      controller: pageController,
+      targets: normalizedTargets,
+      intent,
+      maxCharacters: 12000,
+    });
+    const compactAnchors = semanticContext.anchors.map((anchor) => ({
+      target: anchor.target,
+      matched: anchor.matched,
+      ambiguous: anchor.ambiguous,
+      matches: anchor.matches.map((match) => ({
+        score: match.score,
+        method: match.method,
+        contextKind: match.contextKind,
+        inViewport: match.inViewport,
+        actionableIndices: match.actionableIndices,
+        recommendedControls: match.recommendedControls.map((control) => ({
+          index: control.index,
+          kind: control.kind,
+          score: control.score,
+          disabled: control.disabled,
+          selected: control.selected,
+          inViewport: control.inViewport,
+        })),
+      })),
+    }));
+    return {
+      success: true,
+      ...state,
+      content: semanticContext.content,
+      semanticIntent: semanticContext.intent,
+      semanticAnchors: compactAnchors,
+      matchedAnchorCount: semanticContext.matchedAnchorCount,
+      unmatchedTargets: semanticContext.unmatchedTargets,
+      semanticContextTruncated: semanticContext.truncated,
+    };
   }
 
   function getDeclarativeNewTabIntent(element) {
@@ -352,6 +410,10 @@ if (!globalThis[GLOBAL_KEY]) {
 
     if (tool === "browser_get_page_state") {
       return readPageState(args.query);
+    }
+
+    if (tool === "browser_find_semantic_context") {
+      return findSemanticContext(args.targets, args.intent);
     }
 
     if (tool === "browser_wait_for_page_state") {

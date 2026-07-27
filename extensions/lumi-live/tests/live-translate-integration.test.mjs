@@ -109,13 +109,14 @@ test("cancel is silent, unlocks promptly, and stops pending translation without 
   assert.match(webPage, /toolRuntimeRef\.current!\.freshUserInputStarted/);
 });
 
-test("extension renders Live Translate as a built-in conversation activity", async () => {
+test("extension routes Live Translate through the Lumi task without duplicate activity", async () => {
   const app = await readFile(new URL("../side-panel/index.js", import.meta.url), "utf8");
   assert.match(app, /activityLabel: "BUILT-IN TOOL"/);
   assert.match(app, /toolName: LIVE_TRANSLATE_TOOL_NAME/);
   assert.match(app, /serverName: "Gemini Live Translate"/);
-  assert.match(app, /if \(activityTool\) createMcpActivityCard/);
-  assert.match(app, /if \(activityTool\) finishMcpActivity\(callId, "completed", result\)/);
+  assert.match(app, /shouldRenderStandaloneToolActivity\(orchestration\)/);
+  assert.match(app, /if \(renderStandaloneActivity\)/);
+  assert.match(app, /if \(renderStandaloneActivity\) finishMcpActivity\(callId, "completed", result\)/);
 });
 
 test("web uses PageAgent while remaining scoped to the Lumi Studio document", async () => {

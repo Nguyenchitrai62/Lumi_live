@@ -9,6 +9,8 @@ export function attachAnimatedDisclosure({
   summary,
   body,
   initiallyExpanded = false,
+  durationMs = DISCLOSURE_ANIMATION_DURATION_MS,
+  onExpandedChange = () => {},
 }) {
   let expanded = Boolean(initiallyExpanded);
   let rootAnimation = null;
@@ -37,6 +39,7 @@ export function attachAnimatedDisclosure({
     expanded = nextExpanded;
     root.dataset.expanded = String(nextExpanded);
     summary.setAttribute("aria-expanded", String(nextExpanded));
+    onExpandedChange(nextExpanded);
 
     if (!animate || prefersReducedMotion() || typeof root.animate !== "function") {
       root.open = nextExpanded;
@@ -53,13 +56,13 @@ export function attachAnimatedDisclosure({
     rootAnimation = root.animate(
       [{ height: `${startHeight}px` }, { height: `${endHeight}px` }],
       {
-        duration: DISCLOSURE_ANIMATION_DURATION_MS,
+        duration: durationMs,
         easing: "cubic-bezier(.2,.8,.2,1)",
       },
     );
     bodyAnimation = body.animate(
       [{ opacity: nextExpanded ? 0 : 1 }, { opacity: nextExpanded ? 1 : 0 }],
-      { duration: DISCLOSURE_ANIMATION_DURATION_MS, easing: "ease" },
+      { duration: durationMs, easing: "ease" },
     );
     rootAnimation.onfinish = () => finish(nextExpanded);
   }

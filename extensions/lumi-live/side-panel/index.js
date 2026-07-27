@@ -38,6 +38,7 @@ import {
   findCommonCharacterPrefix,
   getLiveModelPartTranscriptRole,
   getTranscriptRevealDurationMs,
+  isScrollAtBottom,
   splitTranscriptCharacters,
 } from "./transcript-presentation.js";
 import { isSafeMarkdownUrl, renderMarkdown } from "./markdown-renderer.js";
@@ -46,6 +47,7 @@ import {
   AVATAR_ERROR_STATE_DURATION_MS,
   AVATAR_SUCCESS_STATE_DURATION_MS,
   DEFAULT_AUTO_CONNECT_ENABLED,
+  DEFAULT_AGENT_MAX_STEPS,
   DEFAULT_FALLING_PETALS_ENABLED,
   DEFAULT_VOICE_NAME,
 } from "../core/ui-config.js";
@@ -69,6 +71,19 @@ import {
 } from "./image-attachments.js";
 import { buildBrowserToolFailureResponse } from "./browser-tool-recovery.js";
 import { addBrowserWorkflowContext } from "./browser-workflow-context.js";
+import {
+  AGENT_DONE_ACTION_NAME,
+  AGENT_STEP_TOOL_NAME,
+  buildAgentStepDeclaration,
+  parseAgentStepCall,
+} from "../live/agent-protocol.js";
+import { createTaskOrchestrator } from "../live/task-orchestrator.js";
+import { createTaskStepView } from "./task-step-view.js";
+import { collectAutomaticBrowserVerification } from "./browser-action-verification.js";
+import {
+  shouldRenderStandaloneToolActivity,
+  taskOwnsTurn,
+} from "./task-transcript-policy.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
@@ -170,6 +185,7 @@ let activeMcpTools = new Map();
 const cancelledToolCallIds = new Set();
 const pendingToolCallIds = new Set();
 const pendingToolCallNames = new Map();
+const pendingToolActionNames = new Map();
 let websocket = null;
 let activeApiKey = "";
 let pendingLiveTranslationStart = false;
@@ -201,6 +217,9 @@ const activeTranscriptReveals = new Set();
 const completedThinkingMessagesAwaitingContent = new Set();
 let lumiContentSequence = 0;
 let thinkingCollapseFrameId = null;
+let transcriptAutoFollow = true;
+let transcriptProgrammaticScroll = false;
+let transcriptProgrammaticScrollTimerId = null;
 
 let petalsEnabled = DEFAULT_FALLING_PETALS_ENABLED;
 
@@ -236,6 +255,8 @@ const panelAudio = createPanelAudioController({
     suppressServerOutputUntilNextUserTurn,
   }),
   onFreshUserInput: () => {
+    turnExecutionSequence += 1;
+    taskOrchestrator.cancelTask("The task was interrupted by a new voice request.");
     activeTurnUserRequest = "";
     markFreshUserInputStarted();
     finalizeTranscript("user");
@@ -256,6 +277,14 @@ const sharedTabAudio = createSharedTabAudioController({
   },
 });
 const responseAudioGate = createTurnAudioGate(() => panelAudio.stopPlayback());
+const taskStepView = createTaskStepView({
+  container: elements.transcript,
+  scrollToLatest: () => scrollTranscriptToLatest(),
+});
+const taskOrchestrator = createTaskOrchestrator({
+  maxSteps: DEFAULT_AGENT_MAX_STEPS,
+  onHistoryChange: (history) => taskStepView.render(history),
+});
 
 function sendRuntime(command, payload = {}) {
   return chrome.runtime.sendMessage({
@@ -610,6 +639,8 @@ function resetPendingTurnExecution(message = "Cancelled by the user.") {
   }
   pendingToolCallIds.clear();
   pendingToolCallNames.clear();
+  pendingToolActionNames.clear();
+  taskOrchestrator.cancelTask(message);
   browserToolRunning = false;
   panelAudio.stopPlayback();
   responseAudioGate.reset();
@@ -839,6 +870,12 @@ function clearConversationContext() {
   lumiContentSequence = 0;
   conversationHistory.length = 0;
   queuedUserMessages.length = 0;
+  taskOrchestrator.clear();
+  taskStepView.clear();
+  clearTimeout(transcriptProgrammaticScrollTimerId);
+  transcriptProgrammaticScrollTimerId = null;
+  transcriptProgrammaticScroll = false;
+  transcriptAutoFollow = true;
   hasConnectedInPanelLifetime = false;
   pendingThinkingReconnect = false;
   for (const role of Object.keys(partialMessages)) {
@@ -920,13 +957,24 @@ async function handleConnectionNoticeSettings() {
   }
 }
 
-function scrollTranscriptToLatest({ smooth = false } = {}) {
+function scrollTranscriptToLatest({ smooth = false, force = false } = {}) {
+  if (!force && (!transcriptAutoFollow || taskStepView.isReviewing)) return false;
   const top = elements.transcript.scrollHeight;
   if (smooth && typeof elements.transcript.scrollTo === "function") {
+    transcriptProgrammaticScroll = true;
+    clearTimeout(transcriptProgrammaticScrollTimerId);
     elements.transcript.scrollTo({ top, behavior: "smooth" });
-    return;
+    transcriptProgrammaticScrollTimerId = setTimeout(() => {
+      transcriptProgrammaticScrollTimerId = null;
+      transcriptProgrammaticScroll = false;
+      transcriptAutoFollow = isScrollAtBottom(elements.transcript);
+    }, 600);
+    transcriptAutoFollow = true;
+    return true;
   }
   elements.transcript.scrollTop = top;
+  transcriptAutoFollow = true;
+  return true;
 }
 
 function scheduleCompletedThinkingCollapse() {
@@ -938,6 +986,34 @@ function scheduleCompletedThinkingCollapse() {
     }
     completedThinkingMessagesAwaitingContent.clear();
   });
+}
+
+function currentTurnHasTaskStepView() {
+  return taskOwnsTurn(taskOrchestrator.history, turnExecutionSequence);
+}
+
+function removeStandaloneThinkingForTurn(turnSequence) {
+  const sequence = Number(turnSequence);
+  const current = partialMessages.thinking;
+  if (current && current.turnSequence === sequence) {
+    cancelAnimationFrame(current.revealFrameId);
+    activeTranscriptReveals.delete(current);
+    completedThinkingMessagesAwaitingContent.delete(current);
+    current.disclosure?.dispose();
+    current.article.remove();
+    partialMessages.thinking = null;
+  }
+  for (const message of [...completedThinkingMessagesAwaitingContent]) {
+    if (message.turnSequence !== sequence) continue;
+    cancelAnimationFrame(message.revealFrameId);
+    activeTranscriptReveals.delete(message);
+    completedThinkingMessagesAwaitingContent.delete(message);
+    message.disclosure?.dispose();
+    message.article.remove();
+  }
+  for (const article of elements.transcript.querySelectorAll(".message-thinking")) {
+    if (Number(article.dataset.turnSequence) === sequence) article.remove();
+  }
 }
 
 function setVisibleTranscriptText(message, text) {
@@ -994,6 +1070,7 @@ function createMessage(role, text, { attachment = null } = {}) {
     const details = document.createElement("details");
     details.className = "message-thinking";
     details.dataset.state = "streaming";
+    details.dataset.turnSequence = String(turnExecutionSequence);
     const summary = document.createElement("summary");
     const mark = document.createElement("span");
     mark.className = "thinking-summary-mark";
@@ -1023,6 +1100,7 @@ function createMessage(role, text, { attachment = null } = {}) {
       summary,
       status,
       text,
+      turnSequence: turnExecutionSequence,
       visibleText: text,
       lumiContentSequenceAtCreation: lumiContentSequence,
     };
@@ -1084,6 +1162,7 @@ function createCapturedTabMessage(capture) {
 function updateTranscript(role, incoming) {
   const clean = String(incoming || "").trim();
   if (!clean) return;
+  if (role === "thinking" && currentTurnHasTaskStepView()) return;
   if (role === "lumi") lumiContentSequence += 1;
   if (!partialMessages[role]) {
     partialMessages[role] = createMessage(role, role === "user" ? clean : "");
@@ -1421,6 +1500,20 @@ async function runBrowserTool(tool, args) {
       delete result.previewDataUrl;
     }
     if (isUiAction) {
+      result = {
+        ...result,
+        controllerVerification: await collectAutomaticBrowserVerification({
+          tool,
+          args,
+          result,
+          readPageState: (query) => sendRuntime("browser_tool", {
+            tool: "browser_get_page_state",
+            args: query ? { query } : {},
+          }),
+        }),
+      };
+    }
+    if (isUiAction) {
       avatarController.transitionState("success", {
         forMs: AVATAR_SUCCESS_STATE_DURATION_MS,
         resumeState: "thinking",
@@ -1472,6 +1565,77 @@ async function runMcpTool(tool, args, callId) {
   }
 }
 
+function availableAgentActions(sourceSocket = websocket) {
+  const declared = Array.isArray(sourceSocket?.lumiActionDeclarations)
+    ? sourceSocket.lumiActionDeclarations
+    : [];
+  if (declared.length) return declared;
+  const activeMcpNames = new Set(activeMcpTools.keys());
+  return [
+    ...BUILTIN_TOOLS,
+    ...(sessionConnectionOptions?.mcpFunctionDeclarations || [])
+      .filter((declaration) => activeMcpNames.has(declaration.name)),
+  ];
+}
+
+function ensureActiveAgentTask() {
+  const taskId = taskOrchestrator.ensureTask(
+    activeTurnUserRequest || "Voice browser task",
+    {
+      turnSequence: turnExecutionSequence,
+      maxSteps: DEFAULT_AGENT_MAX_STEPS,
+    },
+  );
+  removeStandaloneThinkingForTurn(turnExecutionSequence);
+  return taskId;
+}
+
+function agentStepEnvelope(actionName, actionResult, orchestrationResult) {
+  const checkpoint = orchestrationResult?.checkpoint || null;
+  const reasonGuidance = {
+    loop_detected: "The repeated action was not executed. Use a distinct safe tactic or call done with a concrete blocker.",
+    max_steps: "The controller exhausted the step budget and recorded a failed completion.",
+    observation_required: "Observe current browser state first, then retry the action using only fresh indices or tab data.",
+    verification_required: "Run one browser observation or targeted wait now. Do not repeat the action or call done until fresh evidence is available.",
+    premature_done: "Complete at least one concrete task step and collect evidence before reporting success.",
+  };
+  return {
+    task: checkpoint,
+    action: {
+      name: actionName,
+      status: orchestrationResult?.step?.action?.status
+        || (orchestrationResult?.accepted === false ? "blocked" : "completed"),
+      retryAttempt: orchestrationResult?.step?.retryAttempt
+        ?? orchestrationResult?.retryAttempt
+        ?? 0,
+    },
+    observation: actionResult,
+    controllerGuidance: checkpoint?.warning
+      || reasonGuidance[orchestrationResult?.reason]
+      || "Evaluate this observation, update durable memory, and continue with exactly one next action or done.",
+  };
+}
+
+function requestStructuredTaskCompletion(sourceSocket) {
+  const running = taskOrchestrator.activeTask;
+  if (!running || sourceSocket !== websocket) return false;
+  const recovery = taskOrchestrator.handleIncompleteTurn(running.taskId);
+  if (!recovery.recover) return false;
+  const checkpoint = recovery.checkpoint;
+  setAgentTurnActive(true);
+  return sendJson({
+    clientContent: {
+      turns: [{
+        role: "user",
+        parts: [{
+          text: `[Lumi controller checkpoint — not a user request] The tool task is still active because no structured done event was emitted. Re-evaluate the complete original request now. Call ${AGENT_STEP_TOOL_NAME} exactly once. If all requested work is verified, use actionName="done" with success, result, and evidence. Otherwise choose one distinct unfinished action. Remaining action steps: ${checkpoint?.remainingSteps ?? 0}. Do not answer in plain text before done.`,
+        }],
+      }],
+      turnComplete: true,
+    },
+  }, sourceSocket);
+}
+
 async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
   const raw = typeof event.data === "string" ? event.data : await event.data.text();
   const response = JSON.parse(raw);
@@ -1490,13 +1654,14 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
   if (completingHandoff && !response.setupComplete) return;
 
   for (const id of response.toolCallCancellation?.ids || []) {
-    if (pendingToolCallNames.get(id) === LIVE_TRANSLATE_TOOL_NAME && pendingLiveTranslationStart) {
+    if (pendingToolActionNames.get(id) === LIVE_TRANSLATE_TOOL_NAME && pendingLiveTranslationStart) {
       pendingLiveTranslationStart = false;
       void sendRuntime("stop_live_translation").catch(() => {});
     }
     rememberCancelledToolCall(id);
     pendingToolCallIds.delete(id);
     pendingToolCallNames.delete(id);
+    pendingToolActionNames.delete(id);
     finishMcpActivity(id, "cancelled", "Gemini cancelled this tool call because the conversation turn was interrupted.");
   }
   if (response.setupComplete) {
@@ -1658,19 +1823,6 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
     }
     flushQueuedUserMessage();
   }
-  if (serverContent?.turnComplete) {
-    const wasUserCancellation = turnCancellationPending;
-    turnCancellationPending = false;
-    finalizeTranscript("user");
-    finalizeTranscript("lumi");
-    finalizeTranscript("thinking");
-    setAgentTurnActive(false);
-    if (wasUserCancellation) {
-      elements.statusLine.textContent = "Current action cancelled. Lumi is ready for your next request.";
-    }
-    flushQueuedUserMessage();
-  }
-
   if (functionCalls.length) {
     const executionSequence = turnExecutionSequence;
     const functionResponses = [];
@@ -1680,18 +1832,90 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
       pendingToolCallNames,
       cancelledToolCallIds,
     );
-    for (const functionCall of functionCalls) {
+    for (const [functionCallIndex, functionCall] of functionCalls.entries()) {
       if (executionSequence !== turnExecutionSequence || turnCancellationPending) break;
       const callId = functionCall.id;
       if (!callId || cancelledToolCallIds.has(callId)) continue;
       let mcpTool = null;
       let activityTool = null;
-      const isBrowserTool = BROWSER_TOOLS.some((tool) => tool.name === functionCall.name);
+      let renderStandaloneActivity = false;
+      let isBrowserTool = false;
+      let protocolStep = null;
+      let orchestration = null;
+      const stepStartedAt = performance.now();
+      const taskId = ensureActiveAgentTask();
       try {
-        const isLiveTranslationTool = functionCall.name === LIVE_TRANSLATE_TOOL_NAME;
-        mcpTool = activeMcpTools.get(functionCall.name) || null;
+        if (functionCallIndex > 0) {
+          throw new Error("Parallel agent actions are not allowed. Send exactly one Lumi step at a time.");
+        }
+        protocolStep = parseAgentStepCall(
+          functionCall,
+          availableAgentActions(sourceSocket),
+        );
+        const actionName = protocolStep.action.name;
+        const actionArgs = protocolStep.action.input;
+        pendingToolActionNames.set(callId, actionName);
+        orchestration = taskOrchestrator.beginStep({
+          taskId,
+          reflection: protocolStep.reflection,
+          action: protocolStep.action,
+        });
+        if (!orchestration.accepted) {
+          const constraintMessages = {
+            loop_detected: "Repeated action blocked against an unchanged observation fingerprint.",
+            max_steps: "The task step budget is exhausted.",
+            observation_required: "A fresh browser observation is required before this action.",
+            verification_required: "The previous browser action needs a fresh verification observation.",
+            premature_done: "Structured completion was requested before any task step completed.",
+          };
+          const blockedResult = {
+            error: constraintMessages[orchestration.reason]
+              || "The controller blocked this action.",
+            recoverable: orchestration.reason !== "max_steps",
+          };
+          functionResponses.push({
+            id: callId,
+            name: AGENT_STEP_TOOL_NAME,
+            response: {
+              result: agentStepEnvelope(
+                actionName,
+                blockedResult,
+                orchestration,
+              ),
+            },
+          });
+          continue;
+        }
+        if (actionName === AGENT_DONE_ACTION_NAME) {
+          const finished = taskOrchestrator.finishDoneStep(
+            orchestration.stepId,
+            actionArgs,
+          );
+          functionResponses.push({
+            id: callId,
+            name: AGENT_STEP_TOOL_NAME,
+            response: {
+              result: agentStepEnvelope(
+                actionName,
+                {
+                  success: actionArgs.success,
+                  result: actionArgs.result,
+                  evidence: actionArgs.evidence || "",
+                  completedGoals: actionArgs.completedGoals || [],
+                  completionRecorded: true,
+                },
+                finished,
+              ),
+            },
+          });
+          continue;
+        }
+
+        isBrowserTool = BROWSER_TOOLS.some((tool) => tool.name === actionName);
+        const isLiveTranslationTool = actionName === LIVE_TRANSLATE_TOOL_NAME;
+        mcpTool = activeMcpTools.get(actionName) || null;
         if (!isBrowserTool && !isLiveTranslationTool && !mcpTool) {
-          throw new Error(`Unsupported tool: ${functionCall.name}`);
+          throw new Error(`Unsupported tool: ${actionName}`);
         }
         if (mcpTool?.disabled) throw new Error("This MCP tool is disabled for the rest of this session.");
         activityTool = isLiveTranslationTool
@@ -1701,15 +1925,19 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
               serverName: "Gemini Live Translate",
             }
           : mcpTool;
-        if (activityTool) createMcpActivityCard(callId, activityTool, functionCall.args || {});
+        renderStandaloneActivity = Boolean(activityTool)
+          && shouldRenderStandaloneToolActivity(orchestration);
+        if (renderStandaloneActivity) {
+          createMcpActivityCard(callId, activityTool, actionArgs);
+        }
         let result = isLiveTranslationTool
-          ? await runLiveTranslationTool(functionCall.args || {})
+          ? await runLiveTranslationTool(actionArgs)
           : isBrowserTool
-            ? await runBrowserTool(functionCall.name, functionCall.args || {})
-            : normalizeMcpToolResult(await runMcpTool(mcpTool, functionCall.args || {}, callId));
+            ? await runBrowserTool(actionName, actionArgs)
+            : normalizeMcpToolResult(await runMcpTool(mcpTool, actionArgs, callId));
         if (isBrowserTool) {
           result = addBrowserWorkflowContext(result, {
-            toolName: functionCall.name,
+            toolName: actionName,
             userRequest: activeTurnUserRequest,
           });
         }
@@ -1724,14 +1952,29 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
           || turnCancellationPending
           || sourceSocket !== websocket
         ) {
-          if (activityTool) finishMcpActivity(callId, "cancelled", "The session ended before Lumi could use this tool result.");
+          if (orchestration?.accepted) {
+            taskOrchestrator.finishStep(orchestration.stepId, {
+              result: { error: "The action completed after its turn was cancelled." },
+              error: "The action completed after its turn was cancelled.",
+              durationMs: performance.now() - stepStartedAt,
+            });
+          }
+          if (renderStandaloneActivity) {
+            finishMcpActivity(callId, "cancelled", "The session ended before Lumi could use this tool result.");
+          }
           continue;
         }
-        if (activityTool) finishMcpActivity(callId, "completed", result);
+        if (renderStandaloneActivity) finishMcpActivity(callId, "completed", result);
+        const finished = taskOrchestrator.finishStep(orchestration.stepId, {
+          result,
+          durationMs: performance.now() - stepStartedAt,
+        });
         functionResponses.push({
           id: callId,
-          name: functionCall.name,
-          response: { result },
+          name: AGENT_STEP_TOOL_NAME,
+          response: {
+            result: agentStepEnvelope(actionName, result, finished),
+          },
         });
       } catch (error) {
         if (
@@ -1740,22 +1983,48 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
           || turnCancellationPending
           || sourceSocket !== websocket
         ) {
-          if (activityTool) finishMcpActivity(callId, "cancelled", "The tool call was cancelled before it completed.");
+          if (orchestration?.accepted) {
+            taskOrchestrator.finishStep(orchestration.stepId, {
+              result: { error: "The tool call was cancelled before it completed." },
+              error: "The tool call was cancelled before it completed.",
+              durationMs: performance.now() - stepStartedAt,
+            });
+          }
+          if (renderStandaloneActivity) {
+            finishMcpActivity(callId, "cancelled", "The tool call was cancelled before it completed.");
+          }
           continue;
         }
-        if (activityTool) {
+        if (renderStandaloneActivity) {
           finishMcpActivity(callId, "failed", error instanceof Error ? error.message : "Tool call failed.");
         }
         if (mcpTool) promptToDisableFailedMcpTool(mcpTool, error);
+        const detail = (error instanceof Error ? error.message : "Tool call failed.").slice(0, 1200);
+        const actionName = protocolStep?.action?.name || AGENT_STEP_TOOL_NAME;
+        const failure = isBrowserTool
+          ? addBrowserWorkflowContext(buildBrowserToolFailureResponse(error), {
+              toolName: actionName,
+              userRequest: activeTurnUserRequest,
+            })
+          : { error: detail };
+        const failed = orchestration?.accepted
+          ? taskOrchestrator.finishStep(orchestration.stepId, {
+              result: failure,
+              error: detail,
+              durationMs: performance.now() - stepStartedAt,
+            })
+          : {
+              checkpoint: taskOrchestrator.checkpoint(taskId),
+            };
+        if (!protocolStep) {
+          taskOrchestrator.recordProtocolError(detail, { taskId });
+        }
         functionResponses.push({
           id: callId,
-          name: functionCall.name,
-          response: isBrowserTool
-            ? addBrowserWorkflowContext(buildBrowserToolFailureResponse(error), {
-                toolName: functionCall.name,
-                userRequest: activeTurnUserRequest,
-              })
-            : { error: (error instanceof Error ? error.message : "Tool call failed.").slice(0, 1200) },
+          name: functionCall.name || AGENT_STEP_TOOL_NAME,
+          response: {
+            result: agentStepEnvelope(actionName, failure, failed),
+          },
         });
       }
     }
@@ -1771,9 +2040,27 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
         pendingToolCallIds,
         pendingToolCallNames,
       );
+      for (const response of functionResponses) {
+        pendingToolActionNames.delete(response.id);
+      }
     }
   }
-  if (serverContent?.turnComplete && !functionCalls.length) responseAudioGate.reset();
+  if (serverContent?.turnComplete && !functionCalls.length) {
+    const completionRecoveryStarted = requestStructuredTaskCompletion(sourceSocket);
+    if (!completionRecoveryStarted) {
+      const wasUserCancellation = turnCancellationPending;
+      turnCancellationPending = false;
+      finalizeTranscript("user");
+      finalizeTranscript("lumi");
+      finalizeTranscript("thinking");
+      setAgentTurnActive(false);
+      if (wasUserCancellation) {
+        elements.statusLine.textContent = "Current action cancelled. Lumi is ready for your next request.";
+      }
+      flushQueuedUserMessage();
+      responseAudioGate.reset();
+    }
+  }
   if (contextRefreshPending && !sessionHasInFlightWork()) {
     scheduleAutomaticSessionReconnect(
       "Refreshing Gemini Live with recent context only.",
@@ -1811,7 +2098,8 @@ function openGeminiSocket(
     setSessionStatus("connecting", "Opening Gemini Live...");
   }
   if (!handoffPredecessor) sessionReadyAt = 0;
-  const functionDeclarations = [...BUILTIN_TOOLS, ...mcpFunctionDeclarations];
+  const actionDeclarations = [...BUILTIN_TOOLS, ...mcpFunctionDeclarations];
+  const functionDeclarations = [buildAgentStepDeclaration(actionDeclarations)];
   const sessionSocket = new WebSocket(`${WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`);
   if (handoffPredecessor) pendingSessionHandoffSocket = sessionSocket;
   else websocket = sessionSocket;
@@ -1822,6 +2110,7 @@ function openGeminiSocket(
   sessionSocket.lumiBackgroundReconnect = reconnectInBackground;
   sessionSocket.lumiPredecessorSocket = handoffPredecessor;
   sessionSocket.lumiSetupComplete = false;
+  sessionSocket.lumiActionDeclarations = actionDeclarations;
   const setupTimeoutId = setTimeout(() => {
     setupTimeoutIds.delete(setupTimeoutId);
     sessionSocket.lumiSetupTimeoutId = null;
@@ -1851,7 +2140,15 @@ function openGeminiSocket(
           },
         },
         tools: [{ functionDeclarations }],
-        systemInstruction: { parts: [{ text: buildSessionInstruction(mcpInfo, activeTabContext) }] },
+        systemInstruction: {
+          parts: [{
+            text: buildSessionInstruction(
+              mcpInfo,
+              activeTabContext,
+              actionDeclarations,
+            ),
+          }],
+        },
         inputAudioTranscription: {},
         outputAudioTranscription: {},
       },
@@ -2160,6 +2457,8 @@ function cleanupMedia() {
   void sendRuntime("release_tab_audio").catch(() => {});
   pendingToolCallIds.clear();
   pendingToolCallNames.clear();
+  pendingToolActionNames.clear();
+  taskOrchestrator.cancelTask("The Gemini Live session ended before the task completed.");
   activeApiKey = "";
   pendingLiveTranslationStart = false;
   liveTranslationTargetLanguageCode = "";
@@ -2504,6 +2803,23 @@ document.addEventListener("keydown", (event) => {
 elements.mcpToolNoticePrimary.addEventListener("click", () => void handleMcpToolNoticeAction("primary"));
 elements.mcpToolNoticeSecondary.addEventListener("click", () => void handleMcpToolNoticeAction("secondary"));
 elements.mcpToolNoticeTertiary.addEventListener("click", () => void handleMcpToolNoticeAction("tertiary"));
+elements.transcript.addEventListener("scroll", () => {
+  if (transcriptProgrammaticScroll) return;
+  transcriptAutoFollow = isScrollAtBottom(elements.transcript);
+}, { passive: true });
+elements.transcript.addEventListener("scrollend", () => {
+  clearTimeout(transcriptProgrammaticScrollTimerId);
+  transcriptProgrammaticScrollTimerId = null;
+  transcriptProgrammaticScroll = false;
+  transcriptAutoFollow = isScrollAtBottom(elements.transcript);
+}, { passive: true });
+for (const eventName of ["wheel", "touchstart", "pointerdown"]) {
+  elements.transcript.addEventListener(eventName, () => {
+    clearTimeout(transcriptProgrammaticScrollTimerId);
+    transcriptProgrammaticScrollTimerId = null;
+    transcriptProgrammaticScroll = false;
+  }, { passive: true });
+}
 elements.transcript.addEventListener("click", (event) => {
   const link = event.target.closest?.(".markdown-body a[href]");
   if (!link) return;

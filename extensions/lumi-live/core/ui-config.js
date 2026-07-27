@@ -12,6 +12,14 @@ export const DEFAULT_AUTO_CONNECT_ENABLED = true;
 // Hiển thị highlight phần tử PageAgent mặc định. Options: true, false.
 export const DEFAULT_SHOW_ELEMENT_HIGHLIGHTS = false;
 
+// Lumi Task orchestration
+// Maximum number of non-done actions allowed in one Lumi Task.
+export const DEFAULT_AGENT_MAX_STEPS = 100;
+// Block an identical action after this many executions against the same observation.
+export const DEFAULT_IDENTICAL_STATE_ACTION_LIMIT = 2;
+// Number of controller prompts allowed when Gemini ends a turn without structured done.
+export const DEFAULT_COMPLETION_RECOVERY_LIMIT = 2;
+
 // Transcript and expandable content
 // Tốc độ reveal Thinking/content khi nhận một khối text lớn (ký tự/giây).
 export const TRANSCRIPT_REVEAL_CHARACTERS_PER_SECOND = 800;
@@ -19,6 +27,13 @@ export const TRANSCRIPT_REVEAL_CHARACTERS_PER_SECOND = 800;
 export const TRANSCRIPT_REVEAL_MINIMUM_DURATION_MS = 16;
 // Thời gian mở/thu gọn Thinking và MCP (ms).
 export const DISCLOSURE_ANIMATION_DURATION_MS = 500;
+// Task steps expand faster so inspecting live execution does not feel sticky.
+export const TASK_STEP_DISCLOSURE_ANIMATION_DURATION_MS = 220;
+// Transcript auto-follow is active only within this distance from the real bottom.
+export const TASK_AUTO_FOLLOW_BOTTOM_TOLERANCE_PX = 1;
+// Expanded task detail viewport limits.
+export const TASK_STEP_DETAIL_MAX_HEIGHT_PX = 430;
+export const TASK_STEP_DETAIL_MAX_VIEWPORT_HEIGHT_PERCENT = 58;
 
 // Side-panel effects
 // Thời gian phản hồi nhanh khi hover/click control trong side panel (ms).

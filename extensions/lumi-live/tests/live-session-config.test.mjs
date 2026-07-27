@@ -108,6 +108,9 @@ test("grounds self-references and searches in the Lumi Live product identity", (
   assert.match(instruction, /YouTube video.+without a spoken preamble/i);
   assert.match(instruction, /live_translate/i);
   assert.match(instruction, /tool owns translated audio playback/i);
+  assert.match(instruction, /CODE-ENFORCED TASK PROTOCOL/i);
+  assert.match(instruction, /reflection-before-action/i);
+  assert.match(instruction, /plain-text final answer for done/i);
   assert.ok(BUILTIN_TOOLS.some((tool) => tool.name === "live_translate"));
   assert.doesNotMatch(instruction, /Talk to a AI Agent That Controls Your Active Tab/i);
 });

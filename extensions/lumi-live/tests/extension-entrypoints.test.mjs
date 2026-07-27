@@ -92,12 +92,20 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(styles, /\.thinking-summary-chevron[^}]+var\(--ui-motion-disclosure\)/);
   assert.match(styles, /\.mcp-activity-chevron[^}]+var\(--ui-motion-disclosure\)/);
   assert.match(styles, /\.mcp-activity\[data-expanded="true"\]/);
+  assert.match(styles, /\.agent-step-body[^}]+max-height:\s*var\(--ui-task-step-detail-max-height\)/);
+  assert.match(styles, /\.agent-step-field-value[^}]+font-size:\s*11\.5px/);
+  assert.match(styles, /--task-border:\s*#d9d2e5/);
+  assert.match(controller, /createTaskStepView/);
   assert.doesNotMatch(styles, /is-typing|transcript-caret-blink/);
   assert.match(styles, /\.message-queue-steer/);
   assert.match(styles, /\.connection-notice-backdrop[^}]+place-items:\s*center/);
   assert.match(controller, /thinkingConfig:\s*buildThinkingConfig\(sessionThinkingLevel\)/);
   assert.match(controller, /chrome\.runtime\.getManifest\(\)\.version/);
   assert.match(controller, /tools:\s*\[\{ functionDeclarations \}\]/);
+  assert.match(
+    controller,
+    /const actionDeclarations = \[\.\.\.BUILTIN_TOOLS, \.\.\.mcpFunctionDeclarations\][\s\S]+const functionDeclarations = \[buildAgentStepDeclaration\(actionDeclarations\)\]/,
+  );
   assert.match(controller, /sendJson\(buildInitialHistoryClientContent\(conversationHistory\),\s*sourceSocket\)/);
   assert.match(controller, /elements\.messageInput\.disabled\s*=\s*textSendPending/);
   assert.match(controller, /queueUserMessage\(message,\s*attachment\)/);

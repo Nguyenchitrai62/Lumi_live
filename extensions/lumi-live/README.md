@@ -16,7 +16,13 @@ npm run build:extension
 4. Save a Gemini API key, choose a voice, and allow microphone access.
 5. Choose a **Thinking** level in the composer if needed and open an HTTP/HTTPS tab. To let PageAgent read and control local `file://` pages too, open Lumi's extension details and enable **Allow access to file URLs**. The side panel connects voice automatically after the API key and microphone permission are ready. The default is **Minimal** for the lowest latency. You can change Thinking at any time; Lumi reconnects with the new level while retaining the current conversation.
 
-The **Thinking** panel starts expanded, keeps the transcript scrolled to the newest thought, and streams Gemini's thought summary as it arrives. Thinking and MCP details open and collapse over 0.5 seconds. Thinking collapses automatically when answer content begins, remains in the transcript, and can be expanded again. If Gemini delivers transcript text as one large block, Lumi progressively reveals it at 400 characters per second without a typing cursor. This is Gemini's summary of its reasoning, not its private raw chain of thought. Default settings and visible UI timings—including Thinking, click, form input, scrolling, and every phase of the Google departure effect—are plain variables in `core/ui-config.js`.
+For ordinary conversational turns, the **Thinking** panel starts expanded, keeps the transcript scrolled to the newest thought, and streams Gemini's thought summary as it arrives. Thinking and standalone MCP details open and collapse over 0.5 seconds. Thinking collapses automatically when answer content begins, remains in the transcript, and can be expanded again. When a turn becomes a structured **Lumi Task**, its Step View owns the reflection and tool presentation: the preliminary Thinking card is removed and task-owned MCP/Live Translate calls do not create duplicate activity cards. Approval notices remain visible because they require a user decision. If Gemini delivers transcript text as one large block, Lumi progressively reveals it at 400 characters per second without a typing cursor. This is Gemini's summary of its reasoning, not its private raw chain of thought. Default settings and visible UI timings—including Thinking, click, form input, scrolling, and every phase of the Google departure effect—are plain variables in `core/ui-config.js`.
+
+Tool tasks run through the code-enforced `lumi_agent_step` protocol. Gemini Live still performs the planning, but it sees one macro-tool instead of choosing among every browser and MCP declaration directly. Each step must provide a concise evaluation of the previous goal, durable memory, one next goal, and exactly one action. The extension executes that action, records its observation in one historical event stream, and returns the remaining step budget. A tool task can finish only through the structured `done` action; if Gemini ends a turn early, the controller requests the missing completion event before releasing the queued user message.
+
+The conversation shows a unified **Lumi Task** Step View for browser, Live Translate, and MCP work. It is the single UI source for each task step and displays reflection, action input, observation, output, duration, retry state, loop warning, and terminal result. The compact timeline uses readable action labels and high-contrast state colors. Running or failed steps open automatically and completed steps stay compact. Auto-follow runs only while the transcript is at the actual bottom; scrolling even slightly upward disables it until the user returns fully to the bottom. When the user explicitly opens a step, live task DOM updates are queued until that step closes, preserving the outer viewport, inner detail scroll, focus, and expansion state without visual jumps. Repeated action-and-argument fingerprints against an unchanged observation are blocked, and every task has a 24-action budget with warnings near the limit.
+
+The protocol validates and safely coerces each selected action's arguments against that action's real Gemini schema before execution. An empty `memory` value is normalized to a neutral “No durable facts yet” checkpoint instead of failing the step. Browser work is enforced as observe-act-verify: actions require prior state, and the controller automatically captures a bounded fresh page state after successful UI actions so Gemini can continue without another model/tool round trip. Results such as file assignment that explicitly require later page verification remain inconclusive until a targeted observation proves completion. Successful `done` calls must include observed evidence and a per-goal completion list.
 
 If the Gemini key is missing or invalid, a centered warning opens Lumi Settings from its action button. If the Live WebSocket ends unexpectedly, the same warning surface offers **Reconnect**.
 
@@ -90,6 +96,7 @@ The build copies the source atlas from `public/avatars/pixel` and the layered VT
 - If a PageAgent click opens a YouTube video link or starts a paused YouTube video, Lumi locally suppresses only its remaining response audio for that turn. Output transcription still appears, and the next turn speaks normally even while the video remains open.
 - Local file uploads use the built-in `browser_upload_file` tool. It resolves a compatible input from the selected trigger, nearby container, accepted file types, labels, or menu-backed controls; assigns only the exact absolute paths authorized by the user; and falls back to intercepting a dynamically created native chooser.
 - Multi-step browser requests use a generic observe-act-verify loop. Targeted semantic-DOM queries preserve the controls around an exact filename, object name, status, or action on long pages, while `browser_wait_for_page_state` handles asynchronous UI transitions without sending raw full-page HTML to the model.
+- Browser and MCP execution uses a reflection-before-action state machine in `live/task-orchestrator.js`. Its historical events are the task source of truth for the Step View, completion status, retry accounting, step budget, and loop fingerprints.
 - Ordinary state and interaction failures are returned as recoverable. Lumi must try distinct fresh-state, targeted-query, waiting, prerequisite, scrolling, and alternate-interaction tactics before reporting a blocker; permission, confirmation, local-file, Chrome-policy, security, and cancellation failures remain hard blockers.
 - Thinking details remain expanded across tool calls and collapse only after visible Lumi response content begins to render.
 - Video fullscreen controls continue to use PageAgent's standard click path; the `debugger` permission is used only while Lumi is handling an authorized local-file assignment or native file chooser.
@@ -97,6 +104,20 @@ The build copies the source atlas from `public/avatars/pixel` and the layered VT
 - Every MCP tool can be set to **Always allow**, **Ask every time**, or **Block**.
 - Invalid or rejected tools are isolated so voice, chat, and other tools remain available.
 - Tool activity cards expose arguments, status, duration, result, failure, or cancellation.
+
+## Central Lumi Task tuning
+
+Task orchestration and Step View tuning values live in `core/ui-config.js`. Change them there, then run `npm run build:extension` and reload the unpacked extension:
+
+| Constant | Default | Controls |
+| --- | ---: | --- |
+| `DEFAULT_AGENT_MAX_STEPS` | `24` | Maximum non-`done` actions in one Lumi Task |
+| `DEFAULT_IDENTICAL_STATE_ACTION_LIMIT` | `2` | Repeated identical actions allowed against the same observation |
+| `DEFAULT_COMPLETION_RECOVERY_LIMIT` | `2` | Recovery prompts when Gemini omits structured `done` |
+| `TASK_AUTO_FOLLOW_BOTTOM_TOLERANCE_PX` | `1` | Distance from the actual transcript bottom that enables auto-follow |
+| `TASK_STEP_DISCLOSURE_ANIMATION_DURATION_MS` | `220` | Step expand/collapse duration |
+| `TASK_STEP_DETAIL_MAX_HEIGHT_PX` | `430` | Absolute expanded-detail height cap |
+| `TASK_STEP_DETAIL_MAX_VIEWPORT_HEIGHT_PERCENT` | `58` | Expanded-detail viewport-height cap |
 
 ## Quick Connect integrations
 
