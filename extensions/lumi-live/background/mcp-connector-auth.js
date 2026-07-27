@@ -85,7 +85,6 @@ async function discoverOAuthMetadata(serverUrl) {
   const resource = new URL(serverUrl);
   const resourcePath = resource.pathname.replace(/\/+$/g, "");
   const protectedResource = await firstJson([
-    new URL(`${resourcePath}/.well-known/oauth-protected-resource`, resource.origin).href,
     new URL(`/.well-known/oauth-protected-resource${resourcePath}`, resource.origin).href,
     new URL("/.well-known/oauth-protected-resource", resource.origin).href,
   ], "MCP protected-resource metadata");

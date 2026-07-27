@@ -25,7 +25,7 @@ test("ships the expected extension-only connector catalog", () => {
   assert.equal(notion.auth, "oauth-dcr");
   assert.equal(notion.icon, "../icons/connectors/notion.svg");
   const jira = getMcpConnector("jira");
-  assert.equal(jira.endpoint, "https://mcp.atlassian.com/v1/mcp");
+  assert.equal(jira.endpoint, "https://mcp.atlassian.com/v1/mcp/authv2");
   assert.equal(jira.auth, "oauth-dcr");
   assert.equal(jira.icon, "../icons/connectors/jira.svg");
   assert.equal(getMcpConnector("redmine").icon, "../icons/connectors/redmine.svg");
@@ -118,6 +118,7 @@ test("Notion and Jira complete the one-click DCR OAuth flow", async () => {
   const registrations = [];
   const authorizationUrls = [];
   const tokenRequests = [];
+  const protectedResourceRequests = [];
 
   globalThis.fetch = async (input, options = {}) => {
     const url = new URL(String(input));
@@ -125,11 +126,20 @@ test("Notion and Jira complete the one-click DCR OAuth flow", async () => {
       status,
       headers: { "Content-Type": "application/json" },
     });
-    if (url.pathname.endsWith("/.well-known/oauth-protected-resource")) {
-      return json({ error: "not_found" }, 404);
+    if (url.pathname.includes("oauth-protected-resource")) {
+      protectedResourceRequests.push(url.href);
     }
-    if (url.pathname.startsWith("/.well-known/oauth-protected-resource/")) {
+    if ([
+      "/.well-known/oauth-protected-resource/mcp",
+      "/.well-known/oauth-protected-resource/v1/mcp/authv2",
+    ].includes(url.pathname)) {
       return json({ authorization_servers: [url.origin] });
+    }
+    if (url.pathname.includes("oauth-protected-resource")) {
+      return new Response("Not Found", {
+        status: 404,
+        headers: { "Content-Type": "text/plain" },
+      });
     }
     if (url.pathname === "/.well-known/oauth-authorization-server") {
       return json({
@@ -200,6 +210,13 @@ test("Notion and Jira complete the one-click DCR OAuth flow", async () => {
     }
     assert.equal(registrations.length, 2);
     assert.equal(authorizationUrls.length, 2);
+    assert.deepEqual(
+      protectedResourceRequests.map((url) => new URL(url).pathname),
+      [
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-protected-resource/v1/mcp/authv2",
+      ],
+    );
   } finally {
     globalThis.chrome = originalChrome;
     globalThis.fetch = originalFetch;

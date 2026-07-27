@@ -105,7 +105,7 @@ Lumi Settings includes three extension-only connector rows in addition to the ex
 | Connector | Transport and authentication |
 | --- | --- |
 | Notion | Official `https://mcp.notion.com/mcp` endpoint with OAuth, PKCE, and dynamic client registration |
-| Jira | Official Atlassian Rovo MCP endpoint at `https://mcp.atlassian.com/v1/mcp` with OAuth, PKCE, and dynamic client registration |
+| Jira | Official Atlassian Rovo MCP endpoint at `https://mcp.atlassian.com/v1/mcp/authv2` with OAuth, PKCE, and dynamic client registration |
 | Redmine | Built-in REST adapter using a custom Redmine base URL and `X-Redmine-API-Key` |
 
 For Notion and Jira, Lumi discovers the provider's OAuth metadata, dynamically registers this installed extension as a public client, creates the PKCE verifier and state locally, and opens the provider's authorization page with `chrome.identity.launchWebAuthFlow`. The single-use code is exchanged directly with the provider and the resulting values are saved only in `chrome.storage.local`. No Lumi backend participates in authorization or refresh.
