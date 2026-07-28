@@ -24,8 +24,21 @@ test("normalizes stored visual settings", () => {
     scrollDurationMs: 20,
     typingDurationMs: 1000,
   }), {
+    fastMode: false,
     showElementHighlights: true,
     scrollDurationMs: 1000,
     typingDurationMs: 500,
+  });
+});
+
+test("fast mode disables browser visuals and action delays", () => {
+  assert.deepEqual(normalizeVisualPreferences({
+    fastMode: true,
+    showElementHighlights: true,
+  }), {
+    fastMode: true,
+    showElementHighlights: false,
+    scrollDurationMs: 0,
+    typingDurationMs: 0,
   });
 });

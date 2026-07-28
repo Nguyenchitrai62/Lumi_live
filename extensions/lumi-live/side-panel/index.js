@@ -1,6 +1,8 @@
 import { createPanelAudioController } from "./panel-audio-controller.js";
 import { createMcpPanelController } from "./mcp-panel-controller.js";
 import { createSharedTabAudioController } from "./shared-tab-audio-controller.js";
+import { createBrowserToolRunner } from "./browser-tool-runner.js";
+import { createFastModeController } from "./fast-mode-controller.js";
 import {
   createAvatarController,
   normalizeAvatarMode,
@@ -92,6 +94,7 @@ const MICROPHONE_ENABLED_STORAGE_KEY = STORAGE_KEYS.microphoneEnabled;
 const MICROPHONE_GRANTED_STORAGE_KEY = STORAGE_KEYS.microphoneGrantedAt;
 const PETALS_STORAGE_KEY = STORAGE_KEYS.fallingPetals;
 const AVATAR_MODE_STORAGE_KEY = STORAGE_KEYS.avatarMode;
+const FAST_MODE_STORAGE_KEY = STORAGE_KEYS.fastMode;
 const THINKING_LEVEL_STORAGE_KEY = STORAGE_KEYS.thinkingLevel;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
 const PANEL_LIFECYCLE_MESSAGE = EXTENSION_EVENTS.lifecycle;
@@ -110,6 +113,7 @@ const elements = {
   liveBadge: document.querySelector("#liveBadge"),
   translateBadge: document.querySelector("#translateBadge"),
   settingsButton: document.querySelector("#settingsButton"),
+  fastModeButton: document.querySelector("#fastModeButton"),
   avatarModeButton: document.querySelector("#avatarModeButton"),
   petalsButton: document.querySelector("#petalsButton"),
   petalField: document.querySelector(".petal-field"),
@@ -222,6 +226,7 @@ let transcriptProgrammaticScroll = false;
 let transcriptProgrammaticScrollTimerId = null;
 
 let petalsEnabled = DEFAULT_FALLING_PETALS_ENABLED;
+let fastModeController = null;
 
 const setupTimeoutIds = new Set();
 
@@ -240,7 +245,7 @@ const avatarController = createAvatarController({
 });
 const petalEmitter = createPetalEmitter({
   field: elements.petalField,
-  isEnabled: () => petalsEnabled,
+  isEnabled: () => petalsEnabled && !fastModeController?.enabled,
 });
 
 const panelAudio = createPanelAudioController({
@@ -814,17 +819,24 @@ async function validateGeminiApiKey(apiKey) {
 
 function updateTarget(status) {
   const connected = Boolean(status?.connected);
+  const fastWorkspace = status?.mode === "fast";
   const navigationReady = !connected && status?.navigationReady === true;
   elements.targetCard.classList.toggle("connected", connected);
   elements.targetTitle.textContent = connected
     ? status.title || "Active web page"
     : navigationReady ? "Navigation ready" : "No controllable page";
   elements.targetHint.textContent = connected
-    ? status.controllerReady === false ? "PageAgent is preparing this page..." : "Auto-following the active Chrome tab."
+    ? status.controllerReady === false
+      ? "PageAgent is preparing this page..."
+      : fastWorkspace
+        ? "Fast workspace stays attached while you use other tabs."
+        : "Auto-following the active Chrome tab."
     : status?.reason || "Lumi can open or switch to a website from this tab.";
-  elements.connectTabButton.textContent = connected ? "Auto" : navigationReady ? "Ready" : "Waiting";
+  elements.connectTabButton.textContent = connected
+    ? fastWorkspace ? "Fast" : "Auto"
+    : navigationReady ? "Ready" : "Waiting";
   elements.connectTabButton.title = connected
-    ? status.url || "Automatically follows the active tab"
+    ? status.url || (fastWorkspace ? "Fast workspace target" : "Automatically follows the active tab")
     : navigationReady ? "Website navigation is available" : "Waiting for an http/https tab";
 }
 
@@ -960,7 +972,7 @@ async function handleConnectionNoticeSettings() {
 function scrollTranscriptToLatest({ smooth = false, force = false } = {}) {
   if (!force && (!transcriptAutoFollow || taskStepView.isReviewing)) return false;
   const top = elements.transcript.scrollHeight;
-  if (smooth && typeof elements.transcript.scrollTo === "function") {
+  if (smooth && !fastModeController?.enabled && typeof elements.transcript.scrollTo === "function") {
     transcriptProgrammaticScroll = true;
     clearTimeout(transcriptProgrammaticScrollTimerId);
     elements.transcript.scrollTo({ top, behavior: "smooth" });
@@ -1032,6 +1044,7 @@ function revealTranscriptText(message, targetText) {
   activeTranscriptReveals.delete(message);
 
   if (!remainingCharacterCount
+    || fastModeController?.enabled
     || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true) {
     setVisibleTranscriptText(message, targetText);
     scrollTranscriptToLatest();
@@ -1486,54 +1499,31 @@ async function runLiveTranslationTool(args = {}) {
   };
 }
 
-async function runBrowserTool(tool, args) {
-  browserToolRunning = true;
-  const isUiAction = BROWSER_UI_ACTION_TOOLS.has(tool);
-  avatarController.transitionState(isUiAction ? "ui_control" : "thinking");
-  try {
-    let result = tool === "browser_inspect_screenshot"
-      ? await captureAndSendVisualInspectionFrame()
-      : await sendRuntime("browser_tool", { tool, args });
-    if (tool === "browser_capture_screenshot" && result?.previewDataUrl) {
-      createCapturedTabMessage(result);
-      result = { ...result };
-      delete result.previewDataUrl;
-    }
-    if (isUiAction) {
-      result = {
-        ...result,
-        controllerVerification: await collectAutomaticBrowserVerification({
-          tool,
-          args,
-          result,
-          readPageState: (query) => sendRuntime("browser_tool", {
-            tool: "browser_get_page_state",
-            args: query ? { query } : {},
-          }),
-        }),
-      };
-    }
-    if (isUiAction) {
-      avatarController.transitionState("success", {
-        forMs: AVATAR_SUCCESS_STATE_DURATION_MS,
-        resumeState: "thinking",
-      });
-    } else {
-      avatarController.transitionState("thinking");
-    }
-    return result;
-  } catch (error) {
-    avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
-    if (tool === "browser_upload_file") {
-      const detail = error instanceof Error ? error.message : String(error || "Unknown upload error.");
-      elements.statusLine.textContent = `Upload failed: ${detail}`;
-    }
-    throw error;
-  } finally {
-    browserToolRunning = false;
-    void refreshTarget();
-  }
-}
+const runBrowserTool = createBrowserToolRunner({
+  isUiAction: (tool) => BROWSER_UI_ACTION_TOOLS.has(tool),
+  avatarController,
+  successStateDurationMs: AVATAR_SUCCESS_STATE_DURATION_MS,
+  errorStateDurationMs: AVATAR_ERROR_STATE_DURATION_MS,
+  inspectScreenshot: captureAndSendVisualInspectionFrame,
+  sendBrowserTool: (tool, args) => sendRuntime("browser_tool", { tool, args }),
+  showCapturedScreenshot: createCapturedTabMessage,
+  collectVerification: ({ tool, args, result }) => collectAutomaticBrowserVerification({
+    tool,
+    args,
+    result,
+    readPageState: (query) => sendRuntime("browser_tool", {
+      tool: "browser_get_page_state",
+      args: query ? { query } : {},
+    }),
+  }),
+  setRunning: (running) => {
+    browserToolRunning = running;
+  },
+  setStatus: (message) => {
+    elements.statusLine.textContent = message;
+  },
+  refreshTarget,
+});
 
 async function runMcpTool(tool, args, callId) {
   if (tool.permission === "block") throw new Error("This MCP tool is blocked in Lumi Settings.");
@@ -2086,6 +2076,7 @@ function openGeminiSocket(
     mcpInfo,
     mcpFunctionDeclarations,
     activeTabContext,
+    fastMode: sessionFastMode,
   } = options;
   sessionConnectionOptions = options;
   const handoffPredecessor = predecessorSocket?.readyState === WebSocket.OPEN
@@ -2146,6 +2137,7 @@ function openGeminiSocket(
               mcpInfo,
               activeTabContext,
               actionDeclarations,
+              { fastMode: sessionFastMode },
             ),
           }],
         },
@@ -2314,10 +2306,12 @@ async function startSession() {
       VOICE_STORAGE_KEY,
       THINKING_LEVEL_STORAGE_KEY,
       MICROPHONE_ENABLED_STORAGE_KEY,
+      FAST_MODE_STORAGE_KEY,
     ]);
     const apiKey = String(stored[API_KEY_STORAGE_KEY] || "").trim();
     const voiceName = String(stored[VOICE_STORAGE_KEY] || DEFAULT_VOICE_NAME);
     const sessionThinkingLevel = normalizeThinkingLevel(stored[THINKING_LEVEL_STORAGE_KEY]);
+    const sessionFastMode = stored[FAST_MODE_STORAGE_KEY] === true;
     microphoneEnabled = stored[MICROPHONE_ENABLED_STORAGE_KEY] === true;
     isMuted = true;
     microphoneWarning = "";
@@ -2376,6 +2370,7 @@ async function startSession() {
         mcpInfo,
         mcpFunctionDeclarations,
         activeTabContext,
+        fastMode: sessionFastMode,
       });
     } catch (error) {
       intentionalClose = true;
@@ -2753,8 +2748,8 @@ function toggleVtuberSize() {
 
 function applyPetals(enabled) {
   petalsEnabled = enabled;
-  document.body.classList.toggle("petals-off", !enabled);
-  if (enabled) petalEmitter.start();
+  document.body.classList.toggle("petals-off", !enabled || fastModeController?.enabled);
+  if (enabled && !fastModeController?.enabled) petalEmitter.start();
   else petalEmitter.stop();
   elements.petalsButton.setAttribute("aria-pressed", String(enabled));
   elements.petalsButton.setAttribute(
@@ -2763,6 +2758,35 @@ function applyPetals(enabled) {
   );
   elements.petalsButton.title = enabled ? "Turn off falling petals" : "Turn on falling petals";
 }
+
+fastModeController = createFastModeController({
+  button: elements.fastModeButton,
+  documentElement: document.documentElement,
+  body: document.body,
+  vtuberCard: elements.vtuberCard,
+  vtuberToggle: elements.vtuberToggle,
+  transcript: elements.transcript,
+  panelAudio,
+  avatarController,
+  petalEmitter,
+  getPetalsEnabled: () => petalsEnabled,
+  flushTranscriptReveals: () => {
+    for (const message of [...activeTranscriptReveals]) {
+      cancelAnimationFrame(message.revealFrameId);
+      message.revealFrameId = null;
+      setVisibleTranscriptText(message, message.text);
+      activeTranscriptReveals.delete(message);
+    }
+  },
+  getSessionOptions: () => sessionConnectionOptions,
+  setSessionOptions: (options) => {
+    sessionConnectionOptions = options;
+  },
+  sendRuntime,
+  setStatus: (message) => {
+    elements.statusLine.textContent = message;
+  },
+});
 
 async function togglePetals() {
   const enabled = elements.petalsButton.getAttribute("aria-pressed") !== "true";
@@ -2776,6 +2800,7 @@ async function toggleAvatarMode() {
 }
 
 elements.settingsButton.addEventListener("click", () => void openSettings());
+elements.fastModeButton.addEventListener("click", () => void fastModeController.toggle());
 elements.avatarModeButton.addEventListener("click", () => void toggleAvatarMode());
 elements.petalsButton.addEventListener("click", () => void togglePetals());
 elements.vtuberToggle.addEventListener("click", toggleVtuberSize);
@@ -2895,6 +2920,7 @@ window.addEventListener("unload", () => {
   petalEmitter.stop();
   websocket?.close();
   cleanupMedia();
+  fastModeController.dispose();
   panelAudio.dispose();
   avatarController.dispose();
 });
@@ -2904,6 +2930,9 @@ document.addEventListener("visibilitychange", () => {
 });
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
+  if (changes[FAST_MODE_STORAGE_KEY]) {
+    fastModeController.apply(changes[FAST_MODE_STORAGE_KEY].newValue === true);
+  }
   if (changes[MCP_TOOL_POLICIES_STORAGE_KEY]) {
     applyMcpToolPolicies(changes[MCP_TOOL_POLICIES_STORAGE_KEY].newValue);
   }
@@ -2982,6 +3011,7 @@ async function initialize() {
     AVATAR_MODE_STORAGE_KEY,
     THINKING_LEVEL_STORAGE_KEY,
     MICROPHONE_ENABLED_STORAGE_KEY,
+    FAST_MODE_STORAGE_KEY,
   ]);
   const savedKey = String(stored[API_KEY_STORAGE_KEY] || "").trim();
   microphoneEnabled = stored[MICROPHONE_ENABLED_STORAGE_KEY] === true;
@@ -2990,6 +3020,7 @@ async function initialize() {
   if (typeof stored[MICROPHONE_ENABLED_STORAGE_KEY] !== "boolean") {
     await chrome.storage.local.set({ [MICROPHONE_ENABLED_STORAGE_KEY]: false });
   }
+  fastModeController.apply(stored[FAST_MODE_STORAGE_KEY] === true);
   const storedPetals = stored[PETALS_STORAGE_KEY];
   applyPetals(typeof storedPetals === "boolean"
     ? storedPetals

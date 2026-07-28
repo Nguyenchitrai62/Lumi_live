@@ -6,6 +6,7 @@ import {
 import { EXTENSION_EVENTS, STORAGE_KEYS } from "../core/extension-config.js";
 import { normalizeVisualPreferences } from "../core/visual-preferences.js";
 import { saveCapturedTabAsset } from "./captured-tab-assets.js";
+import { createFastWorkspace } from "./fast-workspace.js";
 import {
   collectWindowOpenCallsInPage,
   findWindowOpenNewTabUrl,
@@ -26,6 +27,8 @@ const TARGET_STORAGE_KEY = STORAGE_KEYS.targetTabId;
 const TARGET_CHANGED_MESSAGE = EXTENSION_EVENTS.targetChanged;
 const PANEL_LIFECYCLE_MESSAGE = EXTENSION_EVENTS.lifecycle;
 const ELEMENT_HIGHLIGHTS_STORAGE_KEY = STORAGE_KEYS.elementHighlights;
+const FAST_MODE_STORAGE_KEY = STORAGE_KEYS.fastMode;
+const FAST_WORKSPACE_STORAGE_KEY = STORAGE_KEYS.fastWorkspaceGroupId;
 const OFFSCREEN_DOCUMENT_PATH = "offscreen/index.html";
 const OFFSCREEN_TARGET = "lumi_live_offscreen";
 const TAB_TRANSITION_FALLBACK_URL = "https://www.google.com/";
@@ -35,6 +38,7 @@ const CLICK_NEW_TAB_WATCH_MS = 2500;
 const FILE_CHOOSER_WAIT_MS = 10000;
 
 let connectedTabId = null;
+let fastModeEnabled = false;
 let listedTabIds = new Set();
 let listedTabsExpireAt = 0;
 let activeBrowserAction = null;
@@ -55,6 +59,7 @@ const {
   setMcpServerToolPolicy,
   setMcpToolPolicy,
 } = createMcpService();
+const fastWorkspace = createFastWorkspace({ storageKey: FAST_WORKSPACE_STORAGE_KEY });
 
 async function loadTarget() {
   const stored = await chrome.storage.session.get(TARGET_STORAGE_KEY);
@@ -63,7 +68,15 @@ async function loadTarget() {
     : null;
 }
 
-const ready = loadTarget();
+async function loadBackgroundState() {
+  const [, stored] = await Promise.all([
+    Promise.all([loadTarget(), fastWorkspace.initialize()]),
+    chrome.storage.local.get(FAST_MODE_STORAGE_KEY),
+  ]);
+  fastModeEnabled = stored[FAST_MODE_STORAGE_KEY] === true;
+}
+
+const ready = loadBackgroundState();
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 chrome.runtime.onInstalled.addListener(() => {
@@ -230,9 +243,13 @@ async function pingController(tabId) {
 }
 
 async function getVisualPreferences() {
-  const stored = await chrome.storage.local.get(ELEMENT_HIGHLIGHTS_STORAGE_KEY);
+  const stored = await chrome.storage.local.get([
+    ELEMENT_HIGHLIGHTS_STORAGE_KEY,
+    FAST_MODE_STORAGE_KEY,
+  ]);
   return normalizeVisualPreferences({
     showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
+    fastMode: stored[FAST_MODE_STORAGE_KEY] === true,
   });
 }
 
@@ -276,8 +293,64 @@ async function getActiveTab(windowId) {
   return tab || null;
 }
 
-async function followActiveTab(windowId) {
+async function resolveFastWorkspaceTarget() {
+  const previousTargetId = connectedTabId;
+  const preferred = await fastWorkspace.resolveTarget(connectedTabId);
+  const candidates = preferred ? [preferred] : await fastWorkspace.listTabs();
+  let tab = candidates.find((candidate) => isControllablePage(candidate?.url)) || null;
+  if (!tab && preferred) {
+    tab = (await fastWorkspace.listTabs()).find((candidate) => isControllablePage(candidate?.url)) || null;
+  }
+  if (!tab && Number.isInteger(previousTargetId)) {
+    const detachedTarget = await chrome.tabs.get(previousTargetId).catch(() => null);
+    if (detachedTarget?.id && isControllablePage(detachedTarget.url)) {
+      await fastWorkspace.addTab(detachedTarget.id);
+      tab = detachedTarget;
+    }
+  }
+  if (!tab?.id) {
+    await setConnectedTab(null);
+    return null;
+  }
+  await setConnectedTab(tab.id);
+  const controllerReady = await ensureController(tab.id, 4);
+  return { tab, controllerReady };
+}
+
+async function activateFastWorkspace(preferredTabId = null) {
+  let tab = null;
+  if (Number.isInteger(preferredTabId)) {
+    tab = await chrome.tabs.get(preferredTabId).catch(() => null);
+  }
+  if (!tab || !isControllablePage(tab.url)) tab = await getActiveTab();
+  if (!tab?.id || !isControllablePage(tab.url)) {
+    const restored = await resolveFastWorkspaceTarget();
+    if (restored) return restored;
+    await setConnectedTab(null);
+    return null;
+  }
+  await fastWorkspace.addTab(tab.id);
+  await setConnectedTab(tab.id);
+  const controllerReady = await ensureController(tab.id, 4);
+  return { tab: await chrome.tabs.get(tab.id), controllerReady };
+}
+
+async function applyFastModeEnabled(enabled, { preferredTabId = null } = {}) {
+  fastModeEnabled = enabled === true;
+  if (fastModeEnabled) {
+    const target = await activateFastWorkspace(preferredTabId);
+    notifyTargetChanged();
+    return { target, workspace: fastWorkspace.state() };
+  }
+  await fastWorkspace.release();
+  const target = await followActiveTab(undefined, { force: true });
+  notifyTargetChanged();
+  return { target, workspace: fastWorkspace.state() };
+}
+
+async function followActiveTab(windowId, { force = false } = {}) {
   await ready;
+  if (fastModeEnabled && !force) return resolveFastWorkspaceTarget();
   const tab = await getActiveTab(windowId);
   if (!tab?.id || !isControllablePage(tab.url)) {
     await setConnectedTab(null);
@@ -289,6 +362,31 @@ async function followActiveTab(windowId) {
 }
 
 async function getStatus() {
+  await ready;
+  if (fastModeEnabled) {
+    const workspaceTarget = await resolveFastWorkspaceTarget();
+    if (!workspaceTarget || !connectedTabId) {
+      return {
+        connected: false,
+        mode: "fast",
+        navigationReady: true,
+        workspace: fastWorkspace.state(),
+        reason: "Fast workspace has no controllable page. Open an http, https, or permitted file tab, then enable Fast mode again.",
+      };
+    }
+    const tab = workspaceTarget.tab;
+    return {
+      connected: true,
+      controllerReady: workspaceTarget.controllerReady,
+      recovering: !workspaceTarget.controllerReady,
+      mode: "fast",
+      workspace: fastWorkspace.state({ windowId: tab.windowId }),
+      tabId: tab.id,
+      title: tab.title || "Fast workspace page",
+      url: tab.url || "",
+      active: Boolean(tab.active),
+    };
+  }
   const activeTarget = await followActiveTab();
   if (!activeTarget || !connectedTabId) {
     return {
@@ -314,6 +412,7 @@ async function getStatus() {
       title: tab.title || "Active web page",
       url: tab.url || "",
       active: Boolean(tab.active),
+      mode: "normal",
     };
   } catch {
     await setConnectedTab(null);
@@ -406,13 +505,21 @@ async function collectWindowOpenCalls(tabId, token) {
   }
 }
 
-async function activateClickedNewTab(tab, action) {
+async function activateClickedNewTab(tab, action, { fastMode = false, restoreTabId = null } = {}) {
   if (!Number.isInteger(tab?.id)) {
     throw new Error("Chrome reported a new tab without an ID.");
   }
   trackBrowserActionTab(action, tab.id);
-  await chrome.tabs.update(tab.id, { active: true });
-  await chrome.windows.update(tab.windowId, { focused: true });
+  if (fastMode) {
+    await fastWorkspace.addTab(tab.id);
+    const currentActiveTab = await getActiveTab(tab.windowId);
+    if (currentActiveTab?.id === tab.id && Number.isInteger(restoreTabId) && restoreTabId !== tab.id) {
+      await chrome.tabs.update(restoreTabId, { active: true }).catch(() => {});
+    }
+  } else {
+    await chrome.tabs.update(tab.id, { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true });
+  }
   const settledTab = await waitForClickedTabToSettle(tab.id, action);
   const controllable = isControllablePage(settledTab.url);
   await setConnectedTab(controllable ? tab.id : null);
@@ -421,10 +528,11 @@ async function activateClickedNewTab(tab, action) {
   return {
     ...serializeTab(await chrome.tabs.get(tab.id)),
     controllerReady,
+    workspace: fastMode,
   };
 }
 
-async function executeBrowserClick(args, action) {
+async function executeBrowserClick(args, action, { fastMode = false } = {}) {
   const status = await getStatus();
   assertBrowserActionActive(action);
   if (!status.connected || !status.tabId) {
@@ -436,6 +544,7 @@ async function executeBrowserClick(args, action) {
   }
 
   const sourceTab = await chrome.tabs.get(status.tabId);
+  const userActiveTab = fastMode ? await getActiveTab(sourceTab.windowId) : null;
   const tabsBeforeClick = await chrome.tabs.query({});
   const beforeTabIds = new Set(tabsBeforeClick.map((tab) => tab.id).filter(Number.isInteger));
   const probeToken = typeof globalThis.crypto?.randomUUID === "function"
@@ -445,7 +554,7 @@ async function executeBrowserClick(args, action) {
     tabsApi: chrome.tabs,
     beforeTabIds,
     sourceTab,
-    timeoutMs: CLICK_NEW_TAB_WATCH_MS,
+    timeoutMs: fastMode ? 160 : CLICK_NEW_TAB_WATCH_MS,
   });
   let probeInstalled = false;
   let probeCollected = false;
@@ -488,7 +597,7 @@ async function executeBrowserClick(args, action) {
       if (fallbackUrl) {
         const createProperties = {
           url: fallbackUrl,
-          active: true,
+          active: !fastMode,
           windowId: sourceTab.windowId,
           openerTabId: sourceTab.id,
         };
@@ -501,7 +610,10 @@ async function executeBrowserClick(args, action) {
     }
 
     if (openedTab) {
-      const newTab = await activateClickedNewTab(openedTab, action);
+      const newTab = await activateClickedNewTab(openedTab, action, {
+        fastMode,
+        restoreTabId: userActiveTab?.id,
+      });
       return {
         ...(result || {
           success: true,
@@ -784,6 +896,9 @@ function serializeTab(tab) {
     url,
     active: Boolean(tab.active),
     controllable: isControllablePage(url),
+    groupId: Number.isInteger(tab.groupId) && tab.groupId >= 0 ? tab.groupId : null,
+    workspace: fastModeEnabled && tab.groupId === fastWorkspace.state().groupId,
+    agentTarget: tab.id === connectedTabId,
   };
 }
 
@@ -823,13 +938,16 @@ async function getActivePageContext() {
 }
 
 async function listBrowserTabs() {
-  const focusedWindow = await chrome.windows.getLastFocused();
-  const tabs = await chrome.tabs.query({ windowId: focusedWindow.id });
+  const workspaceGroup = fastModeEnabled ? await fastWorkspace.getGroup() : null;
+  const focusedWindow = workspaceGroup || await chrome.windows.getLastFocused();
+  const tabs = await chrome.tabs.query({ windowId: focusedWindow.windowId ?? focusedWindow.id });
   const listedTabs = tabs.filter((tab) => Number.isInteger(tab.id));
   listedTabIds = new Set(listedTabs.map((tab) => tab.id));
   listedTabsExpireAt = Date.now() + 30000;
   return {
-    windowId: focusedWindow.id,
+    windowId: focusedWindow.windowId ?? focusedWindow.id,
+    mode: fastModeEnabled ? "fast" : "normal",
+    workspace: fastModeEnabled ? fastWorkspace.state({ windowId: focusedWindow.windowId }) : null,
     tabs: listedTabs.map(serializeTab),
   };
 }
@@ -904,7 +1022,17 @@ async function captureContextDataUrl(tab) {
 }
 
 async function captureVisibleTab(args = {}, action) {
-  const tab = await getActiveTab();
+  await ready;
+  let tab = null;
+  if (fastModeEnabled) {
+    const status = await getStatus();
+    const visibleTab = await getActiveTab(status.workspace?.windowId);
+    if (!status.connected || visibleTab?.id !== status.tabId) {
+      throw new Error("Fast workspace keeps the agent tab in the background. Use semantic page inspection, or activate the agent tab before requesting a screenshot.");
+    }
+    tab = visibleTab;
+  }
+  if (!tab) tab = await getActiveTab();
   if (!isCapturableTab(tab)) {
     throw new Error("No visible active Chrome tab is available to capture.");
   }
@@ -947,7 +1075,20 @@ async function captureVisibleTab(args = {}, action) {
 }
 
 async function captureActiveTabContextFrame(windowId) {
-  const tab = await getActiveTab(windowId);
+  await ready;
+  let tab = null;
+  if (fastModeEnabled) {
+    const status = await getStatus();
+    const visibleTab = await getActiveTab(status.workspace?.windowId ?? windowId);
+    if (!status.connected || visibleTab?.id !== status.tabId) {
+      return {
+        captured: false,
+        reason: "Fast workspace is controlling a background tab, so Lumi is using semantic DOM context without stealing focus.",
+      };
+    }
+    tab = visibleTab;
+  }
+  if (!tab) tab = await getActiveTab(windowId);
   if (!isCapturableTab(tab)) {
     return {
       captured: false,
@@ -992,9 +1133,10 @@ async function captureActiveTabContextFrame(windowId) {
   };
 }
 
-async function findExistingTabForUrl(url) {
-  const focusedWindow = await chrome.windows.getLastFocused();
-  const tabs = await chrome.tabs.query({ windowId: focusedWindow.id });
+async function findExistingTabForUrl(url, windowId = null) {
+  const focusedWindow = Number.isInteger(windowId) ? null : await chrome.windows.getLastFocused();
+  const targetWindowId = Number.isInteger(windowId) ? windowId : focusedWindow.id;
+  const tabs = await chrome.tabs.query({ windowId: targetWindowId });
   const listedTabs = tabs.filter((tab) => Number.isInteger(tab.id));
   listedTabIds = new Set(listedTabs.map((tab) => tab.id));
   listedTabsExpireAt = Date.now() + 30000;
@@ -1032,6 +1174,49 @@ async function waitForClickedTabToSettle(tabId, action) {
 
 async function openBrowserTab(args = {}, action) {
   const url = requirePageUrl(args.url);
+  if (fastModeEnabled) {
+    let group = await fastWorkspace.getGroup();
+    if (!group) {
+      await activateFastWorkspace();
+      group = await fastWorkspace.getGroup();
+    }
+    if (!group) throw new Error("Fast workspace could not attach to a controllable Chrome window.");
+    const existingTab = await findExistingTabForUrl(url, group.windowId);
+    assertBrowserActionActive(action);
+    if (existingTab?.id) return switchBrowserTab({ tabId: existingTab.id }, action);
+
+    let createdTab = null;
+    try {
+      createdTab = await chrome.tabs.create({ url, active: false, windowId: group.windowId });
+      if (!createdTab.id) throw new Error("Chrome created the Fast workspace tab without an ID.");
+      trackBrowserActionTab(action, createdTab.id);
+      await fastWorkspace.addTab(createdTab.id);
+      await setConnectedTab(createdTab.id);
+      await waitForTabToSettle(createdTab.id, action);
+      const settledTab = await chrome.tabs.get(createdTab.id);
+      const controllerReady = isControllablePage(settledTab.url)
+        ? await ensureController(createdTab.id, 5)
+        : false;
+      assertBrowserActionActive(action);
+      if (!controllerReady) {
+        const detail = isFilePage(settledTab.url)
+          ? " Enable Allow access to file URLs in Lumi's extension details."
+          : "";
+        throw new Error(`The Fast workspace tab could not prepare Lumi's page controller.${detail}`);
+      }
+      return {
+        opened: true,
+        controllerReady,
+        mode: "fast",
+        fastWorkspace: fastWorkspace.state({ windowId: settledTab.windowId }),
+        ...serializeTab(settledTab),
+      };
+    } catch (error) {
+      if (createdTab?.id) await chrome.tabs.remove(createdTab.id).catch(() => {});
+      throw error;
+    }
+  }
+
   const existingTab = await findExistingTabForUrl(url);
   assertBrowserActionActive(action);
   if (existingTab?.id) {
@@ -1122,6 +1307,30 @@ async function switchBrowserTab(args = {}, action) {
   }
   const tab = await chrome.tabs.get(tabId);
   const controllable = isControllablePage(tab.url);
+  if (fastModeEnabled) {
+    if (!controllable) {
+      throw new Error("Fast workspace can control only http, https, or permitted file tabs.");
+    }
+    trackBrowserActionTab(action, tabId);
+    await fastWorkspace.addTab(tabId);
+    const controllerReady = await ensureController(tabId, 5);
+    assertBrowserActionActive(action);
+    if (!controllerReady) {
+      const detail = isFilePage(tab.url)
+        ? " Enable Allow access to file URLs in Lumi's extension details."
+        : "";
+      throw new Error(`The Fast workspace tab could not prepare Lumi's page controller.${detail}`);
+    }
+    await setConnectedTab(tabId);
+    return {
+      switched: true,
+      controllable: true,
+      controllerReady,
+      mode: "fast",
+      fastWorkspace: fastWorkspace.state({ windowId: tab.windowId }),
+      ...serializeTab(await chrome.tabs.get(tabId)),
+    };
+  }
   const previousTab = await getActiveTab(tab.windowId);
   if (previousTab?.id === tabId) {
     await setConnectedTab(controllable ? tabId : null);
@@ -1165,7 +1374,10 @@ async function executeBrowserTool(tool, args = {}) {
     if (tool === "browser_list_tabs") return listBrowserTabs();
     if (tool === "browser_open_tab") return openBrowserTab(args, action);
     if (tool === "browser_switch_tab") return switchBrowserTab(args, action);
-    if (tool === "browser_click") return executeBrowserClick(args, action);
+    if (tool === "browser_click") {
+      const visualPreferences = await getVisualPreferences();
+      return executeBrowserClick(args, action, { fastMode: visualPreferences.fastMode });
+    }
     if (tool === "browser_upload_file") return executeBrowserFileUpload(args, action);
     return sendBrowserTool(tool, args, action);
   };
@@ -1202,16 +1414,40 @@ async function handleMessage(message) {
   if (message.command === "disconnect_tab") return getStatus();
   if (message.command === "get_status") return getStatus();
   if (message.command === "set_visual_preferences") {
+    const currentPreferences = await getVisualPreferences();
     const visualPreferences = normalizeVisualPreferences({
-      showElementHighlights: message.showElementHighlights === true,
+      showElementHighlights: typeof message.showElementHighlights === "boolean"
+        ? message.showElementHighlights
+        : currentPreferences.showElementHighlights,
+      fastMode: typeof message.fastMode === "boolean"
+        ? message.fastMode
+        : currentPreferences.fastMode,
     });
-    await chrome.storage.local.set({
-      [ELEMENT_HIGHLIGHTS_STORAGE_KEY]: visualPreferences.showElementHighlights,
-    });
+    const previousFastMode = fastModeEnabled;
+    const fastModeChanged = visualPreferences.fastMode !== previousFastMode;
+    let workspace = fastModeEnabled ? fastWorkspace.state() : null;
+    if (fastModeChanged) {
+      try {
+        const modeResult = await applyFastModeEnabled(visualPreferences.fastMode);
+        workspace = fastModeEnabled ? modeResult.workspace : null;
+      } catch (error) {
+        fastModeEnabled = previousFastMode;
+        throw error;
+      }
+    }
+    try {
+      await chrome.storage.local.set({
+        [ELEMENT_HIGHLIGHTS_STORAGE_KEY]: visualPreferences.showElementHighlights,
+        [FAST_MODE_STORAGE_KEY]: visualPreferences.fastMode,
+      });
+    } catch (error) {
+      if (fastModeChanged) await applyFastModeEnabled(previousFastMode).catch(() => {});
+      throw error;
+    }
     if (connectedTabId) {
       await applyControllerVisualPreferences(connectedTabId, visualPreferences);
     }
-    return visualPreferences;
+    return { ...visualPreferences, workspace };
   }
   if (message.command === "cancel_active_browser_action") return cancelActiveBrowserAction();
   if (message.command === "cancel_active_mcp_calls") return cancelActiveMcpCalls();
@@ -1316,7 +1552,9 @@ async function handleMessage(message) {
 chrome.tabs.onRemoved.addListener((tabId) => {
   void releaseTranslationCapture(tabId).catch(() => {});
   if (tabId !== connectedTabId) return;
-  void setConnectedTab(null).then(() => followActiveTab());
+  void setConnectedTab(null).then(() => (
+    fastModeEnabled ? resolveFastWorkspaceTarget() : followActiveTab()
+  ));
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -1325,6 +1563,20 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     return;
   }
   if (changeInfo.status !== "complete") return;
+  if (fastModeEnabled) {
+    if (tabId !== connectedTabId) return;
+    void chrome.tabs.get(tabId).then(async (tab) => {
+      if (!isControllablePage(tab.url)) {
+        await resolveFastWorkspaceTarget();
+        return;
+      }
+      const controllerReady = await ensureController(tabId, 5);
+      if (tabId !== connectedTabId) return;
+      if (controllerReady) await chrome.action.setBadgeText({ tabId, text: "ON" });
+      notifyTargetChanged();
+    }).catch(() => {});
+    return;
+  }
   void getActiveTab().then(async (tab) => {
     if (tab?.id !== tabId || !isControllablePage(tab.url)) return;
     await setConnectedTab(tabId);
@@ -1336,6 +1588,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 });
 
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  if (fastModeEnabled) return;
   void releaseCaptureForDifferentTab(tabId).catch(() => {});
   void getActiveTab(windowId).then(async (tab) => {
     if (tab?.id !== tabId) return;
@@ -1351,6 +1604,7 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
 
 chrome.windows.onFocusChanged.addListener((windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  if (fastModeEnabled) return;
   void getActiveTab(windowId).then(async (tab) => {
     await releaseCaptureForDifferentTab(tab?.id ?? null).catch(() => {});
     await followActiveTab(windowId);
@@ -1360,12 +1614,28 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  const visualPreferenceChanged = areaName === "local" && changes[ELEMENT_HIGHLIGHTS_STORAGE_KEY];
-  if (!visualPreferenceChanged || !connectedTabId) return;
-  void applyControllerVisualPreferences(connectedTabId);
+  const visualPreferenceChanged = areaName === "local"
+    && (changes[ELEMENT_HIGHLIGHTS_STORAGE_KEY] || changes[FAST_MODE_STORAGE_KEY]);
+  if (!visualPreferenceChanged) return;
+  const nextFastMode = changes[FAST_MODE_STORAGE_KEY]?.newValue === true;
+  if (changes[FAST_MODE_STORAGE_KEY] && nextFastMode !== fastModeEnabled) {
+    void applyFastModeEnabled(nextFastMode).then(() => {
+      if (connectedTabId) return applyControllerVisualPreferences(connectedTabId);
+      return null;
+    });
+    return;
+  }
+  if (connectedTabId) void applyControllerVisualPreferences(connectedTabId);
 });
 
-void ready.then(() => followActiveTab()).catch(() => {
+void ready.then(async () => {
+  if (fastModeEnabled) {
+    const restoredTarget = await resolveFastWorkspaceTarget();
+    if (!restoredTarget) await activateFastWorkspace();
+    return;
+  }
+  await followActiveTab();
+}).catch(() => {
   void setConnectedTab(null);
 });
 

@@ -40,6 +40,7 @@ const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
 const GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
 const HIGHLIGHT_STYLE_ID = "lumi-page-agent-highlight-preference";
 const CLICK_EFFECT_STYLE_ID = "lumi-page-agent-click-effect-preference";
+const FAST_PAGE_STATE_MAX_CHARACTERS = 48000;
 if (!globalThis[GLOBAL_KEY]) {
   const runtime = {
     controller: null,
@@ -55,12 +56,15 @@ if (!globalThis[GLOBAL_KEY]) {
   function getController() {
     if (!runtime.controller) {
       runtime.controller = new PageController({
-        enableMask: true,
-        viewportExpansion: 0,
+        enableMask: !runtime.visualPreferences.fastMode,
+        viewportExpansion: runtime.visualPreferences.fastMode ? -1 : 0,
+        keepSemanticTags: runtime.visualPreferences.fastMode,
         highlightOpacity: 0.08,
         highlightLabelOpacity: 0.82,
         includeAttributes: [
           "aria-label",
+          "aria-labelledby",
+          "aria-describedby",
           "aria-expanded",
           "aria-selected",
           "aria-checked",
@@ -69,6 +73,10 @@ if (!globalThis[GLOBAL_KEY]) {
           "placeholder",
           "type",
           "title",
+          "alt",
+          "for",
+          "id",
+          "data-testid",
           "href",
           "disabled",
         ],
@@ -112,6 +120,60 @@ if (!globalThis[GLOBAL_KEY]) {
 
   function indexedElement(index) {
     return getController().selectorMap?.get(index)?.ref || null;
+  }
+
+  function instantClickElement(element) {
+    if (!element?.isConnected) throw new Error("The target element is no longer connected to the page.");
+    if (element.disabled || element.getAttribute?.("aria-disabled") === "true") {
+      throw new Error("The target element is disabled.");
+    }
+    const nextRect = element.getBoundingClientRect();
+    const eventWindow = element.ownerDocument.defaultView || window;
+    const pointerOptions = {
+      bubbles: true,
+      cancelable: true,
+      clientX: nextRect.left + nextRect.width / 2,
+      clientY: nextRect.top + nextRect.height / 2,
+      pointerType: "mouse",
+      button: 0,
+    };
+    element.focus?.({ preventScroll: true });
+    element.dispatchEvent(new eventWindow.PointerEvent("pointerover", pointerOptions));
+    element.dispatchEvent(new eventWindow.MouseEvent("mouseover", pointerOptions));
+    element.dispatchEvent(new eventWindow.PointerEvent("pointerdown", pointerOptions));
+    element.dispatchEvent(new eventWindow.MouseEvent("mousedown", pointerOptions));
+    element.dispatchEvent(new eventWindow.PointerEvent("pointerup", pointerOptions));
+    element.dispatchEvent(new eventWindow.MouseEvent("mouseup", pointerOptions));
+    element.click();
+    return {
+      success: true,
+      message: "Clicked instantly in Fast mode without viewport scrolling.",
+      viewportChanged: false,
+    };
+  }
+
+  function instantSelectOption(element, optionText) {
+    if (element?.tagName !== "SELECT") throw new Error("Element is not a select control.");
+    const option = Array.from(element.options).find(
+      (candidate) => candidate.textContent?.trim() === optionText.trim(),
+    );
+    if (!option) throw new Error(`Option with text "${optionText}" was not found.`);
+    element.value = option.value;
+    const eventWindow = element.ownerDocument.defaultView || window;
+    element.dispatchEvent(new eventWindow.Event("input", { bubbles: true }));
+    element.dispatchEvent(new eventWindow.Event("change", { bubbles: true }));
+    return { success: true, message: `Selected "${optionText}" instantly in Fast mode.` };
+  }
+
+  function selectedControlState(element) {
+    const type = String(element?.type || "").toLowerCase();
+    if (type === "checkbox" || type === "radio") return Boolean(element.checked);
+    for (const attribute of ["aria-checked", "aria-pressed", "aria-selected"]) {
+      const value = element?.getAttribute?.(attribute);
+      if (value === "true") return true;
+      if (value === "false") return false;
+    }
+    return null;
   }
 
   function collectFileInputs(root = document, inputs = [], visitedRoots = new Set()) {
@@ -177,8 +239,21 @@ if (!globalThis[GLOBAL_KEY]) {
     if (!runtime.visualPreferences.showElementHighlights) {
       await pageController.cleanUpHighlights();
     }
-    const selectedContent = selectPageStateContent(state.content, query);
-    return { success: true, ...state, ...selectedContent };
+    const fullPageIndexed = runtime.visualPreferences.fastMode;
+    const selectedContent = selectPageStateContent(
+      state.content,
+      query,
+      fullPageIndexed ? FAST_PAGE_STATE_MAX_CHARACTERS : undefined,
+    );
+    return {
+      success: true,
+      ...state,
+      ...selectedContent,
+      fastMode: runtime.visualPreferences.fastMode,
+      interactionMode: runtime.visualPreferences.fastMode ? "fast" : "standard",
+      fullPageIndexed,
+      viewportPolicy: fullPageIndexed ? "full_page_dom" : "visible_viewport",
+    };
   }
 
   async function findSemanticContext(targets = [], intent = "auto") {
@@ -201,7 +276,8 @@ if (!globalThis[GLOBAL_KEY]) {
       controller: pageController,
       targets: normalizedTargets,
       intent,
-      maxCharacters: 12000,
+      maxCharacters: runtime.visualPreferences.fastMode ? 32000 : 12000,
+      fullPage: runtime.visualPreferences.fastMode,
     });
     const compactAnchors = semanticContext.anchors.map((anchor) => ({
       target: anchor.target,
@@ -220,6 +296,8 @@ if (!globalThis[GLOBAL_KEY]) {
           disabled: control.disabled,
           selected: control.selected,
           inViewport: control.inViewport,
+          actionableWithoutScroll: runtime.visualPreferences.fastMode
+            && Number.isInteger(control.index),
         })),
       })),
     }));
@@ -232,6 +310,11 @@ if (!globalThis[GLOBAL_KEY]) {
       matchedAnchorCount: semanticContext.matchedAnchorCount,
       unmatchedTargets: semanticContext.unmatchedTargets,
       semanticContextTruncated: semanticContext.truncated,
+      fastMode: runtime.visualPreferences.fastMode,
+      interactionMode: runtime.visualPreferences.fastMode ? "fast" : "standard",
+      fullPageIndexed: runtime.visualPreferences.fastMode,
+      viewportPolicy: runtime.visualPreferences.fastMode ? "full_page_dom" : "visible_viewport",
+      requiresScrollForIndexedActions: false,
     };
   }
 
@@ -261,7 +344,8 @@ if (!globalThis[GLOBAL_KEY]) {
     runtime.activeVisualActionController?.abort();
     const actionController = new AbortController();
     runtime.activeVisualActionController = actionController;
-    await pageController.showMask();
+    const showVisuals = !runtime.visualPreferences.fastMode;
+    if (showVisuals) await pageController.showMask();
     try {
       if (actionController.signal.aborted) {
         throw new DOMException("The page action was cancelled by the user.", "AbortError");
@@ -272,13 +356,13 @@ if (!globalThis[GLOBAL_KEY]) {
       }
       return result;
     } finally {
-      if (!actionController.signal.aborted) {
+      if (showVisuals && !actionController.signal.aborted) {
         await new Promise((resolve) => setTimeout(
           resolve,
           BROWSER_ACTION_CLEANUP_DELAY_MS,
         ));
       }
-      await pageController.hideMask();
+      if (showVisuals) await pageController.hideMask();
       await pageController.cleanUpHighlights();
       runtime.stateIndexed = false;
       if (runtime.activeVisualActionController === actionController) {
@@ -288,8 +372,6 @@ if (!globalThis[GLOBAL_KEY]) {
   }
 
   async function handleControllerTool(tool, args = {}) {
-    const pageController = getController();
-
     if (tool === "bridge_controller_ping") {
       return {
         success: true,
@@ -312,13 +394,24 @@ if (!globalThis[GLOBAL_KEY]) {
     }
 
     if (tool === "bridge_set_visual_preferences") {
+      const previousFastMode = runtime.visualPreferences.fastMode;
       runtime.visualPreferences = normalizeVisualPreferences(args);
+      if (previousFastMode !== runtime.visualPreferences.fastMode && runtime.controller) {
+        runtime.activeVisualActionController?.abort();
+        runtime.activeVisualActionController = null;
+        runtime.controller.dispose();
+        runtime.controller = null;
+        runtime.stateIndexed = false;
+      }
+      const pageController = getController();
       applyVisualPreferences();
       if (!runtime.visualPreferences.showElementHighlights) {
         await pageController.cleanUpHighlights();
       }
       return { success: true, visualPreferences: runtime.visualPreferences };
     }
+
+    const pageController = getController();
 
     if (tool === "bridge_cancel_active_action") {
       const activeActionController = runtime.activeVisualActionController;
@@ -399,6 +492,10 @@ if (!globalThis[GLOBAL_KEY]) {
     }
 
     if (tool === "bridge_show_google_search_departure") {
+      if (runtime.visualPreferences.fastMode) {
+        clearTabTransition();
+        return { success: true, skipped: true, reason: "fast_mode" };
+      }
       await showGoogleSearchDeparture(String(args.searchText || "new tab"));
       return { success: true };
     }
@@ -450,7 +547,9 @@ if (!globalThis[GLOBAL_KEY]) {
       const videoClick = captureYouTubeVideoClick(element);
       const newTabIntent = getDeclarativeNewTabIntent(element);
       return withVisualAction(async (activeController) => {
-        const result = await activeController.clickElement(index);
+        const result = runtime.visualPreferences.fastMode
+          ? instantClickElement(element)
+          : await activeController.clickElement(index);
         const enrichedResult = newTabIntent && result?.success !== false
           ? { ...result, newTabIntent }
           : result;
@@ -476,8 +575,10 @@ if (!globalThis[GLOBAL_KEY]) {
         if (!element || element.nodeType !== Node.ELEMENT_NODE) {
           throw new Error(`Element at index ${index} is no longer available.`);
         }
-        const clickResult = await activeController.clickElement(index);
-        if (clickResult?.success === false) throw new Error(clickResult.message);
+        if (!runtime.visualPreferences.fastMode) {
+          const clickResult = await activeController.clickElement(index);
+          if (clickResult?.success === false) throw new Error(clickResult.message);
+        }
         await typeTextGradually(element, text, runtime.visualPreferences.typingDurationMs, signal);
         return {
           success: true,
@@ -490,7 +591,107 @@ if (!globalThis[GLOBAL_KEY]) {
       const index = requireIndex(args);
       const optionText = String(args.optionText ?? "").trim();
       if (!optionText) throw new Error("optionText is required.");
-      return withVisualAction((activeController) => activeController.selectOption(index, optionText));
+      return withVisualAction((activeController) => runtime.visualPreferences.fastMode
+        ? instantSelectOption(indexedElement(index), optionText)
+        : activeController.selectOption(index, optionText));
+    }
+
+    if (tool === "browser_batch_actions") {
+      if (!runtime.visualPreferences.fastMode) {
+        throw new Error("browser_batch_actions requires Fast mode. Enable it from the side panel or Lumi Settings.");
+      }
+      const actions = Array.isArray(args.actions) ? args.actions : [];
+      if (!actions.length || actions.length > 100) {
+        throw new Error("browser_batch_actions requires between 1 and 100 actions.");
+      }
+      const confirmed = args.confirmed === true;
+      const preparedActions = actions.map((action, actionIndex) => {
+        const index = requireIndex(action);
+        const element = indexedElement(index);
+        if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+          throw new Error(`Batch action ${actionIndex + 1} targets an unavailable element.`);
+        }
+        const type = String(action.type || "");
+        if (type === "click") {
+          assertConfirmedHighImpactClick(index, confirmed);
+          const desiredState = action.desiredState === "on"
+            ? true
+            : action.desiredState === "off" ? false : null;
+          if (desiredState !== null && selectedControlState(element) === null) {
+            throw new Error(`Batch action ${actionIndex + 1} uses desiredState on a control whose selected state is not exposed.`);
+          }
+          return { type, index, element, desiredState };
+        }
+        if (type === "input") {
+          assertSafeInput(index);
+          if (action.text === undefined) {
+            throw new Error(`Batch action ${actionIndex + 1} requires text.`);
+          }
+          return { type, index, element, text: String(action.text) };
+        }
+        if (type === "select") {
+          const optionText = String(action.optionText || "").trim();
+          if (!optionText) throw new Error(`Batch action ${actionIndex + 1} requires optionText.`);
+          if (element.tagName !== "SELECT" || !Array.from(element.options).some(
+            (option) => option.textContent?.trim() === optionText,
+          )) {
+            throw new Error(`Batch action ${actionIndex + 1} could not resolve option "${optionText}".`);
+          }
+          return { type, index, element, optionText };
+        }
+        throw new Error(`Batch action ${actionIndex + 1} has unsupported type "${type}".`);
+      });
+
+      return withVisualAction(async (_activeController, signal) => {
+        const results = [];
+        let failedAt = null;
+        for (const [actionIndex, action] of preparedActions.entries()) {
+          try {
+            if (!action.element.isConnected) {
+              throw new Error("The page replaced this control while the batch was running.");
+            }
+            if (action.type === "click") {
+              const currentState = selectedControlState(action.element);
+              if (action.desiredState !== null && currentState === action.desiredState) {
+                results.push({ action: actionIndex + 1, index: action.index, status: "skipped", reason: "already_in_desired_state" });
+                continue;
+              }
+              instantClickElement(action.element);
+            } else if (action.type === "input") {
+              await typeTextGradually(action.element, action.text, 0, signal);
+            } else {
+              instantSelectOption(action.element, action.optionText);
+            }
+            results.push({ action: actionIndex + 1, index: action.index, status: "executed" });
+            await Promise.resolve();
+          } catch (error) {
+            failedAt = actionIndex + 1;
+            results.push({
+              action: actionIndex + 1,
+              index: action.index,
+              status: "failed",
+              error: error instanceof Error ? error.message : String(error),
+            });
+            break;
+          }
+        }
+        const executedActionCount = results.filter((result) => result.status === "executed").length;
+        const skippedActionCount = results.filter((result) => result.status === "skipped").length;
+        return {
+          success: true,
+          completed: failedAt === null,
+          requestedActionCount: actions.length,
+          executedActionCount,
+          skippedActionCount,
+          failedAt,
+          results,
+          nextPageStateQuery: String(args.verificationQuery || "").trim().slice(0, 500),
+          requiresPageVerification: failedAt !== null,
+          message: failedAt === null
+            ? `Completed ${executedActionCount} Fast mode action(s); skipped ${skippedActionCount} already-satisfied action(s).`
+            : `Fast mode stopped at action ${failedAt} after ${executedActionCount} successful action(s).`,
+        };
+      });
     }
 
     if (tool === "browser_scroll") {
@@ -513,10 +714,11 @@ if (!globalThis[GLOBAL_KEY]) {
       if (position !== undefined && (!Number.isFinite(position) || position < 0 || position > 1)) {
         throw new Error("browser_scroll position must be a number from 0 (top) to 1 (bottom).");
       }
-      if (!text && position === undefined && args.direction !== "up" && args.direction !== "down") {
-        throw new Error("browser_scroll requires text, direction=up/down, or an absolute position from 0 to 1.");
+      const allowedDirections = new Set(["up", "down", "left", "right"]);
+      if (!text && position === undefined && !allowedDirections.has(args.direction)) {
+        throw new Error("browser_scroll requires text, direction=up/down/left/right, or an absolute position from 0 to 1.");
       }
-      const direction = args.direction === "up" ? "up" : "down";
+      const direction = allowedDirections.has(args.direction) ? args.direction : "down";
       const pages = Math.min(3, Math.max(0.25, Number(args.pages) || 0.8));
       const index = args.index === undefined ? undefined : requireIndex(args);
       if (text) {

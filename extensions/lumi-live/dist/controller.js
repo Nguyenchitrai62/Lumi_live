@@ -3265,6 +3265,12 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
   // extensions/lumi-live/browser/effects/scroll.js
   var SCROLL_EFFECT_HOST_ID = "lumi-page-agent-scroll-effect";
   function createScrollEffect(direction) {
+    const directionLabels = {
+      up: "Scrolling up",
+      down: "Scrolling down",
+      left: "Scrolling left",
+      right: "Scrolling right"
+    };
     document.getElementById(SCROLL_EFFECT_HOST_ID)?.remove();
     const host = document.createElement("div");
     host.id = SCROLL_EFFECT_HOST_ID;
@@ -3279,6 +3285,8 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       .motion { position:relative; width:30px; height:30px; display:grid; place-items:center; overflow:hidden; border-radius:50%; color:#d7f4ff; background:rgba(255,255,255,.13); }
       .arrow { width:8px; height:8px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(45deg) translate(-1px,-1px); animation:lumi-scroll-arrow ${PAGE_SCROLL_ARROW_PULSE_DURATION_MS}ms ease-in-out infinite; }
       :host([data-direction="up"]) .arrow { transform:rotate(225deg) translate(-1px,-1px); animation-name:lumi-scroll-arrow-up; }
+      :host([data-direction="left"]) .arrow { transform:rotate(135deg); animation-name:none; }
+      :host([data-direction="right"]) .arrow { transform:rotate(315deg); animation-name:none; }
       .copy { display:grid; gap:3px; min-width:76px; font:700 10px/1.1 "Segoe UI",sans-serif; letter-spacing:.02em; }
       .copy small { color:rgba(225,245,255,.72); font:800 7px/1 "Segoe UI",sans-serif; letter-spacing:.14em; text-transform:uppercase; }
       .track { grid-column:1/-1; height:2px; overflow:hidden; border-radius:2px; background:rgba(255,255,255,.17); }
@@ -3293,7 +3301,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     <div class="frame"></div>
     <div class="hud">
       <span class="motion" aria-hidden="true"><span class="arrow"></span></span>
-      <span class="copy"><small>PAGE MOTION</small><span>${direction === "up" ? "Scrolling up" : "Scrolling down"}</span></span>
+      <span class="copy"><small>PAGE MOTION</small><span>${directionLabels[direction] || directionLabels.down}</span></span>
       <span class="track"></span>
     </div>`;
     (document.documentElement || document.body).append(host);
@@ -3311,28 +3319,32 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       }
     };
   }
-  function isScrollableElement(element, requireLargeViewport = false) {
+  function isScrollableElement(element, axis = "vertical", requireLargeViewport = false) {
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
     const style = getComputedStyle(element);
-    const allowsScroll = /(auto|scroll|overlay)/.test(style.overflowY);
-    const isLargeEnough = !requireLargeViewport || element.clientHeight >= window.innerHeight * 0.5;
-    return allowsScroll && isLargeEnough && element.scrollHeight > element.clientHeight;
+    const horizontal = axis === "horizontal";
+    const allowsScroll = /(auto|scroll|overlay)/.test(horizontal ? style.overflowX : style.overflowY);
+    const viewportSize = horizontal ? window.innerWidth : window.innerHeight;
+    const clientSize = horizontal ? element.clientWidth : element.clientHeight;
+    const scrollSize = horizontal ? element.scrollWidth : element.scrollHeight;
+    const isLargeEnough = !requireLargeViewport || clientSize >= viewportSize * 0.5;
+    return allowsScroll && isLargeEnough && scrollSize > clientSize;
   }
-  function findVerticalScroller(indexedElement) {
+  function findScroller(indexedElement, axis = "vertical") {
     if (indexedElement) {
       let current2 = indexedElement;
       for (let attempt = 0; current2 && attempt < 10; attempt += 1) {
-        if (isScrollableElement(current2)) return { element: current2, targeted: true };
+        if (isScrollableElement(current2, axis)) return { element: current2, targeted: true };
         if (current2 === document.body || current2 === document.documentElement) break;
         current2 = current2.parentElement;
       }
       return null;
     }
     let current = document.activeElement;
-    while (current && current !== document.body && !isScrollableElement(current, true)) {
+    while (current && current !== document.body && !isScrollableElement(current, axis, true)) {
       current = current.parentElement;
     }
-    const element = isScrollableElement(current, true) ? current : Array.from(document.querySelectorAll("*")).find((candidate) => isScrollableElement(candidate, true)) || document.scrollingElement || document.documentElement;
+    const element = isScrollableElement(current, axis, true) ? current : Array.from(document.querySelectorAll("*")).find((candidate) => isScrollableElement(candidate, axis, true)) || document.scrollingElement || document.documentElement;
     return { element, targeted: false };
   }
   function abortError() {
@@ -3343,10 +3355,11 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
   function easeInOutCubic(progress) {
     return progress < 0.5 ? 4 * progress * progress * progress : 1 - (-2 * progress + 2) ** 3 / 2;
   }
-  async function animateScrollTop(element, targetTop, durationMs, effect, signal2) {
+  async function animateScrollOffset(element, targetOffset, axis, durationMs, effect, signal2) {
     const startedAt = performance.now();
-    const startTop = element.scrollTop;
-    const distance = targetTop - startTop;
+    const property = axis === "horizontal" ? "scrollLeft" : "scrollTop";
+    const startOffset = element[property];
+    const distance = targetOffset - startOffset;
     await new Promise((resolve, reject) => {
       let frameId = null;
       const abort = () => {
@@ -3359,7 +3372,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
           return;
         }
         const progress = Math.min(1, (now - startedAt) / durationMs);
-        element.scrollTop = startTop + distance * easeInOutCubic(progress);
+        element[property] = startOffset + distance * easeInOutCubic(progress);
         effect.update(progress);
         if (progress >= 1) {
           signal2?.removeEventListener("abort", abort);
@@ -3461,7 +3474,9 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     const ownerDocument = element.ownerDocument || document;
     const scrollers = [];
     for (let current = element.parentElement; current; current = current.parentElement) {
-      if (isScrollableElement(current)) scrollers.push(current);
+      if (isScrollableElement(current, "vertical") || isScrollableElement(current, "horizontal")) {
+        scrollers.push(current);
+      }
     }
     const documentScroller = ownerDocument.scrollingElement || ownerDocument.documentElement;
     if (documentScroller && !scrollers.includes(documentScroller)) scrollers.push(documentScroller);
@@ -3470,12 +3485,16 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       startTop: scroller.scrollTop,
       startLeft: scroller.scrollLeft,
       targetTop: scroller.scrollTop,
+      targetLeft: scroller.scrollLeft,
       previousScrollBehavior: scroller.style.scrollBehavior
     }));
     try {
       for (const entry of entries) entry.element.style.scrollBehavior = "auto";
       element.scrollIntoView({ behavior: "auto", block: alignment, inline: "nearest" });
-      for (const entry of entries) entry.targetTop = entry.element.scrollTop;
+      for (const entry of entries) {
+        entry.targetTop = entry.element.scrollTop;
+        entry.targetLeft = entry.element.scrollLeft;
+      }
     } finally {
       for (const entry of entries) {
         entry.element.scrollTop = entry.startTop;
@@ -3504,6 +3523,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
         const easedProgress = easeInOutCubic(progress);
         for (const entry of entries) {
           entry.element.scrollTop = entry.startTop + (entry.targetTop - entry.startTop) * easedProgress;
+          entry.element.scrollLeft = entry.startLeft + (entry.targetLeft - entry.startLeft) * easedProgress;
         }
         effect.update(progress);
         if (progress >= 1) {
@@ -3544,8 +3564,29 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       };
     }
     const entries = collectScrollEntries(match.element, alignment);
-    const motionEntry = entries.reduce((largest, entry) => Math.abs(entry.targetTop - entry.startTop) > Math.abs(largest.targetTop - largest.startTop) ? entry : largest, entries[0]);
-    const direction = motionEntry && motionEntry.targetTop < motionEntry.startTop ? "up" : "down";
+    const motionEntry = entries.reduce((largest, entry) => Math.max(
+      Math.abs(entry.targetTop - entry.startTop),
+      Math.abs(entry.targetLeft - entry.startLeft)
+    ) > Math.max(
+      Math.abs(largest.targetTop - largest.startTop),
+      Math.abs(largest.targetLeft - largest.startLeft)
+    ) ? entry : largest, entries[0]);
+    const horizontalMotion = motionEntry && Math.abs(motionEntry.targetLeft - motionEntry.startLeft) > Math.abs(motionEntry.targetTop - motionEntry.startTop);
+    const direction = horizontalMotion ? motionEntry.targetLeft < motionEntry.startLeft ? "left" : "right" : motionEntry && motionEntry.targetTop < motionEntry.startTop ? "up" : "down";
+    if (Number(durationMs) <= 0) {
+      for (const entry of entries) {
+        entry.element.scrollTop = entry.targetTop;
+        entry.element.scrollLeft = entry.targetLeft;
+      }
+      return {
+        success: true,
+        message: `Scrolled instantly to matching content "${match.matchedText.slice(0, 200)}" in Fast mode.`,
+        matchedText: match.matchedText,
+        occurrence,
+        matchCount: match.matchCount,
+        alignment
+      };
+    }
     const effect = createScrollEffect(direction);
     try {
       await animateScrollEntries(entries, Math.max(1, durationMs), effect, signal2);
@@ -3571,7 +3612,9 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     durationMs = PAGE_SCROLL_DURATION_MS,
     signal: signal2
   } = {}) {
-    const scrollTarget = findVerticalScroller(indexedElement);
+    const horizontal = direction === "left" || direction === "right";
+    const axis = horizontal ? "horizontal" : "vertical";
+    const scrollTarget = findScroller(indexedElement, axis);
     if (!scrollTarget) {
       const effect2 = createScrollEffect(direction);
       effect2.update(1);
@@ -3579,31 +3622,56 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       return { success: true, message: "No scrollable container was found for that element." };
     }
     const { element, targeted } = scrollTarget;
-    const startTop = element.scrollTop;
-    const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
-    const viewportDistance = targeted ? window.innerHeight / 3 : window.innerHeight;
-    const signedDistance = viewportDistance * pages * (direction === "up" ? -1 : 1);
-    const targetTop = Number.isFinite(position) ? maxTop * position : Math.max(0, Math.min(maxTop, startTop + signedDistance));
-    const effect = createScrollEffect(targetTop < startTop ? "up" : "down");
+    const property = horizontal ? "scrollLeft" : "scrollTop";
+    const startOffset = element[property];
+    const maxOffset = Math.max(
+      0,
+      horizontal ? element.scrollWidth - element.clientWidth : element.scrollHeight - element.clientHeight
+    );
+    const viewportSize = horizontal ? window.innerWidth : window.innerHeight;
+    const viewportDistance = targeted ? viewportSize / 3 : viewportSize;
+    const negativeDirection = direction === "up" || direction === "left";
+    const signedDistance = viewportDistance * pages * (negativeDirection ? -1 : 1);
+    const targetOffset = Number.isFinite(position) ? maxOffset * position : Math.max(0, Math.min(maxOffset, startOffset + signedDistance));
+    if (Number(durationMs) <= 0) {
+      element[property] = targetOffset;
+      const scrolled2 = Math.round(element[property] - startOffset);
+      return {
+        success: true,
+        message: Math.abs(scrolled2) < 1 ? "The target was already at the requested scroll position." : `Scrolled ${targeted ? `container (${element.tagName})` : "page"} ${axis} by ${scrolled2}px instantly in Fast mode.`,
+        axis,
+        position: maxOffset > 0 ? element[property] / maxOffset : 0
+      };
+    }
+    const resolvedDirection = horizontal ? targetOffset < startOffset ? "left" : "right" : targetOffset < startOffset ? "up" : "down";
+    const effect = createScrollEffect(resolvedDirection);
     try {
-      await animateScrollTop(element, targetTop, Math.max(1, durationMs), effect, signal2);
+      await animateScrollOffset(
+        element,
+        targetOffset,
+        axis,
+        Math.max(1, durationMs),
+        effect,
+        signal2
+      );
       await effect.finish();
     } catch (error) {
       effect.remove();
       throw error;
     }
-    const scrolled = Math.round(element.scrollTop - startTop);
+    const scrolled = Math.round(element[property] - startOffset);
     if (Math.abs(scrolled) < 1) {
       return {
         success: true,
-        message: direction === "down" ? "Already at the bottom; the page cannot scroll down further." : "Already at the top; the page cannot scroll up further."
+        message: `Already at the ${direction === "down" ? "bottom" : direction === "up" ? "top" : direction === "right" ? "right edge" : "left edge"}; the page cannot scroll ${direction} further.`
       };
     }
     const location2 = targeted ? `container (${element.tagName})` : "page";
-    const edge = element.scrollTop <= 1 ? " Reached the top." : element.scrollTop >= maxTop - 1 ? " Reached the bottom." : "";
+    const edge = element[property] <= 1 ? ` Reached the ${horizontal ? "left edge" : "top"}.` : element[property] >= maxOffset - 1 ? ` Reached the ${horizontal ? "right edge" : "bottom"}.` : "";
     return {
       success: true,
-      message: `Scrolled ${location2} by ${scrolled}px over ${durationMs} ms.${edge}`
+      message: `Scrolled ${location2} ${axis} by ${scrolled}px over ${durationMs} ms.${edge}`,
+      axis
     };
   }
 
@@ -3739,15 +3807,18 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
 
   // extensions/lumi-live/core/visual-preferences.js
   var DEFAULT_VISUAL_PREFERENCES = Object.freeze({
+    fastMode: false,
     showElementHighlights: DEFAULT_SHOW_ELEMENT_HIGHLIGHTS,
     scrollDurationMs: PAGE_SCROLL_DURATION_MS,
     typingDurationMs: FORM_INPUT_REVEAL_DURATION_MS
   });
   function normalizeVisualPreferences(value = {}) {
+    const fastMode = value.fastMode === true;
     return {
-      showElementHighlights: typeof value.showElementHighlights === "boolean" ? value.showElementHighlights : DEFAULT_VISUAL_PREFERENCES.showElementHighlights,
-      scrollDurationMs: DEFAULT_VISUAL_PREFERENCES.scrollDurationMs,
-      typingDurationMs: DEFAULT_VISUAL_PREFERENCES.typingDurationMs
+      fastMode,
+      showElementHighlights: fastMode ? false : typeof value.showElementHighlights === "boolean" ? value.showElementHighlights : DEFAULT_VISUAL_PREFERENCES.showElementHighlights,
+      scrollDurationMs: fastMode ? 0 : DEFAULT_VISUAL_PREFERENCES.scrollDurationMs,
+      typingDurationMs: fastMode ? 0 : DEFAULT_VISUAL_PREFERENCES.typingDurationMs
     };
   }
 
@@ -4063,7 +4134,8 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     "title",
     "for",
     "colspan",
-    "rowspan"
+    "rowspan",
+    "data-testid"
   ];
   var ROW_CONTAINER_SELECTOR = [
     "tr",
@@ -4250,12 +4322,20 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     }
   }
   function elementText(element, maxCharacters = MAX_CANDIDATE_TEXT_CHARACTERS) {
+    const ownerDocument = element?.ownerDocument;
+    const referencedText = (attributeName) => String(element?.getAttribute?.(attributeName) || "").split(/\s+/).filter(Boolean).map((id) => ownerDocument?.getElementById?.(id)?.textContent || "").join(" ");
+    const labelText = Array.from(element?.labels || [], (label) => label.textContent || "").join(" ");
     const attributes = [
       element?.getAttribute?.("aria-label"),
+      referencedText("aria-labelledby"),
+      referencedText("aria-describedby"),
+      labelText,
       element?.getAttribute?.("title"),
       element?.getAttribute?.("placeholder"),
       element?.getAttribute?.("name"),
-      element?.getAttribute?.("alt")
+      element?.getAttribute?.("alt"),
+      element?.getAttribute?.("id"),
+      element?.getAttribute?.("data-testid")
     ];
     let visibleText = "";
     try {
@@ -4507,7 +4587,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     const bestScore = uniqueContexts[0].score;
     return uniqueContexts.filter((match, index) => index === 0 || bestScore - match.score <= 0.055);
   }
-  function safeAttributes(element, indexLookup, matchedElement, intent) {
+  function safeAttributes(element, indexLookup, matchedElement, intent, fullPage) {
     const attributes = [];
     for (const name of SAFE_ATTRIBUTES) {
       const value = boundedAttribute(element?.getAttribute?.(name));
@@ -4527,7 +4607,10 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
     if (element?.multiple) attributes.push('multiple="true"');
     if (element?.readOnly) attributes.push('readonly="true"');
     const index = indexLookup.get(element);
-    if (Number.isInteger(index)) attributes.push(`data-lumi-index="${index}"`);
+    if (Number.isInteger(index)) {
+      attributes.push(`data-lumi-index="${index}"`);
+      if (fullPage) attributes.push('data-lumi-actionable-without-scroll="true"');
+    }
     const controlKind = semanticControlKind(element);
     if (controlKind) {
       const intentScore = scoreSemanticControlIntent(intent, controlKind, {
@@ -4565,7 +4648,8 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       node,
       state.indexLookup,
       state.matchedElement,
-      state.intent
+      state.intent,
+      state.fullPage
     );
     const indent = "  ".repeat(depth);
     if (VOID_TAGS.has(tag)) return `${indent}<${tag}${attributes} />
@@ -4590,11 +4674,12 @@ ${shadowChildren}${indent}  </lumi-shadow-root>
 ${children}${indent}</${tag}>
 `;
   }
-  function serializeContextNode(node, indexLookup, matchedElement, intent) {
+  function serializeContextNode(node, indexLookup, matchedElement, intent, fullPage) {
     const state = {
       indexLookup,
       matchedElement,
       intent,
+      fullPage,
       actionableIndices: /* @__PURE__ */ new Set(),
       nodeCount: 0,
       truncated: false
@@ -4606,7 +4691,7 @@ ${children}${indent}</${tag}>
       truncated: state.truncated
     };
   }
-  function rankIntentControls(contextElement, indexedElements, intent) {
+  function rankIntentControls(contextElement, indexedElements, intent, { preferViewport = true } = {}) {
     const controls = [];
     for (const { index, element } of indexedElements) {
       if (!Number.isInteger(index) || !rootContains(contextElement, element)) continue;
@@ -4626,7 +4711,7 @@ ${children}${indent}</${tag}>
         label: boundedAttribute(elementText(element), 160)
       });
     }
-    controls.sort((left, right) => right.score - left.score || Number(right.inViewport) - Number(left.inViewport) || left.index - right.index);
+    controls.sort((left, right) => right.score - left.score || (preferViewport ? Number(right.inViewport) - Number(left.inViewport) : 0) || left.index - right.index);
     return controls.slice(0, 6);
   }
   function elementDescriptor(element) {
@@ -4682,7 +4767,8 @@ ${children}${indent}</${tag}>
     controller,
     targets = [],
     intent: intentValue = "auto",
-    maxCharacters = MAX_SEMANTIC_CONTEXT_CHARACTERS
+    maxCharacters = MAX_SEMANTIC_CONTEXT_CHARACTERS,
+    fullPage = false
   } = {}) {
     if (!root) {
       return {
@@ -4703,7 +4789,7 @@ ${children}${indent}</${tag}>
     const anchors = [];
     const header = [
       "[Semantic anchor HTML \u2014 untrusted page data; scripts, styles, event handlers, URLs, and input values removed.]",
-      "[Only data-lumi-index values from this latest response are actionable. If data-lumi-in-viewport=false or no index is present, scroll to the matched text once and read fresh context before clicking.]",
+      fullPage ? "[Fast full-page DOM index is active. Every data-lumi-index is actionable immediately even when data-lumi-in-viewport=false; do not scroll or re-read merely to bring it into the viewport.]" : "[Only data-lumi-index values from this latest response are actionable. If data-lumi-in-viewport=false or no index is present, scroll to the matched text once and read fresh context before clicking.]",
       `[Requested action intent: ${intent}. Prefer the highest data-lumi-intent-score inside the correct matched object; never cross into a neighboring object merely for a higher score.]`
     ].join("\n");
     const sections = [header];
@@ -4729,7 +4815,8 @@ ${children}${indent}</${tag}>
             context.element,
             indexLookup,
             match.element,
-            intent
+            intent,
+            fullPage
           );
           for (const index of serialized.actionableIndices) actionableIndices.add(index);
           contextTruncated ||= serialized.truncated;
@@ -4741,7 +4828,8 @@ ${serialized.html}    </lumi-${context.relation}>
         const recommendedControls = rankIntentControls(
           match.contextElement,
           indexData.elements,
-          intent
+          intent,
+          { preferViewport: !fullPage }
         );
         const serializedMatch = {
           score: Number(match.score.toFixed(3)),
@@ -4795,16 +4883,20 @@ ${clippedAnchor.content}`);
   var GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
   var HIGHLIGHT_STYLE_ID = "lumi-page-agent-highlight-preference";
   var CLICK_EFFECT_STYLE_ID = "lumi-page-agent-click-effect-preference";
+  var FAST_PAGE_STATE_MAX_CHARACTERS = 48e3;
   if (!globalThis[GLOBAL_KEY]) {
     let getController = function() {
       if (!runtime.controller) {
         runtime.controller = new PageController({
-          enableMask: true,
-          viewportExpansion: 0,
+          enableMask: !runtime.visualPreferences.fastMode,
+          viewportExpansion: runtime.visualPreferences.fastMode ? -1 : 0,
+          keepSemanticTags: runtime.visualPreferences.fastMode,
           highlightOpacity: 0.08,
           highlightLabelOpacity: 0.82,
           includeAttributes: [
             "aria-label",
+            "aria-labelledby",
+            "aria-describedby",
             "aria-expanded",
             "aria-selected",
             "aria-checked",
@@ -4813,6 +4905,10 @@ ${clippedAnchor.content}`);
             "placeholder",
             "type",
             "title",
+            "alt",
+            "for",
+            "id",
+            "data-testid",
             "href",
             "disabled"
           ]
@@ -4849,6 +4945,54 @@ ${clippedAnchor.content}`);
       return index;
     }, indexedElement = function(index) {
       return getController().selectorMap?.get(index)?.ref || null;
+    }, instantClickElement = function(element) {
+      if (!element?.isConnected) throw new Error("The target element is no longer connected to the page.");
+      if (element.disabled || element.getAttribute?.("aria-disabled") === "true") {
+        throw new Error("The target element is disabled.");
+      }
+      const nextRect = element.getBoundingClientRect();
+      const eventWindow = element.ownerDocument.defaultView || window;
+      const pointerOptions = {
+        bubbles: true,
+        cancelable: true,
+        clientX: nextRect.left + nextRect.width / 2,
+        clientY: nextRect.top + nextRect.height / 2,
+        pointerType: "mouse",
+        button: 0
+      };
+      element.focus?.({ preventScroll: true });
+      element.dispatchEvent(new eventWindow.PointerEvent("pointerover", pointerOptions));
+      element.dispatchEvent(new eventWindow.MouseEvent("mouseover", pointerOptions));
+      element.dispatchEvent(new eventWindow.PointerEvent("pointerdown", pointerOptions));
+      element.dispatchEvent(new eventWindow.MouseEvent("mousedown", pointerOptions));
+      element.dispatchEvent(new eventWindow.PointerEvent("pointerup", pointerOptions));
+      element.dispatchEvent(new eventWindow.MouseEvent("mouseup", pointerOptions));
+      element.click();
+      return {
+        success: true,
+        message: "Clicked instantly in Fast mode without viewport scrolling.",
+        viewportChanged: false
+      };
+    }, instantSelectOption = function(element, optionText) {
+      if (element?.tagName !== "SELECT") throw new Error("Element is not a select control.");
+      const option = Array.from(element.options).find(
+        (candidate) => candidate.textContent?.trim() === optionText.trim()
+      );
+      if (!option) throw new Error(`Option with text "${optionText}" was not found.`);
+      element.value = option.value;
+      const eventWindow = element.ownerDocument.defaultView || window;
+      element.dispatchEvent(new eventWindow.Event("input", { bubbles: true }));
+      element.dispatchEvent(new eventWindow.Event("change", { bubbles: true }));
+      return { success: true, message: `Selected "${optionText}" instantly in Fast mode.` };
+    }, selectedControlState = function(element) {
+      const type = String(element?.type || "").toLowerCase();
+      if (type === "checkbox" || type === "radio") return Boolean(element.checked);
+      for (const attribute of ["aria-checked", "aria-pressed", "aria-selected"]) {
+        const value = element?.getAttribute?.(attribute);
+        if (value === "true") return true;
+        if (value === "false") return false;
+      }
+      return null;
     }, collectFileInputs = function(root = document, inputs = [], visitedRoots = /* @__PURE__ */ new Set()) {
       if (!root || visitedRoots.has(root)) return inputs;
       visitedRoots.add(root);
@@ -4905,7 +5049,7 @@ ${clippedAnchor.content}`);
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
       assertConfirmedPageAgentClick(element, confirmed);
     };
-    getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, collectFileInputs2 = collectFileInputs, isFileInput2 = isFileInput, isFileUploadTrigger2 = isFileUploadTrigger, clearPreparedFileUploadTarget2 = clearPreparedFileUploadTarget, getDeclarativeNewTabIntent2 = getDeclarativeNewTabIntent, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
+    getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, instantClickElement2 = instantClickElement, instantSelectOption2 = instantSelectOption, selectedControlState2 = selectedControlState, collectFileInputs2 = collectFileInputs, isFileInput2 = isFileInput, isFileUploadTrigger2 = isFileUploadTrigger, clearPreparedFileUploadTarget2 = clearPreparedFileUploadTarget, getDeclarativeNewTabIntent2 = getDeclarativeNewTabIntent, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
     const runtime = {
       controller: null,
       stateIndexed: false,
@@ -4924,8 +5068,21 @@ ${clippedAnchor.content}`);
       if (!runtime.visualPreferences.showElementHighlights) {
         await pageController.cleanUpHighlights();
       }
-      const selectedContent = selectPageStateContent(state.content, query);
-      return { success: true, ...state, ...selectedContent };
+      const fullPageIndexed = runtime.visualPreferences.fastMode;
+      const selectedContent = selectPageStateContent(
+        state.content,
+        query,
+        fullPageIndexed ? FAST_PAGE_STATE_MAX_CHARACTERS : void 0
+      );
+      return {
+        success: true,
+        ...state,
+        ...selectedContent,
+        fastMode: runtime.visualPreferences.fastMode,
+        interactionMode: runtime.visualPreferences.fastMode ? "fast" : "standard",
+        fullPageIndexed,
+        viewportPolicy: fullPageIndexed ? "full_page_dom" : "visible_viewport"
+      };
     }
     async function findSemanticContext(targets = [], intent = "auto") {
       const normalizedTargets = (Array.isArray(targets) ? targets : [targets]).map((target) => String(target || "").trim()).filter(Boolean).slice(0, MAX_SEMANTIC_ANCHORS);
@@ -4943,7 +5100,8 @@ ${clippedAnchor.content}`);
         controller: pageController,
         targets: normalizedTargets,
         intent,
-        maxCharacters: 12e3
+        maxCharacters: runtime.visualPreferences.fastMode ? 32e3 : 12e3,
+        fullPage: runtime.visualPreferences.fastMode
       });
       const compactAnchors = semanticContext.anchors.map((anchor) => ({
         target: anchor.target,
@@ -4961,7 +5119,8 @@ ${clippedAnchor.content}`);
             score: control.score,
             disabled: control.disabled,
             selected: control.selected,
-            inViewport: control.inViewport
+            inViewport: control.inViewport,
+            actionableWithoutScroll: runtime.visualPreferences.fastMode && Number.isInteger(control.index)
           }))
         }))
       }));
@@ -4973,7 +5132,12 @@ ${clippedAnchor.content}`);
         semanticAnchors: compactAnchors,
         matchedAnchorCount: semanticContext.matchedAnchorCount,
         unmatchedTargets: semanticContext.unmatchedTargets,
-        semanticContextTruncated: semanticContext.truncated
+        semanticContextTruncated: semanticContext.truncated,
+        fastMode: runtime.visualPreferences.fastMode,
+        interactionMode: runtime.visualPreferences.fastMode ? "fast" : "standard",
+        fullPageIndexed: runtime.visualPreferences.fastMode,
+        viewportPolicy: runtime.visualPreferences.fastMode ? "full_page_dom" : "visible_viewport",
+        requiresScrollForIndexedActions: false
       };
     }
     async function withVisualAction(action) {
@@ -4981,7 +5145,8 @@ ${clippedAnchor.content}`);
       runtime.activeVisualActionController?.abort();
       const actionController = new AbortController();
       runtime.activeVisualActionController = actionController;
-      await pageController.showMask();
+      const showVisuals = !runtime.visualPreferences.fastMode;
+      if (showVisuals) await pageController.showMask();
       try {
         if (actionController.signal.aborted) {
           throw new DOMException("The page action was cancelled by the user.", "AbortError");
@@ -4992,13 +5157,13 @@ ${clippedAnchor.content}`);
         }
         return result2;
       } finally {
-        if (!actionController.signal.aborted) {
+        if (showVisuals && !actionController.signal.aborted) {
           await new Promise((resolve) => setTimeout(
             resolve,
             BROWSER_ACTION_CLEANUP_DELAY_MS
           ));
         }
-        await pageController.hideMask();
+        if (showVisuals) await pageController.hideMask();
         await pageController.cleanUpHighlights();
         runtime.stateIndexed = false;
         if (runtime.activeVisualActionController === actionController) {
@@ -5007,7 +5172,6 @@ ${clippedAnchor.content}`);
       }
     }
     async function handleControllerTool(tool, args = {}) {
-      const pageController = getController();
       if (tool === "bridge_controller_ping") {
         return {
           success: true,
@@ -5026,13 +5190,23 @@ ${clippedAnchor.content}`);
         return mediaElementAudio.stop();
       }
       if (tool === "bridge_set_visual_preferences") {
+        const previousFastMode = runtime.visualPreferences.fastMode;
         runtime.visualPreferences = normalizeVisualPreferences(args);
+        if (previousFastMode !== runtime.visualPreferences.fastMode && runtime.controller) {
+          runtime.activeVisualActionController?.abort();
+          runtime.activeVisualActionController = null;
+          runtime.controller.dispose();
+          runtime.controller = null;
+          runtime.stateIndexed = false;
+        }
+        const pageController2 = getController();
         applyVisualPreferences();
         if (!runtime.visualPreferences.showElementHighlights) {
-          await pageController.cleanUpHighlights();
+          await pageController2.cleanUpHighlights();
         }
         return { success: true, visualPreferences: runtime.visualPreferences };
       }
+      const pageController = getController();
       if (tool === "bridge_cancel_active_action") {
         const activeActionController = runtime.activeVisualActionController;
         runtime.activeVisualActionController = null;
@@ -5109,6 +5283,10 @@ ${clippedAnchor.content}`);
         return { success: true };
       }
       if (tool === "bridge_show_google_search_departure") {
+        if (runtime.visualPreferences.fastMode) {
+          clearTabTransition();
+          return { success: true, skipped: true, reason: "fast_mode" };
+        }
         await showGoogleSearchDeparture(String(args.searchText || "new tab"));
         return { success: true };
       }
@@ -5153,7 +5331,7 @@ ${clippedAnchor.content}`);
         const videoClick = captureYouTubeVideoClick(element);
         const newTabIntent = getDeclarativeNewTabIntent(element);
         return withVisualAction(async (activeController) => {
-          const result2 = await activeController.clickElement(index);
+          const result2 = runtime.visualPreferences.fastMode ? instantClickElement(element) : await activeController.clickElement(index);
           const enrichedResult = newTabIntent && result2?.success !== false ? { ...result2, newTabIntent } : result2;
           if (result2?.success === false || !didClickOpenYouTubeVideo(videoClick)) {
             return enrichedResult;
@@ -5176,8 +5354,10 @@ ${clippedAnchor.content}`);
           if (!element || element.nodeType !== Node.ELEMENT_NODE) {
             throw new Error(`Element at index ${index} is no longer available.`);
           }
-          const clickResult = await activeController.clickElement(index);
-          if (clickResult?.success === false) throw new Error(clickResult.message);
+          if (!runtime.visualPreferences.fastMode) {
+            const clickResult = await activeController.clickElement(index);
+            if (clickResult?.success === false) throw new Error(clickResult.message);
+          }
           await typeTextGradually(element, text, runtime.visualPreferences.typingDurationMs, signal2);
           return {
             success: true,
@@ -5189,7 +5369,99 @@ ${clippedAnchor.content}`);
         const index = requireIndex(args);
         const optionText = String(args.optionText ?? "").trim();
         if (!optionText) throw new Error("optionText is required.");
-        return withVisualAction((activeController) => activeController.selectOption(index, optionText));
+        return withVisualAction((activeController) => runtime.visualPreferences.fastMode ? instantSelectOption(indexedElement(index), optionText) : activeController.selectOption(index, optionText));
+      }
+      if (tool === "browser_batch_actions") {
+        if (!runtime.visualPreferences.fastMode) {
+          throw new Error("browser_batch_actions requires Fast mode. Enable it from the side panel or Lumi Settings.");
+        }
+        const actions = Array.isArray(args.actions) ? args.actions : [];
+        if (!actions.length || actions.length > 100) {
+          throw new Error("browser_batch_actions requires between 1 and 100 actions.");
+        }
+        const confirmed = args.confirmed === true;
+        const preparedActions = actions.map((action, actionIndex) => {
+          const index = requireIndex(action);
+          const element = indexedElement(index);
+          if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+            throw new Error(`Batch action ${actionIndex + 1} targets an unavailable element.`);
+          }
+          const type = String(action.type || "");
+          if (type === "click") {
+            assertConfirmedHighImpactClick(index, confirmed);
+            const desiredState = action.desiredState === "on" ? true : action.desiredState === "off" ? false : null;
+            if (desiredState !== null && selectedControlState(element) === null) {
+              throw new Error(`Batch action ${actionIndex + 1} uses desiredState on a control whose selected state is not exposed.`);
+            }
+            return { type, index, element, desiredState };
+          }
+          if (type === "input") {
+            assertSafeInput(index);
+            if (action.text === void 0) {
+              throw new Error(`Batch action ${actionIndex + 1} requires text.`);
+            }
+            return { type, index, element, text: String(action.text) };
+          }
+          if (type === "select") {
+            const optionText = String(action.optionText || "").trim();
+            if (!optionText) throw new Error(`Batch action ${actionIndex + 1} requires optionText.`);
+            if (element.tagName !== "SELECT" || !Array.from(element.options).some(
+              (option) => option.textContent?.trim() === optionText
+            )) {
+              throw new Error(`Batch action ${actionIndex + 1} could not resolve option "${optionText}".`);
+            }
+            return { type, index, element, optionText };
+          }
+          throw new Error(`Batch action ${actionIndex + 1} has unsupported type "${type}".`);
+        });
+        return withVisualAction(async (_activeController, signal2) => {
+          const results = [];
+          let failedAt = null;
+          for (const [actionIndex, action] of preparedActions.entries()) {
+            try {
+              if (!action.element.isConnected) {
+                throw new Error("The page replaced this control while the batch was running.");
+              }
+              if (action.type === "click") {
+                const currentState = selectedControlState(action.element);
+                if (action.desiredState !== null && currentState === action.desiredState) {
+                  results.push({ action: actionIndex + 1, index: action.index, status: "skipped", reason: "already_in_desired_state" });
+                  continue;
+                }
+                instantClickElement(action.element);
+              } else if (action.type === "input") {
+                await typeTextGradually(action.element, action.text, 0, signal2);
+              } else {
+                instantSelectOption(action.element, action.optionText);
+              }
+              results.push({ action: actionIndex + 1, index: action.index, status: "executed" });
+              await Promise.resolve();
+            } catch (error) {
+              failedAt = actionIndex + 1;
+              results.push({
+                action: actionIndex + 1,
+                index: action.index,
+                status: "failed",
+                error: error instanceof Error ? error.message : String(error)
+              });
+              break;
+            }
+          }
+          const executedActionCount = results.filter((result2) => result2.status === "executed").length;
+          const skippedActionCount = results.filter((result2) => result2.status === "skipped").length;
+          return {
+            success: true,
+            completed: failedAt === null,
+            requestedActionCount: actions.length,
+            executedActionCount,
+            skippedActionCount,
+            failedAt,
+            results,
+            nextPageStateQuery: String(args.verificationQuery || "").trim().slice(0, 500),
+            requiresPageVerification: failedAt !== null,
+            message: failedAt === null ? `Completed ${executedActionCount} Fast mode action(s); skipped ${skippedActionCount} already-satisfied action(s).` : `Fast mode stopped at action ${failedAt} after ${executedActionCount} successful action(s).`
+          };
+        });
       }
       if (tool === "browser_scroll") {
         if (!runtime.stateIndexed) {
@@ -5211,10 +5483,11 @@ ${clippedAnchor.content}`);
         if (position !== void 0 && (!Number.isFinite(position) || position < 0 || position > 1)) {
           throw new Error("browser_scroll position must be a number from 0 (top) to 1 (bottom).");
         }
-        if (!text && position === void 0 && args.direction !== "up" && args.direction !== "down") {
-          throw new Error("browser_scroll requires text, direction=up/down, or an absolute position from 0 to 1.");
+        const allowedDirections = /* @__PURE__ */ new Set(["up", "down", "left", "right"]);
+        if (!text && position === void 0 && !allowedDirections.has(args.direction)) {
+          throw new Error("browser_scroll requires text, direction=up/down/left/right, or an absolute position from 0 to 1.");
         }
-        const direction = args.direction === "up" ? "up" : "down";
+        const direction = allowedDirections.has(args.direction) ? args.direction : "down";
         const pages = Math.min(3, Math.max(0.25, Number(args.pages) || 0.8));
         const index = args.index === void 0 ? void 0 : requireIndex(args);
         if (text) {
@@ -5251,6 +5524,9 @@ ${clippedAnchor.content}`);
   var applyVisualPreferences2;
   var requireIndex2;
   var indexedElement2;
+  var instantClickElement2;
+  var instantSelectOption2;
+  var selectedControlState2;
   var collectFileInputs2;
   var isFileInput2;
   var isFileUploadTrigger2;

@@ -216,6 +216,9 @@ body.is-mcp-connector-modal-open { overflow: hidden; }
 .settings-column .compact-card h2 { font-size: 14px; }
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
 .setting-row p { margin: 3px 0 0; }
+.setting-row.is-disabled { opacity: .55; }
+.visuals-card .setting-row + .setting-row { margin-top: 13px; border-top: 1px solid var(--line); padding-top: 13px; }
+.fast-mode-setting .toggle-switch input:checked + span { background: #e39132; }
 .setting-row p[data-state="granted"] { color: var(--mint); }
 .setting-row p[data-state="denied"] { color: var(--danger); }
 .toggle-switch { position: relative; flex: 0 0 auto; width: 44px; height: 25px; cursor: pointer; }

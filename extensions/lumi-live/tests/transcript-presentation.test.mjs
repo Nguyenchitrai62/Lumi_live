@@ -26,7 +26,7 @@ import * as uiConfig from "../core/ui-config.js";
 
 test("central UI config contains runtime and visible-behavior tuning values", () => {
   assert.equal(DEFAULT_THINKING_LEVEL, "low");
-  assert.equal(DEFAULT_AGENT_MAX_STEPS, 24);
+  assert.equal(DEFAULT_AGENT_MAX_STEPS, 100);
   assert.equal(DEFAULT_IDENTICAL_STATE_ACTION_LIMIT, 2);
   assert.equal(DEFAULT_COMPLETION_RECOVERY_LIMIT, 2);
   assert.equal(TASK_AUTO_FOLLOW_BOTTOM_TOLERANCE_PX, 1);

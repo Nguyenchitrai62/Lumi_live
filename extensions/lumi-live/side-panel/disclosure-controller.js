@@ -4,6 +4,10 @@ function prefersReducedMotion() {
   return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
 }
 
+function isFastMode() {
+  return document.documentElement.dataset.fastMode === "true";
+}
+
 export function attachAnimatedDisclosure({
   root,
   summary,
@@ -41,7 +45,7 @@ export function attachAnimatedDisclosure({
     summary.setAttribute("aria-expanded", String(nextExpanded));
     onExpandedChange(nextExpanded);
 
-    if (!animate || prefersReducedMotion() || typeof root.animate !== "function") {
+    if (!animate || isFastMode() || prefersReducedMotion() || typeof root.animate !== "function") {
       root.open = nextExpanded;
       finish(nextExpanded);
       return;

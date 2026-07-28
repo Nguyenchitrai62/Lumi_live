@@ -11,6 +11,12 @@ import {
 const SCROLL_EFFECT_HOST_ID = "lumi-page-agent-scroll-effect";
 
 function createScrollEffect(direction) {
+  const directionLabels = {
+    up: "Scrolling up",
+    down: "Scrolling down",
+    left: "Scrolling left",
+    right: "Scrolling right",
+  };
   document.getElementById(SCROLL_EFFECT_HOST_ID)?.remove();
   const host = document.createElement("div");
   host.id = SCROLL_EFFECT_HOST_ID;
@@ -25,6 +31,8 @@ function createScrollEffect(direction) {
       .motion { position:relative; width:30px; height:30px; display:grid; place-items:center; overflow:hidden; border-radius:50%; color:#d7f4ff; background:rgba(255,255,255,.13); }
       .arrow { width:8px; height:8px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(45deg) translate(-1px,-1px); animation:lumi-scroll-arrow ${PAGE_SCROLL_ARROW_PULSE_DURATION_MS}ms ease-in-out infinite; }
       :host([data-direction="up"]) .arrow { transform:rotate(225deg) translate(-1px,-1px); animation-name:lumi-scroll-arrow-up; }
+      :host([data-direction="left"]) .arrow { transform:rotate(135deg); animation-name:none; }
+      :host([data-direction="right"]) .arrow { transform:rotate(315deg); animation-name:none; }
       .copy { display:grid; gap:3px; min-width:76px; font:700 10px/1.1 "Segoe UI",sans-serif; letter-spacing:.02em; }
       .copy small { color:rgba(225,245,255,.72); font:800 7px/1 "Segoe UI",sans-serif; letter-spacing:.14em; text-transform:uppercase; }
       .track { grid-column:1/-1; height:2px; overflow:hidden; border-radius:2px; background:rgba(255,255,255,.17); }
@@ -39,7 +47,7 @@ function createScrollEffect(direction) {
     <div class="frame"></div>
     <div class="hud">
       <span class="motion" aria-hidden="true"><span class="arrow"></span></span>
-      <span class="copy"><small>PAGE MOTION</small><span>${direction === "up" ? "Scrolling up" : "Scrolling down"}</span></span>
+      <span class="copy"><small>PAGE MOTION</small><span>${directionLabels[direction] || directionLabels.down}</span></span>
       <span class="track"></span>
     </div>`;
   (document.documentElement || document.body).append(host);
@@ -58,19 +66,23 @@ function createScrollEffect(direction) {
   };
 }
 
-function isScrollableElement(element, requireLargeViewport = false) {
+function isScrollableElement(element, axis = "vertical", requireLargeViewport = false) {
   if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
   const style = getComputedStyle(element);
-  const allowsScroll = /(auto|scroll|overlay)/.test(style.overflowY);
-  const isLargeEnough = !requireLargeViewport || element.clientHeight >= window.innerHeight * 0.5;
-  return allowsScroll && isLargeEnough && element.scrollHeight > element.clientHeight;
+  const horizontal = axis === "horizontal";
+  const allowsScroll = /(auto|scroll|overlay)/.test(horizontal ? style.overflowX : style.overflowY);
+  const viewportSize = horizontal ? window.innerWidth : window.innerHeight;
+  const clientSize = horizontal ? element.clientWidth : element.clientHeight;
+  const scrollSize = horizontal ? element.scrollWidth : element.scrollHeight;
+  const isLargeEnough = !requireLargeViewport || clientSize >= viewportSize * 0.5;
+  return allowsScroll && isLargeEnough && scrollSize > clientSize;
 }
 
-function findVerticalScroller(indexedElement) {
+function findScroller(indexedElement, axis = "vertical") {
   if (indexedElement) {
     let current = indexedElement;
     for (let attempt = 0; current && attempt < 10; attempt += 1) {
-      if (isScrollableElement(current)) return { element: current, targeted: true };
+      if (isScrollableElement(current, axis)) return { element: current, targeted: true };
       if (current === document.body || current === document.documentElement) break;
       current = current.parentElement;
     }
@@ -78,12 +90,12 @@ function findVerticalScroller(indexedElement) {
   }
 
   let current = document.activeElement;
-  while (current && current !== document.body && !isScrollableElement(current, true)) {
+  while (current && current !== document.body && !isScrollableElement(current, axis, true)) {
     current = current.parentElement;
   }
-  const element = isScrollableElement(current, true)
+  const element = isScrollableElement(current, axis, true)
     ? current
-    : Array.from(document.querySelectorAll("*")).find((candidate) => isScrollableElement(candidate, true))
+    : Array.from(document.querySelectorAll("*")).find((candidate) => isScrollableElement(candidate, axis, true))
       || document.scrollingElement
       || document.documentElement;
   return { element, targeted: false };
@@ -101,10 +113,11 @@ function easeInOutCubic(progress) {
     : 1 - ((-2 * progress + 2) ** 3) / 2;
 }
 
-async function animateScrollTop(element, targetTop, durationMs, effect, signal) {
+async function animateScrollOffset(element, targetOffset, axis, durationMs, effect, signal) {
   const startedAt = performance.now();
-  const startTop = element.scrollTop;
-  const distance = targetTop - startTop;
+  const property = axis === "horizontal" ? "scrollLeft" : "scrollTop";
+  const startOffset = element[property];
+  const distance = targetOffset - startOffset;
   await new Promise((resolve, reject) => {
     let frameId = null;
     const abort = () => {
@@ -117,7 +130,7 @@ async function animateScrollTop(element, targetTop, durationMs, effect, signal) 
         return;
       }
       const progress = Math.min(1, (now - startedAt) / durationMs);
-      element.scrollTop = startTop + distance * easeInOutCubic(progress);
+      element[property] = startOffset + distance * easeInOutCubic(progress);
       effect.update(progress);
       if (progress >= 1) {
         signal?.removeEventListener("abort", abort);
@@ -239,7 +252,9 @@ function collectScrollEntries(element, alignment) {
   const ownerDocument = element.ownerDocument || document;
   const scrollers = [];
   for (let current = element.parentElement; current; current = current.parentElement) {
-    if (isScrollableElement(current)) scrollers.push(current);
+    if (isScrollableElement(current, "vertical") || isScrollableElement(current, "horizontal")) {
+      scrollers.push(current);
+    }
   }
   const documentScroller = ownerDocument.scrollingElement || ownerDocument.documentElement;
   if (documentScroller && !scrollers.includes(documentScroller)) scrollers.push(documentScroller);
@@ -248,12 +263,16 @@ function collectScrollEntries(element, alignment) {
     startTop: scroller.scrollTop,
     startLeft: scroller.scrollLeft,
     targetTop: scroller.scrollTop,
+    targetLeft: scroller.scrollLeft,
     previousScrollBehavior: scroller.style.scrollBehavior,
   }));
   try {
     for (const entry of entries) entry.element.style.scrollBehavior = "auto";
     element.scrollIntoView({ behavior: "auto", block: alignment, inline: "nearest" });
-    for (const entry of entries) entry.targetTop = entry.element.scrollTop;
+    for (const entry of entries) {
+      entry.targetTop = entry.element.scrollTop;
+      entry.targetLeft = entry.element.scrollLeft;
+    }
   } finally {
     for (const entry of entries) {
       entry.element.scrollTop = entry.startTop;
@@ -284,6 +303,8 @@ async function animateScrollEntries(entries, durationMs, effect, signal) {
       for (const entry of entries) {
         entry.element.scrollTop = entry.startTop
           + (entry.targetTop - entry.startTop) * easedProgress;
+        entry.element.scrollLeft = entry.startLeft
+          + (entry.targetLeft - entry.startLeft) * easedProgress;
       }
       effect.update(progress);
       if (progress >= 1) {
@@ -336,11 +357,36 @@ export async function scrollToTextGradually({
   }
   const entries = collectScrollEntries(match.element, alignment);
   const motionEntry = entries.reduce((largest, entry) => (
-    Math.abs(entry.targetTop - entry.startTop) > Math.abs(largest.targetTop - largest.startTop)
+    Math.max(
+      Math.abs(entry.targetTop - entry.startTop),
+      Math.abs(entry.targetLeft - entry.startLeft),
+    ) > Math.max(
+      Math.abs(largest.targetTop - largest.startTop),
+      Math.abs(largest.targetLeft - largest.startLeft),
+    )
       ? entry
       : largest
   ), entries[0]);
-  const direction = motionEntry && motionEntry.targetTop < motionEntry.startTop ? "up" : "down";
+  const horizontalMotion = motionEntry
+    && Math.abs(motionEntry.targetLeft - motionEntry.startLeft)
+      > Math.abs(motionEntry.targetTop - motionEntry.startTop);
+  const direction = horizontalMotion
+    ? motionEntry.targetLeft < motionEntry.startLeft ? "left" : "right"
+    : motionEntry && motionEntry.targetTop < motionEntry.startTop ? "up" : "down";
+  if (Number(durationMs) <= 0) {
+    for (const entry of entries) {
+      entry.element.scrollTop = entry.targetTop;
+      entry.element.scrollLeft = entry.targetLeft;
+    }
+    return {
+      success: true,
+      message: `Scrolled instantly to matching content "${match.matchedText.slice(0, 200)}" in Fast mode.`,
+      matchedText: match.matchedText,
+      occurrence,
+      matchCount: match.matchCount,
+      alignment,
+    };
+  }
   const effect = createScrollEffect(direction);
   try {
     await animateScrollEntries(entries, Math.max(1, durationMs), effect, signal);
@@ -361,7 +407,7 @@ export async function scrollToTextGradually({
 
 /**
  * @param {{
- *   direction?: "up" | "down",
+ *   direction?: "up" | "down" | "left" | "right",
  *   pages?: number,
  *   position?: number,
  *   indexedElement?: HTMLElement,
@@ -377,7 +423,9 @@ export async function scrollPageGradually({
   durationMs = PAGE_SCROLL_DURATION_MS,
   signal,
 } = {}) {
-  const scrollTarget = findVerticalScroller(indexedElement);
+  const horizontal = direction === "left" || direction === "right";
+  const axis = horizontal ? "horizontal" : "vertical";
+  const scrollTarget = findScroller(indexedElement, axis);
   if (!scrollTarget) {
     const effect = createScrollEffect(direction);
     effect.update(1);
@@ -386,37 +434,68 @@ export async function scrollPageGradually({
   }
 
   const { element, targeted } = scrollTarget;
-  const startTop = element.scrollTop;
-  const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
-  const viewportDistance = targeted ? window.innerHeight / 3 : window.innerHeight;
-  const signedDistance = viewportDistance * pages * (direction === "up" ? -1 : 1);
-  const targetTop = Number.isFinite(position)
-    ? maxTop * position
-    : Math.max(0, Math.min(maxTop, startTop + signedDistance));
-  const effect = createScrollEffect(targetTop < startTop ? "up" : "down");
+  const property = horizontal ? "scrollLeft" : "scrollTop";
+  const startOffset = element[property];
+  const maxOffset = Math.max(
+    0,
+    horizontal
+      ? element.scrollWidth - element.clientWidth
+      : element.scrollHeight - element.clientHeight,
+  );
+  const viewportSize = horizontal ? window.innerWidth : window.innerHeight;
+  const viewportDistance = targeted ? viewportSize / 3 : viewportSize;
+  const negativeDirection = direction === "up" || direction === "left";
+  const signedDistance = viewportDistance * pages * (negativeDirection ? -1 : 1);
+  const targetOffset = Number.isFinite(position)
+    ? maxOffset * position
+    : Math.max(0, Math.min(maxOffset, startOffset + signedDistance));
+  if (Number(durationMs) <= 0) {
+    element[property] = targetOffset;
+    const scrolled = Math.round(element[property] - startOffset);
+    return {
+      success: true,
+      message: Math.abs(scrolled) < 1
+        ? "The target was already at the requested scroll position."
+        : `Scrolled ${targeted ? `container (${element.tagName})` : "page"} ${axis} by ${scrolled}px instantly in Fast mode.`,
+      axis,
+      position: maxOffset > 0 ? element[property] / maxOffset : 0,
+    };
+  }
+  const resolvedDirection = horizontal
+    ? targetOffset < startOffset ? "left" : "right"
+    : targetOffset < startOffset ? "up" : "down";
+  const effect = createScrollEffect(resolvedDirection);
   try {
-    await animateScrollTop(element, targetTop, Math.max(1, durationMs), effect, signal);
+    await animateScrollOffset(
+      element,
+      targetOffset,
+      axis,
+      Math.max(1, durationMs),
+      effect,
+      signal,
+    );
     await effect.finish();
   } catch (error) {
     effect.remove();
     throw error;
   }
 
-  const scrolled = Math.round(element.scrollTop - startTop);
+  const scrolled = Math.round(element[property] - startOffset);
   if (Math.abs(scrolled) < 1) {
     return {
       success: true,
-      message: direction === "down"
-        ? "Already at the bottom; the page cannot scroll down further."
-        : "Already at the top; the page cannot scroll up further.",
+      message: `Already at the ${direction === "down" ? "bottom" : direction === "up" ? "top" : direction === "right" ? "right edge" : "left edge"}; the page cannot scroll ${direction} further.`,
     };
   }
   const location = targeted ? `container (${element.tagName})` : "page";
-  const edge = element.scrollTop <= 1
-    ? " Reached the top."
-    : element.scrollTop >= maxTop - 1 ? " Reached the bottom." : "";
+  const edge = element[property] <= 1
+    ? ` Reached the ${horizontal ? "left edge" : "top"}.`
+    : element[property] >= maxOffset - 1
+      ? ` Reached the ${horizontal ? "right edge" : "bottom"}.`
+      : "";
   return {
     success: true,
-    message: `Scrolled ${location} by ${scrolled}px over ${durationMs} ms.${edge}`,
+    message: `Scrolled ${location} ${axis} by ${scrolled}px over ${durationMs} ms.${edge}`,
+    axis,
   };
 }

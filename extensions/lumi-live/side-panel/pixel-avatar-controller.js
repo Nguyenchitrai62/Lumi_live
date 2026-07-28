@@ -61,6 +61,7 @@ export function createAvatarController({
   manifestPath = DEFAULT_MANIFEST_PATH,
 }) {
   let mode = "pixel";
+  let enabled = true;
   let modeRequestId = 0;
   let manifest = null;
   let ready = false;
@@ -164,6 +165,7 @@ export function createAvatarController({
   }
 
   function beginState(nextState) {
+    if (!enabled) return;
     const animation = manifest?.animations?.[nextState] || manifest?.animations?.idle;
     if (!animation) return;
     if (animationId !== null) cancelAnimationFrame(animationId);
@@ -212,6 +214,10 @@ export function createAvatarController({
   }
 
   function playState(nextState, { restart = false } = {}) {
+    if (!enabled) {
+      state = nextState;
+      return;
+    }
     if (mode !== "pixel") {
       state = nextState;
       return;
@@ -268,6 +274,7 @@ export function createAvatarController({
   }
 
   function syncState() {
+    if (!enabled) return;
     if (mode === "pixel") transitionState(ambientState());
     else elements.avatarMood.textContent = sessionMoodLabel();
   }
@@ -275,7 +282,7 @@ export function createAvatarController({
   async function applyMode(requestedMode) {
     const requestId = ++modeRequestId;
     let nextMode = normalizeAvatarMode(requestedMode);
-    if (nextMode === "pixel") {
+    if (nextMode === "pixel" && enabled) {
       try {
         await loadPixelAvatar();
       } catch (error) {
@@ -297,7 +304,12 @@ export function createAvatarController({
     elements.pixelAvatar.hidden = !pixelEnabled;
     elements.pixelAvatar.setAttribute("aria-hidden", String(!pixelEnabled));
     elements.avatarCard.classList.toggle("pixel-mode", pixelEnabled);
-    if (pixelEnabled) syncState();
+    if (!enabled) {
+      clearTimeout(stateTimeoutId);
+      stateTimeoutId = null;
+      timedState = null;
+      stopAnimation();
+    } else if (pixelEnabled) syncState();
     else {
       clearTimeout(stateTimeoutId);
       stateTimeoutId = null;
@@ -311,6 +323,20 @@ export function createAvatarController({
     return state === nextState || pendingState?.state === nextState;
   }
 
+  async function setEnabled(nextEnabled) {
+    const shouldEnable = nextEnabled === true;
+    if (enabled === shouldEnable) return;
+    enabled = shouldEnable;
+    if (!enabled) {
+      clearTimeout(stateTimeoutId);
+      stateTimeoutId = null;
+      timedState = null;
+      stopAnimation();
+      return;
+    }
+    await applyMode(mode);
+  }
+
   function dispose() {
     clearTimeout(stateTimeoutId);
     stateTimeoutId = null;
@@ -322,6 +348,7 @@ export function createAvatarController({
     applyMode,
     dispose,
     isStateActive,
+    setEnabled,
     syncState,
     transitionState,
     get mode() {

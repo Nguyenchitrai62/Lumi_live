@@ -10,6 +10,7 @@ const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
 const VOICE_STORAGE_KEY = STORAGE_KEYS.voice;
 const ELEMENT_HIGHLIGHTS_STORAGE_KEY = STORAGE_KEYS.elementHighlights;
+const FAST_MODE_STORAGE_KEY = STORAGE_KEYS.fastMode;
 const MCP_DISABLED_TOOLS_STORAGE_KEY = STORAGE_KEYS.mcpDisabledTools;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
 const elements = {
@@ -23,6 +24,7 @@ const elements = {
   microphonePermissionStatus: document.querySelector("#microphonePermissionStatus"),
   enableMicrophoneButton: document.querySelector("#enableMicrophoneButton"),
   showElementHighlightsInput: document.querySelector("#showElementHighlightsInput"),
+  fastModeInput: document.querySelector("#fastModeInput"),
   showAddMcpButton: document.querySelector("#showAddMcpButton"),
   mcpAddModal: document.querySelector("#mcpAddModal"),
   cancelAddMcpButton: document.querySelector("#cancelAddMcpButton"),
@@ -124,7 +126,27 @@ async function saveSettings() {
 
 async function saveVisualPreference() {
   const showElementHighlights = elements.showElementHighlightsInput.checked;
-  await sendRuntime("set_visual_preferences", { showElementHighlights });
+  const preferences = await sendRuntime("set_visual_preferences", { showElementHighlights });
+  applyVisualPreferenceControls(preferences);
+}
+
+function applyVisualPreferenceControls(preferences = {}) {
+  const fastMode = preferences.fastMode === true;
+  elements.fastModeInput.checked = fastMode;
+  elements.showElementHighlightsInput.checked = preferences.showElementHighlights === true;
+  elements.showElementHighlightsInput.disabled = fastMode;
+  elements.showElementHighlightsInput.closest(".setting-row")?.classList.toggle("is-disabled", fastMode);
+}
+
+async function saveFastModePreference() {
+  const preferences = await sendRuntime("set_visual_preferences", {
+    fastMode: elements.fastModeInput.checked,
+  });
+  applyVisualPreferenceControls(preferences);
+  elements.saveNote.dataset.state = "saved";
+  elements.saveNote.textContent = preferences.fastMode
+    ? `${preferences.workspace?.title || "Fast workspace"} enabled. Background tab control and bulk browser actions are ready.`
+    : "Fast mode disabled. Normal active-tab following and standard visual feedback are restored.";
 }
 
 elements.toggleKeyButton.addEventListener("click", () => {
@@ -150,6 +172,12 @@ elements.showElementHighlightsInput.addEventListener("change", () => {
     elements.saveNote.textContent = error instanceof Error ? error.message : "Could not update PageAgent guides.";
   });
 });
+elements.fastModeInput.addEventListener("change", () => {
+  void saveFastModePreference().catch((error) => {
+    elements.saveNote.dataset.state = "error";
+    elements.saveNote.textContent = error instanceof Error ? error.message : "Could not update Fast mode.";
+  });
+});
 window.addEventListener("focus", () => void refreshMicrophonePermission());
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void refreshMicrophonePermission();
@@ -162,11 +190,15 @@ async function initialize() {
     API_KEY_STORAGE_KEY,
     VOICE_STORAGE_KEY,
     ELEMENT_HIGHLIGHTS_STORAGE_KEY,
+    FAST_MODE_STORAGE_KEY,
   ]);
   elements.apiKeyInput.value = String(stored[API_KEY_STORAGE_KEY] || "");
   elements.voiceInput.value = String(stored[VOICE_STORAGE_KEY] || DEFAULT_VOICE_NAME);
   voicePreview.updateVoiceProfiles();
-  elements.showElementHighlightsInput.checked = stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true;
+  applyVisualPreferenceControls({
+    fastMode: stored[FAST_MODE_STORAGE_KEY] === true,
+    showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
+  });
   elements.connectMcpButton.disabled = true;
   await Promise.all([
     refreshMicrophonePermission(),
@@ -176,5 +208,17 @@ async function initialize() {
     }),
   ]);
 }
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local"
+    || (!changes[FAST_MODE_STORAGE_KEY] && !changes[ELEMENT_HIGHLIGHTS_STORAGE_KEY])) return;
+  void chrome.storage.local.get([
+    FAST_MODE_STORAGE_KEY,
+    ELEMENT_HIGHLIGHTS_STORAGE_KEY,
+  ]).then((stored) => applyVisualPreferenceControls({
+    fastMode: stored[FAST_MODE_STORAGE_KEY] === true,
+    showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
+  }));
+});
 
 void initialize();

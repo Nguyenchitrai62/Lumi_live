@@ -212,6 +212,7 @@ test("captures visual context only when the agent requests it and renders rich c
   const worker = await readFile(new URL("background/index.js", extensionRoot), "utf8");
   const sessionConfig = await readFile(new URL("live/session-config.js", extensionRoot), "utf8");
   const controller = await readFile(new URL("side-panel/index.js", extensionRoot), "utf8");
+  const browserToolRunner = await readFile(new URL("side-panel/browser-tool-runner.js", extensionRoot), "utf8");
   const audioController = await readFile(new URL("side-panel/panel-audio-controller.js", extensionRoot), "utf8");
   const markdown = await readFile(new URL("side-panel/markdown-renderer.js", extensionRoot), "utf8");
   const styles = await readFile(new URL("side-panel/styles.css", extensionRoot), "utf8");
@@ -243,7 +244,8 @@ test("captures visual context only when the agent requests it and renders rich c
   assert.match(worker, /describeTabCaptureError/);
   assert.match(controller, /captureCurrentTabFrame\(\)/);
   assert.match(controller, /chrome\.windows\.getCurrent\(\)/);
-  assert.match(controller, /tool === "browser_inspect_screenshot"[^]*captureAndSendVisualInspectionFrame\(\)/);
+  assert.match(controller, /inspectScreenshot:\s*captureAndSendVisualInspectionFrame/);
+  assert.match(browserToolRunner, /tool === "browser_inspect_screenshot"[^]*await inspectScreenshot\(\)/);
   assert.match(controller, /addBrowserWorkflowContext\(result/);
   assert.match(controller, /activeTurnUserRequest = modelText/);
   assert.doesNotMatch(controller, /AUTOMATIC_TAB_CAPTURE_ORIGINS|screenshotAccessRequest/);
@@ -256,7 +258,8 @@ test("captures visual context only when the agent requests it and renders rich c
   assert.match(controller, /if \(!videoSent \|\| !textSent\)[^]*failedSocket\.close\(4002/);
   assert.doesNotMatch(controller, /onUserSpeechStart:[^]*captureAndSend/);
   assert.match(audioController, /onUserSpeechStart\?\.\(\)/);
-  assert.match(controller, /createCapturedTabMessage\(result\)/);
+  assert.match(controller, /showCapturedScreenshot:\s*createCapturedTabMessage/);
+  assert.match(browserToolRunner, /showCapturedScreenshot\(result\)/);
   assert.match(controller, /renderMarkdown\(message\.content,\s*message\.text\)/);
   assert.match(controller, /elements\.transcript\.addEventListener\("click"[\s\S]+chrome\.tabs\.create\(\{\s*url,\s*active:\s*true\s*\}\)/);
   assert.match(markdown, /function renderTable/);

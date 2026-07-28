@@ -10,6 +10,8 @@ export const STORAGE_KEYS = Object.freeze({
   avatarMode: "lumiAvatarMode",
   capturedTabAssets: "lumiCapturedTabAssets",
   elementHighlights: "lumiShowElementHighlights",
+  fastMode: "lumiFastMode",
+  fastWorkspaceGroupId: "lumiFastWorkspaceGroupId",
   fallingPetals: "lumiFallingPetals",
   legacyMcpUrl: "lumiMcpServerUrl",
   mcpDisabledTools: "lumiDisabledMcpTools",

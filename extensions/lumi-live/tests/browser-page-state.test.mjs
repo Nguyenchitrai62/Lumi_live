@@ -21,9 +21,11 @@ test("browser page state supports targeted queries and dynamic waiting", () => {
     ({ name }) => name === "browser_find_semantic_context",
   );
   const waitTool = BROWSER_TOOLS.find(({ name }) => name === "browser_wait_for_page_state");
+  const scrollTool = BROWSER_TOOLS.find(({ name }) => name === "browser_scroll");
   assert.ok(tool);
   assert.ok(semanticTool);
   assert.ok(waitTool);
+  assert.ok(scrollTool);
   assert.equal(tool.parameters.properties.query.type, "STRING");
   assert.equal(semanticTool.parameters.properties.targets.type, "ARRAY");
   assert.equal(semanticTool.parameters.properties.targets.maxItems, 4);
@@ -34,9 +36,11 @@ test("browser page state supports targeted queries and dynamic waiting", () => {
   assert.deepEqual(semanticTool.parameters.required, ["targets"]);
   assert.deepEqual(waitTool.parameters.properties.condition.enum, ["present", "absent"]);
   assert.deepEqual(waitTool.parameters.required, ["query"]);
+  assert.deepEqual(scrollTool.parameters.properties.direction.enum, ["up", "down", "left", "right"]);
   assert.match(tool.description, /without losing its element indices to truncation/i);
   assert.match(semanticTool.description, /typo-tolerant matching/i);
   assert.match(semanticTool.description, /table headers/i);
+  assert.match(semanticTool.description, /off-viewport data-lumi-index values are immediately actionable/i);
   const instruction = buildSessionInstruction();
   assert.match(instruction, /complete ordered goal as an internal checklist/i);
   assert.match(instruction, /same named item container/i);
@@ -48,6 +52,8 @@ test("browser page state supports targeted queries and dynamic waiting", () => {
   assert.match(instruction, /open Shadow DOM/i);
   assert.match(instruction, /same-origin frames/i);
   assert.match(instruction, /do not scroll again/i);
+  assert.match(instruction, /complete rendered DOM/i);
+  assert.match(instruction, /supports up, down, left, and right/i);
   assert.doesNotMatch(instruction, /Hawee/i);
 });
 
@@ -128,4 +134,6 @@ test("semantic resolver traversal is not limited to the first fixed number of DO
   assert.match(source, /REPEATED_CONTAINER_SELECTOR/);
   assert.match(source, /GROUP_CONTAINER_SELECTOR/);
   assert.doesNotMatch(source, /MAX_CANDIDATE_ELEMENTS/);
+  assert.match(source, /accessible label\/description relationships|aria-labelledby/);
+  assert.match(source, /Fast full-page DOM index is active/);
 });

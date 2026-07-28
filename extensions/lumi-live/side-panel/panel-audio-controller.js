@@ -33,6 +33,7 @@ export function createPanelAudioController({
   let nextPlaybackTime = 0;
   let mouthAnimationId = null;
   let blinkTimeoutId = null;
+  let visualAnimationsEnabled = true;
   let userSpeechActive = false;
   let lastUserSpeechAt = 0;
   let smoothedInputLevel = 0;
@@ -153,6 +154,8 @@ export function createPanelAudioController({
 
   function scheduleBlink() {
     clearTimeout(blinkTimeoutId);
+    blinkTimeoutId = null;
+    if (!visualAnimationsEnabled) return;
     blinkTimeoutId = setTimeout(() => {
       setEyeFrame("half");
       blinkTimeoutId = setTimeout(() => {
@@ -169,9 +172,15 @@ export function createPanelAudioController({
   }
 
   function animateMouth() {
+    if (!visualAnimationsEnabled || mouthAnimationId !== null) return;
     const levels = new Uint8Array(128);
     let smoothed = 0;
     const draw = () => {
+      if (!visualAnimationsEnabled) {
+        mouthAnimationId = null;
+        setMouthFrame(0);
+        return;
+      }
       let frame = 0;
       if (analyser && audioContext && (
         playbackSources.size > 0
@@ -229,8 +238,25 @@ export function createPanelAudioController({
   }
 
   function startAnimations() {
+    if (!visualAnimationsEnabled) return;
     scheduleBlink();
     animateMouth();
+  }
+
+  function setVisualAnimationsEnabled(enabled) {
+    const nextEnabled = enabled === true;
+    if (visualAnimationsEnabled === nextEnabled) return;
+    visualAnimationsEnabled = nextEnabled;
+    if (visualAnimationsEnabled) {
+      startAnimations();
+      return;
+    }
+    if (mouthAnimationId !== null) cancelAnimationFrame(mouthAnimationId);
+    mouthAnimationId = null;
+    clearTimeout(blinkTimeoutId);
+    blinkTimeoutId = null;
+    setMouthFrame(0);
+    setEyeFrame("open");
   }
 
   function isUserSpeechActive() {
@@ -250,6 +276,7 @@ export function createPanelAudioController({
     playPcmChunk,
     prepareOutput,
     requestMicrophone,
+    setVisualAnimationsEnabled,
     startAnimations,
     startMicrophone,
     stopMicrophone,

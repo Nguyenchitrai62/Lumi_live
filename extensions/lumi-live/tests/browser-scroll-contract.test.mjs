@@ -18,7 +18,9 @@ test("browser_scroll exposes content and exact normalized targets", async () => 
   const visualEffects = await readFile(new URL("../browser/effects/scroll.js", import.meta.url), "utf8");
   const studioController = await readFile(new URL("../../../app/lib/live/studio-page-agent.ts", import.meta.url), "utf8");
   assert.match(extensionController, /position,\s*indexedElement:/);
-  assert.match(visualEffects, /maxTop \* position/);
+  assert.match(visualEffects, /maxOffset \* position/);
+  assert.match(visualEffects, /direction === "left" \|\| direction === "right"/);
+  assert.match(visualEffects, /element\.scrollWidth - element\.clientWidth/);
   assert.match(extensionController, /scrollToTextGradually/);
   assert.match(visualEffects, /export async function scrollToTextGradually/);
   assert.match(visualEffects, /element\.scrollIntoView\(\{ behavior: "auto", block: alignment/);
