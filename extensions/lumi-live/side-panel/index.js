@@ -271,6 +271,13 @@ const panelAudio = createPanelAudioController({
   onInputLevel: (level) => {
     syncMicrophoneLevel(level);
   },
+  onUserSpeechStart: () => {
+    void sendRuntime("prepare_browser_prompt").catch((error) => {
+      elements.statusLine.textContent = error instanceof Error
+        ? error.message
+        : "Lumi could not prepare the browser target for this voice request.";
+    });
+  },
   sendJson,
 });
 const sharedTabAudio = createSharedTabAudioController({
@@ -2572,6 +2579,17 @@ async function sendText(
   ) return false;
   textSendPending = true;
   syncMessageComposer();
+  let promptContext;
+  try {
+    promptContext = await sendRuntime("prepare_browser_prompt");
+  } catch (error) {
+    textSendPending = false;
+    elements.statusLine.textContent = error instanceof Error
+      ? error.message
+      : "Lumi could not prepare the browser target for this prompt.";
+    syncMessageComposer();
+    return false;
+  }
   const frame = selectedAttachment?.frame || null;
   textSendPending = false;
   if (!isGeminiTransportReady() || agentTurnActive || turnCancellationPending) {
@@ -2579,7 +2597,11 @@ async function sendText(
     return false;
   }
   const displayText = clean || `Image · ${selectedAttachment.name}`;
-  const modelText = clean || "Please inspect the attached image and respond with the most helpful relevant analysis.";
+  const userRequestText = clean || "Please inspect the attached image and respond with the most helpful relevant analysis.";
+  const targetTabId = Number(promptContext?.target?.tabId);
+  const modelText = promptContext?.mode === "fast"
+    ? `[Lumi runtime context — not part of the user's request] Fast mode is active. This turn is locked to workspace tabId ${Number.isInteger(targetTabId) ? targetTabId : "unknown"} inside the Lumi Fast group and must never read or operate on tabs outside that group. You may switch only among tabs returned from the workspace-only browser_list_tabs result, or open a necessary new tab with browser_open_tab so it joins the workspace. Use browser_set_selection or browser_batch_actions for large independent form edits.\n\n[User request]\n${userRequestText}`
+    : userRequestText;
   const videoSent = frame ? sendJson({ realtimeInput: { video: frame } }) : true;
   const textSent = videoSent && sendJson({ realtimeInput: { text: modelText } });
   if (!videoSent || !textSent) {
@@ -2598,7 +2620,7 @@ async function sendText(
     return false;
   }
 
-  activeTurnUserRequest = modelText;
+  activeTurnUserRequest = userRequestText;
   turnExecutionSequence += 1;
   if (suppressServerOutputUntilNextUserTurn) markFreshUserInputStarted();
   responseAudioGate.reset();
@@ -2609,7 +2631,7 @@ async function sendText(
   if (remember) {
     rememberConversationTurn(
       "user",
-      selectedAttachment ? `${modelText} [Attached image: ${selectedAttachment.name}]` : modelText,
+      selectedAttachment ? `${userRequestText} [Attached image: ${selectedAttachment.name}]` : userRequestText,
     );
   }
   avatarController.transitionState("thinking");

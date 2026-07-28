@@ -241,14 +241,14 @@ export const BROWSER_TOOLS = [
   },
   {
     name: "browser_batch_actions",
-    description: "Fast mode only: execute 1 to 100 independent click, text-input, or HTML-select edits from one fresh indexed page state in a single controller call. Use this for bulk checkbox/radio/switch selection and multi-field forms. Use desiredState=on/off for selectable controls so already-correct items are skipped instead of toggled. Keep navigation, submit, save, publish, delete, and other page-changing final actions in a separate browser_click so they can be verified. The same confirmation and secret-input safety rules apply to every action in the batch.",
+    description: "Fast mode only: execute 1 to 200 independent selection, text-input, or HTML-select edits from one fresh full-page indexed state in a single controller call. Use it for mixed multi-field forms. Selection clicks require desiredState=on/off, duplicate indices are rejected, and every action is checked locally after execution. For many controls sharing one target state, browser_set_selection is more compact. Keep navigation, submit, save, publish, delete, and other page-changing final actions in a separate browser_click so they can be verified. The same confirmation and secret-input safety rules apply to every action in the batch.",
     parameters: {
       type: "OBJECT",
       properties: {
         actions: {
           type: "ARRAY",
           minItems: 1,
-          maxItems: 100,
+          maxItems: 200,
           description: "Ordered independent form edits using indices from the same latest page state.",
           items: {
             type: "OBJECT",
@@ -257,7 +257,7 @@ export const BROWSER_TOOLS = [
               index: { type: "NUMBER", description: "Element index from the latest page state." },
               text: { type: "STRING", description: "Required for input actions." },
               optionText: { type: "STRING", description: "Required for select actions." },
-              desiredState: { type: "STRING", enum: ["on", "off"], description: "Optional idempotent target state for checkbox, radio, switch, pressed, or selected click controls." },
+              desiredState: { type: "STRING", enum: ["on", "off"], description: "Required idempotent target state for checkbox, radio, switch, pressed, or selected click controls." },
             },
             required: ["type", "index"],
           },
@@ -266,6 +266,26 @@ export const BROWSER_TOOLS = [
         verificationQuery: { type: "STRING", description: "Optional exact visible label, object name, or status used for the automatic post-batch page read." },
       },
       required: ["actions"],
+    },
+  },
+  {
+    name: "browser_set_selection",
+    description: "Fast mode only: set as many as 300 independently indexed checkboxes, switches, pressed controls, selected controls, or radios to one explicit state in one compact call. This is the preferred tool for selecting many permissions after one fresh full-page observation. It preflights every index, rejects duplicates and unsupported controls before changing anything, skips controls already in the requested state, and verifies every executed state locally. Native radios may be turned on but not directly turned off. Keep submit/save and controls that reveal later prerequisites separate.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        indices: {
+          type: "ARRAY",
+          minItems: 1,
+          maxItems: 300,
+          description: "Unique selection-control indices from the same latest full-page state.",
+          items: { type: "NUMBER" },
+        },
+        desiredState: { type: "STRING", enum: ["on", "off"], description: "Exact state to apply idempotently to every indexed control." },
+        confirmed: { type: "BOOLEAN", description: "True only when the applicable authorization rule is satisfied for every control in this exact bulk change." },
+        verificationQuery: { type: "STRING", description: "Optional exact label, object name, or status for the automatic post-action page read." },
+      },
+      required: ["indices", "desiredState"],
     },
   },
   {
@@ -286,7 +306,7 @@ export const BROWSER_TOOLS = [
   },
   {
     name: "browser_list_tabs",
-    description: "List all tabs in the current Chrome window and report whether each tab supports PageAgent control. Always call this immediately before browser_switch_tab and use only a tabId from this result.",
+    description: "List all tabs available to the current mode and report whether each supports PageAgent control. In Normal mode this lists the current Chrome window. In Fast mode it lists only tabs already inside the Lumi Fast workspace; tabs outside the group are intentionally hidden from the agent. Always call this immediately before browser_switch_tab and use only a tabId from this result.",
     parameters: { type: "OBJECT", properties: {} },
   },
   {
@@ -302,7 +322,7 @@ export const BROWSER_TOOLS = [
   },
   {
     name: "browser_switch_tab",
-    description: "Activate any existing Chrome tab immediately. The result reports whether PageAgent can control its content. The tabId must come from the latest browser_list_tabs result.",
+    description: "Activate any existing Chrome tab that is available to the current mode as the agent target. In Normal mode the tab becomes visibly active. In Fast mode the target must already belong to the Lumi Fast workspace and can remain in the background; outside tabs are rejected. The tabId must come from the latest browser_list_tabs result.",
     parameters: {
       type: "OBJECT",
       properties: {
@@ -321,6 +341,7 @@ export const BROWSER_UI_ACTION_TOOLS = new Set([
   "browser_upload_file",
   "browser_select_option",
   "browser_batch_actions",
+  "browser_set_selection",
   "browser_scroll",
   "browser_open_tab",
   "browser_switch_tab",
@@ -332,7 +353,7 @@ Your assistant name is Lumi. You live in and represent the product entity "Lumi 
 
 Ground searches about yourself in the literal English brand phrase "Lumi Live Chrome extension"; never translate, shorten, or paraphrase that brand phrase.
 
-In Normal mode, the controlled target automatically follows the user's currently active http, https, or file tab. Fast mode is intentionally separate: its target stays inside the named Lumi Fast Chrome tab group, remains controllable in the background when the user activates another tab, and browser_open_tab/browser_switch_tab move the agent target within that workspace without stealing focus. A file tab supports PageAgent only after the user enables Chrome's Allow access to file URLs setting for Lumi. The navigation tools browser_list_tabs and browser_switch_tab remain available from every active tab, including Chrome New Tab, chrome:// pages, extension pages, local files, and other pages whose content cannot be controlled; browser_open_tab accepts absolute http, https, and file URLs. Before opening or switching tabs, call browser_list_tabs. Reuse a matching tab with browser_switch_tab and call browser_open_tab only when no matching tab exists. In Normal mode, from a restricted active page browser_open_tab must open exactly https://www.google.com/ in a new active tab, reuse that same tab for the destination without leaving a spare Google tab, and never substitute another Google domain, search URL, or website. Fast mode skips that decorative transition and opens the destination inactive in its workspace. Never ask the user to switch away from an uncontrollable page when browser_open_tab or browser_switch_tab can advance the request. browser_click automatically verifies and follows a tab opened by the clicked element; in Fast mode that new tab joins the workspace and stays in the background. When a request includes opening or starting a YouTube video, perform the relevant browser_click without a spoken preamble. After any navigation or tab switch, obtain fresh page state before an indexed action.
+In Normal mode, the controlled target automatically follows the user's currently active http, https, or file tab. Fast mode is intentionally separate: when each user prompt arrives, Lumi locks that turn to the currently active tab inside the named Lumi Fast Chrome tab group, or the workspace's most recently selected target when the user is viewing a tab outside the group. Fast mode can read or operate only on tabs already inside that group. browser_list_tabs exposes only workspace members, browser_switch_tab rejects outside tabs instead of importing them, and browser_open_tab may create a necessary new inactive workspace tab when the request or workflow requires it. The locked target remains controllable in the background when the user activates another tab. A file tab supports PageAgent only after the user enables Chrome's Allow access to file URLs setting for Lumi. The navigation tools browser_list_tabs and browser_switch_tab remain available from every active tab, including Chrome New Tab, chrome:// pages, extension pages, local files, and other pages whose content cannot be controlled; browser_open_tab accepts absolute http, https, and file URLs. Before opening or switching tabs, call browser_list_tabs. Reuse a matching listed tab with browser_switch_tab and call browser_open_tab only when no matching workspace tab exists. In Normal mode, from a restricted active page browser_open_tab must open exactly https://www.google.com/ in a new active tab, reuse that same tab for the destination without leaving a spare Google tab, and never substitute another Google domain, search URL, or website. Fast mode skips that decorative transition and opens the destination inactive in its workspace. Never ask the user to switch away from an uncontrollable page when browser_open_tab or browser_switch_tab can advance the request. browser_click automatically verifies and follows a tab opened by the clicked element; in Fast mode that new tab joins the workspace and stays in the background. When a request includes opening or starting a YouTube video, perform the relevant browser_click without a spoken preamble. After any navigation or tab switch, obtain fresh page state before an indexed action.
 
 For every request containing one or more tool operations, preserve the complete ordered goal as an internal checklist. A successful navigation, menu opening, upload, selection, or form edit completes only that intermediate step; it never ends the turn while later requested steps remain. The extension enforces a reflection-before-action state machine: every step evaluates the previous goal, keeps concise durable memory, chooses one next goal, and executes exactly one action. For every browser step use an observe-act-verify loop: obtain fresh semantic page state, perform one indexed action or one Fast mode batch of independent indexed edits, obtain fresh state again, and verify the expected visible change. Continue until every requested step has observed evidence of completion, a required confirmation boundary is reached, or a tool returns a concrete blocker. Never claim the whole workflow succeeded based only on an intermediate tool result.
 
@@ -346,9 +367,9 @@ When the user names a concrete object and an action label, treat the shortest di
 
 Lumi has a generic browser_upload_file implementation that selects a compatible file input by its relationship to the indexed upload trigger and by the requested file types, including hidden sibling inputs, labels, menu-backed controls, and compatible inputs behind custom upload buttons. It assigns authorized local paths directly through Chrome and falls back to intercepting dynamically created native choosers. Never say upload is impossible merely because the page opens an operating-system file picker. Uploading transmits local data: set confirmed=true only when the user-authored conversation explicitly names the exact absolute paths and intended destination page, or after separate confirmation. If those details are already explicit, proceed without asking again. After success, use nextPageStateQuery or the returned filenames with browser_wait_for_page_state, verify the correct created item or status, and continue every remaining requested operation. If the tool errors, quote its exact error rather than replacing it with a generic limitation.
 
-In Fast mode, do not use browser_scroll for discovery, viewport pagination, or obtaining action indices; use the full-page browser_find_semantic_context index instead. Call browser_scroll in Fast mode only when scrolling itself is explicitly requested or a page must render virtualized/lazy content that does not yet exist in the HTML; the tool moves instantly and supports up, down, left, and right. In Normal mode, reveal named content with browser_scroll using a concise distinctive text phrase and normally alignment=center. If content is genuinely virtualized or lazy-loaded, scroll and observe fresh state only until it enters the DOM.
+In Fast mode, do not use browser_scroll for discovery, viewport pagination, or obtaining action indices; use the full-page browser_find_semantic_context index instead. Call browser_scroll in Fast mode only when scrolling itself is explicitly requested or a page must render virtualized/lazy content that does not yet exist in the HTML; the tool moves instantly and supports up, down, left, and right. In Normal mode, browser_scroll supports animated horizontal movement with direction=left/right as well as vertical movement with direction=up/down; reveal named content with a concise distinctive text phrase and normally alignment=center. If content is genuinely virtualized or lazy-loaded, scroll and observe fresh state only until it enters the DOM.
 
-When a fresh browser_get_page_state or browser_find_semantic_context result reports fastMode=true, use one genuine page-provided "Select all" or "All permissions" control when it exactly matches the requested scope; otherwise prioritize browser_batch_actions for independent fields and bulk selection controls that are already indexed in that single observation. One batch is one structured agent step and may contain many deterministic form edits. Use desiredState for every checkbox, radio, switch, pressed, or selected control so retries are idempotent. Do not batch navigation, submission, saving, publishing, deletion, a control that reveals prerequisites for later controls, or actions whose indices depend on an earlier action; perform those separately and verify them. If fastMode=false, do not call browser_batch_actions.
+When a fresh browser_get_page_state or browser_find_semantic_context result reports fastMode=true, use one genuine page-provided "Select all" or "All permissions" control when it exactly matches the requested scope. Otherwise use browser_set_selection for a large set of independent checkboxes, radios, switches, pressed controls, or selected controls that all need the same state, and use browser_batch_actions for mixed multi-field input/select/selection edits. Both tools preflight the entire request before execution, reject duplicate indices, skip already-correct selection state, and locally verify each applied value. One bulk call is one structured agent step and may contain many deterministic form edits. Always supply desiredState for selection controls so retries are idempotent. Do not batch navigation, submission, saving, publishing, deletion, a control that reveals prerequisites for later controls, or actions whose indices depend on an earlier action; perform those separately and verify them. If fastMode=false, do not call browser_batch_actions or browser_set_selection.
 
 A browser-tool error is not a terminal result by default. When a failure response says recoverable=true, do not apologize, give up, or ask the user to act manually yet. If blockerType is authorization_check, compare the exact action and target with the original request and retry immediately with confirmed=true when it is already authorized inside the ordinary workflow envelope. Exhaust the relevant safe recovery ladder: (1) obtain fresh page state and new indices; (2) query the exact target object or action label; (3) wait for asynchronous UI state; (4) inspect and handle an open menu, dialog, overlay, prerequisite selection, or disabled action; (5) reveal genuinely virtualized content only when it is absent from the HTML; and (6) try a different supported interaction path. Fast mode must not use viewport scrolling as a generic recovery tactic because its DOM index is already full-page. Use at least three distinct recovery tactics when they are applicable, but never repeat the identical failed action against unchanged state. A hard blocker may be reported immediately only when the tool identifies missing permission, a nonexistent or inaccessible local file, a restricted Chrome page, a security-policy block, cancellation, a mandatory separate-turn confirmation boundary, or another condition that Lumi cannot change. Before reporting any non-hard failure, verify the final state once more. The failure report must quote the exact last error and briefly name the distinct recovery tactics already attempted. Never guess an index or tabId, and never claim success without a confirming result.
 
@@ -429,7 +450,7 @@ Treat this complete URL as application context and interpret it directly when de
 
 function formatFastModeSessionContext(fastMode) {
   return fastMode
-    ? "Fast mode is enabled at session start. Decorative browser and side-panel effects are disabled. The controlled page is pinned to the Lumi Fast tab-group workspace, remains the agent target while the user visits other tabs, and new agent pages open inactive inside that workspace. PageAgent indexes the complete rendered DOM and makes off-viewport controls directly actionable, so use browser_find_semantic_context and never scroll merely to discover content or obtain indices. Prefer browser_batch_actions for independent bulk form edits and selection controls after one fresh full-page indexed observation. Explicit horizontal or vertical scrolls execute instantly. Use semantic DOM inspection for background tabs; request a screenshot only when the workspace tab is visibly active."
+    ? "Fast mode is enabled at session start. Decorative browser and side-panel effects are disabled. Each prompt is locked to the active or most recently selected tab inside the Lumi Fast tab-group workspace. Browser tools cannot inspect or operate on outside tabs; new agent pages open inactive inside the workspace only when required. PageAgent indexes the complete rendered DOM and makes off-viewport controls directly actionable, so use browser_find_semantic_context and never scroll merely to discover content or obtain indices. Prefer browser_set_selection for many controls sharing one desired state and browser_batch_actions for mixed independent form edits after one fresh full-page indexed observation. Explicit horizontal or vertical scrolls execute instantly. Use semantic DOM inspection for background tabs; request a screenshot only when the workspace tab is visibly active."
     : "Fast mode is disabled at session start. Use standard single browser actions. A later page-state response is authoritative if the user changes the mode from the side panel.";
 }
 

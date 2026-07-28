@@ -11,6 +11,7 @@ test("browser_scroll exposes content and exact normalized targets", async () => 
   assert.equal(scrollTool.parameters.properties.position.maximum, 1);
   assert.equal(scrollTool.parameters.properties.text.type, "STRING");
   assert.deepEqual(scrollTool.parameters.properties.alignment.enum, ["start", "center", "end"]);
+  assert.deepEqual(scrollTool.parameters.properties.direction.enum, ["up", "down", "left", "right"]);
   assert.equal(scrollTool.parameters.properties.occurrence.minimum, 1);
   assert.ok(!scrollTool.parameters.required?.includes("direction"));
 
@@ -18,6 +19,7 @@ test("browser_scroll exposes content and exact normalized targets", async () => 
   const visualEffects = await readFile(new URL("../browser/effects/scroll.js", import.meta.url), "utf8");
   const studioController = await readFile(new URL("../../../app/lib/live/studio-page-agent.ts", import.meta.url), "utf8");
   assert.match(extensionController, /position,\s*indexedElement:/);
+  assert.match(extensionController, /durationMs:\s*runtime\.visualPreferences\.scrollDurationMs/);
   assert.match(visualEffects, /maxOffset \* position/);
   assert.match(visualEffects, /direction === "left" \|\| direction === "right"/);
   assert.match(visualEffects, /element\.scrollWidth - element\.clientWidth/);

@@ -4884,6 +4884,8 @@ ${clippedAnchor.content}`);
   var HIGHLIGHT_STYLE_ID = "lumi-page-agent-highlight-preference";
   var CLICK_EFFECT_STYLE_ID = "lumi-page-agent-click-effect-preference";
   var FAST_PAGE_STATE_MAX_CHARACTERS = 48e3;
+  var MAX_FAST_BATCH_ACTIONS = 200;
+  var MAX_FAST_SELECTION_INDICES = 300;
   if (!globalThis[GLOBAL_KEY]) {
     let getController = function() {
       if (!runtime.controller) {
@@ -4993,6 +4995,79 @@ ${clippedAnchor.content}`);
         if (value === "false") return false;
       }
       return null;
+    }, prepareFastBatchActions = function(rawActions, confirmed, { selectionOnly = false } = {}) {
+      const seenIndices = /* @__PURE__ */ new Set();
+      const enabledNativeRadioGroups = /* @__PURE__ */ new Map();
+      return rawActions.map((action, actionIndex) => {
+        const index = requireIndex(action);
+        if (seenIndices.has(index)) {
+          throw new Error(`Batch action ${actionIndex + 1} repeats element index ${index}. Each control may appear only once per batch.`);
+        }
+        seenIndices.add(index);
+        const element = indexedElement(index);
+        if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+          throw new Error(`Batch action ${actionIndex + 1} targets an unavailable element.`);
+        }
+        const type = String(action.type || "");
+        if (type === "click") {
+          assertConfirmedHighImpactClick(index, confirmed);
+          const desiredState = action.desiredState === "on" ? true : action.desiredState === "off" ? false : null;
+          if (selectedControlState(element) === null) {
+            throw new Error(`Batch action ${actionIndex + 1} must target a checkbox, radio, switch, pressed, or selected control.`);
+          }
+          if (desiredState === null) {
+            throw new Error(`Batch action ${actionIndex + 1} requires desiredState=on/off so bulk selection is idempotent.`);
+          }
+          if (String(element.type || "").toLowerCase() === "radio" && desiredState === false) {
+            throw new Error(`Batch action ${actionIndex + 1} cannot turn off a native radio directly. Select the intended alternative instead.`);
+          }
+          if (String(element.type || "").toLowerCase() === "radio" && desiredState === true) {
+            const groupOwner = element.form || element.ownerDocument;
+            const groupName = String(element.name || "");
+            if (groupName) {
+              const enabledGroups = enabledNativeRadioGroups.get(groupOwner) || /* @__PURE__ */ new Set();
+              if (enabledGroups.has(groupName)) {
+                throw new Error(`Batch action ${actionIndex + 1} conflicts with another native radio in group "${groupName}".`);
+              }
+              enabledGroups.add(groupName);
+              enabledNativeRadioGroups.set(groupOwner, enabledGroups);
+            }
+          }
+          return { type, index, element, desiredState };
+        }
+        if (selectionOnly) {
+          throw new Error(`Bulk selection action ${actionIndex + 1} must be a selectable click control.`);
+        }
+        if (type === "input") {
+          assertSafeInput(index);
+          if (action.text === void 0) {
+            throw new Error(`Batch action ${actionIndex + 1} requires text.`);
+          }
+          return { type, index, element, text: String(action.text) };
+        }
+        if (type === "select") {
+          const optionText = String(action.optionText || "").trim();
+          if (!optionText) throw new Error(`Batch action ${actionIndex + 1} requires optionText.`);
+          if (element.tagName !== "SELECT" || !Array.from(element.options).some(
+            (option) => option.textContent?.trim() === optionText
+          )) {
+            throw new Error(`Batch action ${actionIndex + 1} could not resolve option "${optionText}".`);
+          }
+          return { type, index, element, optionText };
+        }
+        throw new Error(`Batch action ${actionIndex + 1} has unsupported type "${type}".`);
+      });
+    }, batchActionMatchesExpectedState = function(action) {
+      if (!action.element.isConnected) return false;
+      if (action.type === "click") {
+        return selectedControlState(action.element) === action.desiredState;
+      }
+      if (action.type === "input") {
+        const value = action.element.isContentEditable ? action.element.innerText : action.element.value;
+        return String(value ?? "") === action.text;
+      }
+      const selectedText = action.element.selectedOptions?.[0]?.textContent?.trim() || "";
+      return selectedText === action.optionText;
     }, collectFileInputs = function(root = document, inputs = [], visitedRoots = /* @__PURE__ */ new Set()) {
       if (!root || visitedRoots.has(root)) return inputs;
       visitedRoots.add(root);
@@ -5049,7 +5124,7 @@ ${clippedAnchor.content}`);
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
       assertConfirmedPageAgentClick(element, confirmed);
     };
-    getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, instantClickElement2 = instantClickElement, instantSelectOption2 = instantSelectOption, selectedControlState2 = selectedControlState, collectFileInputs2 = collectFileInputs, isFileInput2 = isFileInput, isFileUploadTrigger2 = isFileUploadTrigger, clearPreparedFileUploadTarget2 = clearPreparedFileUploadTarget, getDeclarativeNewTabIntent2 = getDeclarativeNewTabIntent, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
+    getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, instantClickElement2 = instantClickElement, instantSelectOption2 = instantSelectOption, selectedControlState2 = selectedControlState, prepareFastBatchActions2 = prepareFastBatchActions, batchActionMatchesExpectedState2 = batchActionMatchesExpectedState, collectFileInputs2 = collectFileInputs, isFileInput2 = isFileInput, isFileUploadTrigger2 = isFileUploadTrigger, clearPreparedFileUploadTarget2 = clearPreparedFileUploadTarget, getDeclarativeNewTabIntent2 = getDeclarativeNewTabIntent, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
     const runtime = {
       controller: null,
       stateIndexed: false,
@@ -5059,6 +5134,94 @@ ${clippedAnchor.content}`);
     };
     globalThis[GLOBAL_KEY] = runtime;
     const mediaElementAudio = createMediaElementAudioController();
+    async function verifyFastBatchAction(action, signal2) {
+      const eventWindow = action.element.ownerDocument.defaultView || window;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (signal2?.aborted) throw new DOMException("The page action was cancelled by the user.", "AbortError");
+        if (batchActionMatchesExpectedState(action)) return true;
+        if (!action.element.isConnected) {
+          throw new Error("The page replaced this control while the batch was running.");
+        }
+        if (attempt === 2) break;
+        if (attempt === 0) await Promise.resolve();
+        else await new Promise((resolve) => eventWindow.requestAnimationFrame(resolve));
+      }
+      throw new Error("The control did not reach its requested value after the Fast mode action.");
+    }
+    async function executeFastBatch(preparedActions, args, signal2) {
+      const results = [];
+      let failedAt = null;
+      let finalVerificationFailure = false;
+      for (const [actionIndex, action] of preparedActions.entries()) {
+        try {
+          if (!action.element.isConnected) {
+            throw new Error("The page replaced this control while the batch was running.");
+          }
+          if (action.type === "click") {
+            if (selectedControlState(action.element) === action.desiredState) {
+              results.push({
+                action: actionIndex + 1,
+                index: action.index,
+                status: "skipped",
+                reason: "already_in_desired_state",
+                stateVerified: true
+              });
+              continue;
+            }
+            instantClickElement(action.element);
+          } else if (action.type === "input") {
+            await typeTextGradually(action.element, action.text, 0, signal2);
+          } else {
+            instantSelectOption(action.element, action.optionText);
+          }
+          await verifyFastBatchAction(action, signal2);
+          results.push({
+            action: actionIndex + 1,
+            index: action.index,
+            status: "executed",
+            stateVerified: true
+          });
+        } catch (error) {
+          failedAt = actionIndex + 1;
+          results.push({
+            action: actionIndex + 1,
+            index: action.index,
+            status: "failed",
+            stateVerified: false,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          break;
+        }
+      }
+      if (failedAt === null) {
+        const invalidFinalIndex = preparedActions.findIndex(
+          (action) => !batchActionMatchesExpectedState(action)
+        );
+        if (invalidFinalIndex >= 0) {
+          failedAt = invalidFinalIndex + 1;
+          finalVerificationFailure = true;
+          const result2 = results[invalidFinalIndex];
+          result2.status = "failed";
+          result2.stateVerified = false;
+          result2.error = "A later batch action changed this control after its initial verification.";
+        }
+      }
+      const executedActionCount = results.filter((result2) => result2.status === "executed").length;
+      const skippedActionCount = results.filter((result2) => result2.status === "skipped").length;
+      return {
+        success: true,
+        completed: failedAt === null,
+        requestedActionCount: preparedActions.length,
+        executedActionCount,
+        skippedActionCount,
+        verifiedActionCount: results.filter((result2) => result2.stateVerified).length,
+        failedAt,
+        results,
+        nextPageStateQuery: String(args.verificationQuery || "").trim().slice(0, 500),
+        requiresPageVerification: failedAt !== null,
+        message: failedAt === null ? `Completed and locally verified ${executedActionCount} Fast mode action(s); skipped ${skippedActionCount} already-satisfied action(s).` : finalVerificationFailure ? `Fast mode executed the batch, but final verification failed at action ${failedAt}.` : `Fast mode stopped at action ${failedAt} after ${executedActionCount} verified action(s).`
+      };
+    }
     const FILE_UPLOAD_TRIGGER_PATTERN = /\b(upload|attach|browse|choose|import|file)\b|tải\s*lên|tai\s*len|đính\s*kèm|dinh\s*kem|chọn\s*(?:tệp|file)|chon\s*(?:tep|file)/i;
     async function readPageState(query = "") {
       applyVisualPreferences();
@@ -5376,92 +5539,28 @@ ${clippedAnchor.content}`);
           throw new Error("browser_batch_actions requires Fast mode. Enable it from the side panel or Lumi Settings.");
         }
         const actions = Array.isArray(args.actions) ? args.actions : [];
-        if (!actions.length || actions.length > 100) {
-          throw new Error("browser_batch_actions requires between 1 and 100 actions.");
+        if (!actions.length || actions.length > MAX_FAST_BATCH_ACTIONS) {
+          throw new Error(`browser_batch_actions requires between 1 and ${MAX_FAST_BATCH_ACTIONS} actions.`);
         }
-        const confirmed = args.confirmed === true;
-        const preparedActions = actions.map((action, actionIndex) => {
-          const index = requireIndex(action);
-          const element = indexedElement(index);
-          if (!element || element.nodeType !== Node.ELEMENT_NODE) {
-            throw new Error(`Batch action ${actionIndex + 1} targets an unavailable element.`);
-          }
-          const type = String(action.type || "");
-          if (type === "click") {
-            assertConfirmedHighImpactClick(index, confirmed);
-            const desiredState = action.desiredState === "on" ? true : action.desiredState === "off" ? false : null;
-            if (desiredState !== null && selectedControlState(element) === null) {
-              throw new Error(`Batch action ${actionIndex + 1} uses desiredState on a control whose selected state is not exposed.`);
-            }
-            return { type, index, element, desiredState };
-          }
-          if (type === "input") {
-            assertSafeInput(index);
-            if (action.text === void 0) {
-              throw new Error(`Batch action ${actionIndex + 1} requires text.`);
-            }
-            return { type, index, element, text: String(action.text) };
-          }
-          if (type === "select") {
-            const optionText = String(action.optionText || "").trim();
-            if (!optionText) throw new Error(`Batch action ${actionIndex + 1} requires optionText.`);
-            if (element.tagName !== "SELECT" || !Array.from(element.options).some(
-              (option) => option.textContent?.trim() === optionText
-            )) {
-              throw new Error(`Batch action ${actionIndex + 1} could not resolve option "${optionText}".`);
-            }
-            return { type, index, element, optionText };
-          }
-          throw new Error(`Batch action ${actionIndex + 1} has unsupported type "${type}".`);
-        });
-        return withVisualAction(async (_activeController, signal2) => {
-          const results = [];
-          let failedAt = null;
-          for (const [actionIndex, action] of preparedActions.entries()) {
-            try {
-              if (!action.element.isConnected) {
-                throw new Error("The page replaced this control while the batch was running.");
-              }
-              if (action.type === "click") {
-                const currentState = selectedControlState(action.element);
-                if (action.desiredState !== null && currentState === action.desiredState) {
-                  results.push({ action: actionIndex + 1, index: action.index, status: "skipped", reason: "already_in_desired_state" });
-                  continue;
-                }
-                instantClickElement(action.element);
-              } else if (action.type === "input") {
-                await typeTextGradually(action.element, action.text, 0, signal2);
-              } else {
-                instantSelectOption(action.element, action.optionText);
-              }
-              results.push({ action: actionIndex + 1, index: action.index, status: "executed" });
-              await Promise.resolve();
-            } catch (error) {
-              failedAt = actionIndex + 1;
-              results.push({
-                action: actionIndex + 1,
-                index: action.index,
-                status: "failed",
-                error: error instanceof Error ? error.message : String(error)
-              });
-              break;
-            }
-          }
-          const executedActionCount = results.filter((result2) => result2.status === "executed").length;
-          const skippedActionCount = results.filter((result2) => result2.status === "skipped").length;
-          return {
-            success: true,
-            completed: failedAt === null,
-            requestedActionCount: actions.length,
-            executedActionCount,
-            skippedActionCount,
-            failedAt,
-            results,
-            nextPageStateQuery: String(args.verificationQuery || "").trim().slice(0, 500),
-            requiresPageVerification: failedAt !== null,
-            message: failedAt === null ? `Completed ${executedActionCount} Fast mode action(s); skipped ${skippedActionCount} already-satisfied action(s).` : `Fast mode stopped at action ${failedAt} after ${executedActionCount} successful action(s).`
-          };
-        });
+        const preparedActions = prepareFastBatchActions(actions, args.confirmed === true);
+        return withVisualAction((_activeController, signal2) => executeFastBatch(preparedActions, args, signal2));
+      }
+      if (tool === "browser_set_selection") {
+        if (!runtime.visualPreferences.fastMode) {
+          throw new Error("browser_set_selection requires Fast mode. Enable it from the side panel or Lumi Settings.");
+        }
+        const indices = Array.isArray(args.indices) ? args.indices : [];
+        if (!indices.length || indices.length > MAX_FAST_SELECTION_INDICES) {
+          throw new Error(`browser_set_selection requires between 1 and ${MAX_FAST_SELECTION_INDICES} indices.`);
+        }
+        const desiredState = args.desiredState === "on" ? "on" : args.desiredState === "off" ? "off" : null;
+        if (!desiredState) throw new Error("browser_set_selection requires desiredState=on/off.");
+        const preparedActions = prepareFastBatchActions(indices.map((index) => ({
+          type: "click",
+          index,
+          desiredState
+        })), args.confirmed === true, { selectionOnly: true });
+        return withVisualAction((_activeController, signal2) => executeFastBatch(preparedActions, args, signal2));
       }
       if (tool === "browser_scroll") {
         if (!runtime.stateIndexed) {
@@ -5481,7 +5580,7 @@ ${clippedAnchor.content}`);
         }
         const position = args.position === void 0 ? void 0 : Number(args.position);
         if (position !== void 0 && (!Number.isFinite(position) || position < 0 || position > 1)) {
-          throw new Error("browser_scroll position must be a number from 0 (top) to 1 (bottom).");
+          throw new Error("browser_scroll position must be a number from 0 (axis start) to 1 (axis end).");
         }
         const allowedDirections = /* @__PURE__ */ new Set(["up", "down", "left", "right"]);
         if (!text && position === void 0 && !allowedDirections.has(args.direction)) {
@@ -5527,6 +5626,8 @@ ${clippedAnchor.content}`);
   var instantClickElement2;
   var instantSelectOption2;
   var selectedControlState2;
+  var prepareFastBatchActions2;
+  var batchActionMatchesExpectedState2;
   var collectFileInputs2;
   var isFileInput2;
   var isFileUploadTrigger2;

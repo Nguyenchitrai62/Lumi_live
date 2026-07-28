@@ -247,7 +247,7 @@ test("captures visual context only when the agent requests it and renders rich c
   assert.match(controller, /inspectScreenshot:\s*captureAndSendVisualInspectionFrame/);
   assert.match(browserToolRunner, /tool === "browser_inspect_screenshot"[^]*await inspectScreenshot\(\)/);
   assert.match(controller, /addBrowserWorkflowContext\(result/);
-  assert.match(controller, /activeTurnUserRequest = modelText/);
+  assert.match(controller, /activeTurnUserRequest = userRequestText/);
   assert.doesNotMatch(controller, /AUTOMATIC_TAB_CAPTURE_ORIGINS|screenshotAccessRequest/);
   assert.doesNotMatch(controller, /chrome\.permissions\.(?:request|contains)\(\{\s*origins:/);
   assert.match(controller, /realtimeInput:\s*\{\s*video:\s*frame\s*\}/);
@@ -255,8 +255,13 @@ test("captures visual context only when the agent requests it and renders rich c
   assert.match(controller, /delivery:\s*"best_effort_realtime_visual_context"/);
   assert.match(controller, /sendJson\(\{\s*realtimeInput:\s*\{\s*video:\s*frame\s*\}\s*\}\)/);
   assert.match(controller, /sendJson\(\{\s*realtimeInput:\s*\{\s*text:\s*modelText\s*\}\s*\}\)/);
+  assert.match(controller, /await sendRuntime\("prepare_browser_prompt"\)/);
   assert.match(controller, /if \(!videoSent \|\| !textSent\)[^]*failedSocket\.close\(4002/);
-  assert.doesNotMatch(controller, /onUserSpeechStart:[^]*captureAndSend/);
+  const speechStartCallback = controller.match(
+    /onUserSpeechStart:\s*\(\) => \{[^]*?\r?\n  \},\r?\n  sendJson/,
+  )?.[0] || "";
+  assert.ok(speechStartCallback);
+  assert.doesNotMatch(speechStartCallback, /captureAndSend/);
   assert.match(audioController, /onUserSpeechStart\?\.\(\)/);
   assert.match(controller, /showCapturedScreenshot:\s*createCapturedTabMessage/);
   assert.match(browserToolRunner, /showCapturedScreenshot\(result\)/);

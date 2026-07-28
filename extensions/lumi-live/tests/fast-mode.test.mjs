@@ -14,12 +14,17 @@ test("publishes a bounded bulk form tool and Fast mode guidance", () => {
   const batchTool = BROWSER_TOOLS.find((tool) => tool.name === "browser_batch_actions");
   assert.ok(batchTool);
   assert.equal(batchTool.parameters.properties.actions.minItems, 1);
-  assert.equal(batchTool.parameters.properties.actions.maxItems, 100);
+  assert.equal(batchTool.parameters.properties.actions.maxItems, 200);
   assert.deepEqual(
     batchTool.parameters.properties.actions.items.properties.type.enum,
     ["click", "input", "select"],
   );
   assert.ok(BROWSER_UI_ACTION_TOOLS.has("browser_batch_actions"));
+  const selectionTool = BROWSER_TOOLS.find((tool) => tool.name === "browser_set_selection");
+  assert.ok(selectionTool);
+  assert.equal(selectionTool.parameters.properties.indices.maxItems, 300);
+  assert.deepEqual(selectionTool.parameters.properties.desiredState.enum, ["on", "off"]);
+  assert.ok(BROWSER_UI_ACTION_TOOLS.has("browser_set_selection"));
   assert.match(
     buildSessionInstruction({}, null, BROWSER_TOOLS, { fastMode: true }),
     /Fast mode is enabled at session start/,
@@ -48,10 +53,23 @@ test("wires Fast mode through settings, the side panel, the workspace, and the p
   assert.match(fastController, /is-engaging/);
   assert.match(worker, /FAST_MODE_STORAGE_KEY/);
   assert.match(worker, /if \(fastModeEnabled\) return;/);
+  assert.match(worker, /message\.command === "prepare_browser_prompt"/);
+  assert.match(worker, /restriction: "workspace_tabs_only"/);
+  assert.match(worker, /\? \{ groupId: workspaceGroup\.id \}/);
+  assert.match(worker, /Fast mode can switch only to tabs already inside the Lumi Fast workspace/);
+  assert.match(panelController, /await sendRuntime\("prepare_browser_prompt"\)/);
+  assert.match(panelController, /onUserSpeechStart:[^]*sendRuntime\("prepare_browser_prompt"\)/);
+  assert.match(panelController, /This turn is locked to workspace tabId/);
   assert.match(workspace, /tabsApi\.group/);
   assert.match(workspace, /autoDiscardable: false/);
   assert.ok(JSON.parse(manifest).permissions.includes("tabGroups"));
   assert.match(pageController, /tool === "browser_batch_actions"/);
+  assert.match(pageController, /tool === "browser_set_selection"/);
+  assert.match(pageController, /MAX_FAST_BATCH_ACTIONS = 200/);
+  assert.match(pageController, /MAX_FAST_SELECTION_INDICES = 300/);
+  assert.match(pageController, /Each control may appear only once per batch/);
+  assert.match(pageController, /await verifyFastBatchAction\(action, signal\)/);
+  assert.match(pageController, /A later batch action changed this control after its initial verification/);
   assert.match(pageController, /instantClickElement/);
   assert.match(pageController, /viewportExpansion:\s*runtime\.visualPreferences\.fastMode \? -1 : 0/);
   assert.match(pageController, /fullPageIndexed/);
