@@ -94,7 +94,7 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(styles, /\.mcp-activity-chevron[^}]+var\(--ui-motion-disclosure\)/);
   assert.match(styles, /\.mcp-activity\[data-expanded="true"\]/);
   assert.match(styles, /\.agent-step-body[^}]+max-height:\s*var\(--ui-task-step-detail-max-height\)/);
-  assert.match(styles, /\.agent-step-field-value[^}]+font-size:\s*11\.5px/);
+  assert.match(styles, /\.agent-step-field-value[^}]+font-size:\s*12px/);
   assert.match(styles, /--task-border:\s*#d9d2e5/);
   assert.match(controller, /createTaskStepView/);
   assert.doesNotMatch(styles, /is-typing|transcript-caret-blink/);
@@ -222,6 +222,29 @@ test("side panel connects chat without requiring a microphone and remembers mic 
   assert.match(controller, /sessionHasInFlightWork\(\)[^]*panelAudio\.isUserSpeechActive\(\)/);
   assert.doesNotMatch(html, /id="startButton"/);
   assert.doesNotMatch(controller, /elements\.startButton/);
+});
+
+test("side panel keeps Lumi's layout while improving contrast and primary control ergonomics", async () => {
+  const html = await readFile(new URL("side-panel/index.html", extensionRoot), "utf8");
+  const styles = await readFile(new URL("side-panel/styles.css", extensionRoot), "utf8");
+  const formStart = html.indexOf('<form id="messageForm"');
+  const formEnd = html.indexOf("</form>", formStart);
+  const messageForm = html.slice(formStart, formEnd);
+
+  assert.match(html, /<span id="connectTabButton" class="connect-status" role="status">Auto<\/span>/);
+  assert.doesNotMatch(html, /class="voice-controls"/);
+  assert.match(messageForm, /id="imageAttachmentButton"/);
+  assert.match(messageForm, /id="messageInput"/);
+  assert.match(messageForm, /id="muteButton"/);
+  assert.match(messageForm, /id="messageSubmit"/);
+  assert.match(styles, /--line-strong:/);
+  assert.match(styles, /--focus-ring:/);
+  assert.match(styles, /\.icon-button\s*\{[^}]*width:\s*40px;[^}]*height:\s*40px;/);
+  assert.match(styles, /\.message-form\s*\{[^}]*grid-template-columns:\s*auto minmax\(0,1fr\) auto auto;/);
+  assert.match(styles, /\.message-form button\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;/);
+  assert.match(styles, /\.chat-session-delete\s*\{[^}]*opacity:\s*\.62;/);
+  assert.match(styles, /@media \(prefers-contrast: more\)/);
+  assert.match(styles, /@media \(forced-colors: active\)/);
 });
 
 test("captures visual context only when the agent requests it and renders rich conversation Markdown", async () => {

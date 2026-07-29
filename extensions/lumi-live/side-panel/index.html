@@ -48,7 +48,7 @@
           <strong id="targetTitle">No tab connected</strong>
           <span id="targetHint">Switch to a web page and Lumi will follow it.</span>
         </div>
-        <button id="connectTabButton" class="connect-button" type="button" disabled>Auto</button>
+        <span id="connectTabButton" class="connect-status" role="status">Auto</span>
       </section>
 
       <section class="chat-stage" aria-label="Conversation with Lumi">
@@ -151,28 +151,6 @@
       </dialog>
 
       <footer class="composer-area">
-        <div class="voice-controls" role="group" aria-label="Voice controls">
-          <button
-            id="muteButton"
-            class="secondary mute-control"
-            type="button"
-            aria-label="Turn on microphone"
-            aria-pressed="true"
-            title="Turn on microphone"
-            disabled
-          >
-            <span class="mute-control-energy" aria-hidden="true"></span>
-            <span class="mute-control-icon" aria-hidden="true">
-              <span class="mute-control-body"><span class="mute-control-fill"></span></span>
-              <span class="mute-control-cradle"></span>
-              <span class="mute-control-stem"></span>
-              <span class="mute-control-base"></span>
-              <span class="mute-control-wave mute-control-wave-left"></span>
-              <span class="mute-control-wave mute-control-wave-right"></span>
-              <span class="mute-control-slash"></span>
-            </span>
-          </button>
-        </div>
         <div id="messageQueue" class="message-queue" aria-live="polite" hidden>
           <span class="message-queue-mark" aria-hidden="true"></span>
           <p id="messageQueuePreview" class="message-queue-preview"></p>
@@ -215,6 +193,26 @@
               placeholder="Type a message to Lumi…"
             ></textarea>
           </div>
+          <button
+            id="muteButton"
+            class="secondary mute-control"
+            type="button"
+            aria-label="Turn on microphone"
+            aria-pressed="true"
+            title="Turn on microphone"
+            disabled
+          >
+            <span class="mute-control-energy" aria-hidden="true"></span>
+            <span class="mute-control-icon" aria-hidden="true">
+              <span class="mute-control-body"><span class="mute-control-fill"></span></span>
+              <span class="mute-control-cradle"></span>
+              <span class="mute-control-stem"></span>
+              <span class="mute-control-base"></span>
+              <span class="mute-control-wave mute-control-wave-left"></span>
+              <span class="mute-control-wave mute-control-wave-right"></span>
+              <span class="mute-control-slash"></span>
+            </span>
+          </button>
           <button id="messageSubmit" type="submit" data-mode="send" aria-label="Send message" title="Send message" disabled>
             <span class="message-send-icon" aria-hidden="true">↑</span>
             <span class="message-cancel-icon" aria-hidden="true"></span>
