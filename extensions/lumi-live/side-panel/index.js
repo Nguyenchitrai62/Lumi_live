@@ -86,6 +86,10 @@ import {
   shouldRenderStandaloneToolActivity,
   taskOwnsTurn,
 } from "./task-transcript-policy.js";
+import {
+  createLocalChatHistoryStore,
+  normalizeLocalChatHistory,
+} from "./local-chat-history.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
@@ -94,6 +98,7 @@ const MICROPHONE_ENABLED_STORAGE_KEY = STORAGE_KEYS.microphoneEnabled;
 const MICROPHONE_GRANTED_STORAGE_KEY = STORAGE_KEYS.microphoneGrantedAt;
 const PETALS_STORAGE_KEY = STORAGE_KEYS.fallingPetals;
 const AVATAR_MODE_STORAGE_KEY = STORAGE_KEYS.avatarMode;
+const CHAT_HISTORY_STORAGE_KEY = STORAGE_KEYS.chatHistory;
 const FAST_MODE_STORAGE_KEY = STORAGE_KEYS.fastMode;
 const THINKING_LEVEL_STORAGE_KEY = STORAGE_KEYS.thinkingLevel;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
@@ -108,10 +113,15 @@ const TARGET_REFRESH_INTERVAL_MS = 2800;
 const VISUAL_CONTEXT_SETTLE_MS = 650;
 applyUiConfig();
 const sidePanelLifecyclePort = chrome.runtime.connect({ name: "lumi_live_side_panel" });
+const chatHistoryStore = createLocalChatHistoryStore({
+  storageArea: chrome.storage.local,
+  storageKey: CHAT_HISTORY_STORAGE_KEY,
+});
 const elements = {
   extensionVersion: document.querySelector("#extensionVersion"),
   liveBadge: document.querySelector("#liveBadge"),
   translateBadge: document.querySelector("#translateBadge"),
+  clearHistoryButton: document.querySelector("#clearHistoryButton"),
   settingsButton: document.querySelector("#settingsButton"),
   fastModeButton: document.querySelector("#fastModeButton"),
   avatarModeButton: document.querySelector("#avatarModeButton"),
@@ -215,6 +225,7 @@ let backgroundSessionReconnectPending = false;
 let pendingSessionHandoffSocket = null;
 let activeTurnUserRequest = "";
 const conversationHistory = [];
+const localChatHistory = [];
 const queuedUserMessages = [];
 const initialTranscriptMarkup = elements.transcript.innerHTML;
 const activeTranscriptReveals = new Set();
@@ -873,9 +884,63 @@ function rememberConversationTurn(role, text) {
   if (!normalizedRole || !clean) return;
   const previous = conversationHistory.at(-1);
   if (previous?.role === normalizedRole && previous.text === clean) return;
-  conversationHistory.push({ role: normalizedRole, text: clean });
+  const turn = { role: normalizedRole, text: clean };
+  conversationHistory.push(turn);
   const recentHistory = trimConversationHistory(conversationHistory);
   conversationHistory.splice(0, conversationHistory.length, ...recentHistory);
+  localChatHistory.push(turn);
+  const retainedLocalHistory = normalizeLocalChatHistory(localChatHistory);
+  localChatHistory.splice(
+    0,
+    localChatHistory.length,
+    ...retainedLocalHistory,
+  );
+  void chatHistoryStore.save(localChatHistory).catch(() => {});
+}
+
+async function restoreLocalChatHistory() {
+  const restored = await chatHistoryStore.load().catch(() => []);
+  if (!restored.length) return 0;
+  localChatHistory.splice(0, localChatHistory.length, ...restored);
+  const recentConversation = trimConversationHistory(restored);
+  conversationHistory.splice(
+    0,
+    conversationHistory.length,
+    ...recentConversation,
+  );
+  elements.transcript.innerHTML = "";
+  for (const turn of restored) {
+    const role = turn.role === "model" ? "lumi" : "user";
+    const message = createMessage(role, turn.text);
+    if (role === "lumi") {
+      renderMarkdown(message.content, turn.text);
+      message.visibleText = turn.text;
+    }
+  }
+  transcriptAutoFollow = true;
+  scrollTranscriptToLatest({ force: true });
+  return restored.length;
+}
+
+async function clearLocalChatHistory() {
+  const confirmed = window.confirm(
+    "Clear the saved Lumi chat history on this device and start a new conversation?",
+  );
+  if (!confirmed) return false;
+  const shouldReconnect = sessionStatus === "ready" || sessionStatus === "connecting";
+  elements.clearHistoryButton.disabled = true;
+  try {
+    if (shouldReconnect) stopSession();
+    clearConversationContext();
+    await chatHistoryStore.clear();
+    elements.statusLine.textContent = "Local chat history cleared.";
+    if (shouldReconnect && DEFAULT_AUTO_CONNECT_ENABLED) {
+      await autoStartSessionIfReady();
+    }
+    return true;
+  } finally {
+    elements.clearHistoryButton.disabled = false;
+  }
 }
 
 function clearConversationContext() {
@@ -888,6 +953,7 @@ function clearConversationContext() {
   completedThinkingMessagesAwaitingContent.clear();
   lumiContentSequence = 0;
   conversationHistory.length = 0;
+  localChatHistory.length = 0;
   queuedUserMessages.length = 0;
   taskOrchestrator.clear();
   taskStepView.clear();
@@ -2822,6 +2888,13 @@ async function toggleAvatarMode() {
 }
 
 elements.settingsButton.addEventListener("click", () => void openSettings());
+elements.clearHistoryButton.addEventListener("click", () => {
+  void clearLocalChatHistory().catch((error) => {
+    elements.statusLine.textContent = error instanceof Error
+      ? error.message
+      : "Could not clear local chat history.";
+  });
+});
 elements.fastModeButton.addEventListener("click", () => void fastModeController.toggle());
 elements.avatarModeButton.addEventListener("click", () => void toggleAvatarMode());
 elements.petalsButton.addEventListener("click", () => void togglePetals());
@@ -3035,6 +3108,7 @@ async function initialize() {
     MICROPHONE_ENABLED_STORAGE_KEY,
     FAST_MODE_STORAGE_KEY,
   ]);
+  await restoreLocalChatHistory();
   const savedKey = String(stored[API_KEY_STORAGE_KEY] || "").trim();
   microphoneEnabled = stored[MICROPHONE_ENABLED_STORAGE_KEY] === true;
   isMuted = true;
