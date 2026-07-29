@@ -23,6 +23,7 @@
         <div class="top-actions" role="group" aria-label="Lumi controls">
           <span id="translateBadge" class="badge badge-translate" hidden>Translate</span>
           <span id="liveBadge" class="badge badge-offline">Offline</span>
+          <button id="historyButton" class="icon-button" type="button" aria-label="Open local chat history" title="Chat history">â—·</button>
           <button id="avatarModeButton" class="icon-button avatar-mode-button" type="button" aria-pressed="true" aria-label="Switch to Lumi VTuber" title="Switch to Lumi VTuber">
             <span class="avatar-mode-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24">
@@ -37,15 +38,172 @@
         </div>
       </header>
 
+      <aside id="historyDrawer" class="history-drawer" aria-label="Local chat history" hidden>
+        <header>
+          <div>
+            <strong>Chat history</strong>
+            <small>Stored only on this computer</small>
+          </div>
+          <button id="historyCloseButton" type="button" aria-label="Close history">Ã—</button>
+        </header>
+        <div class="history-actions">
+          <button id="historyNewButton" type="button">New chat</button>
+          <button id="historyClearButton" class="qc-danger" type="button">Delete all</button>
+        </div>
+        <p id="historyStatus" class="history-status" role="status"></p>
+        <ol id="historyList" class="history-list"></ol>
+      </aside>
+
       <section class="target-card" aria-live="polite">
         <span id="targetDot" class="target-dot" aria-hidden="true"></span>
         <div class="target-copy">
-          <small>PAGEAGENT TARGET</small>
+          <small>WORK TARGET</small>
           <strong id="targetTitle">No tab connected</strong>
           <span id="targetHint">Switch to a web page and Lumi will follow it.</span>
         </div>
-        <button id="connectTabButton" class="connect-button" type="button" disabled>Auto</button>
+        <button id="connectTabButton" class="connect-button" type="button" disabled>Ready</button>
       </section>
+
+      <section id="runAttention" class="run-attention" role="alert" aria-live="assertive" hidden>
+        <span class="run-attention-mark" aria-hidden="true">!</span>
+        <div>
+          <strong id="runAttentionTitle">LUMI needs your attention</strong>
+          <p id="runAttentionMessage"></p>
+        </div>
+        <button id="runAttentionReturn" type="button">Return to ERP tab</button>
+        <button id="runAttentionAcknowledge" type="button">Reviewed</button>
+      </section>
+
+      <details id="qcWorkspace" class="qc-workspace">
+        <summary>
+          <span class="qc-workspace-mark" aria-hidden="true">QC</span>
+          <span>
+            <strong>Excel QC (optional)</strong>
+            <small id="qcRunSummary">No workbook compiled.</small>
+          </span>
+          <span class="qc-workspace-chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="qc-workspace-body">
+          <fieldset class="qc-service-settings">
+            <legend>Local QC Service</legend>
+            <label>
+              <span>URL</span>
+              <input id="qcServiceUrl" type="url" value="http://127.0.0.1:8765" spellcheck="false" />
+            </label>
+            <label>
+              <span>Installation token</span>
+              <input id="qcServiceToken" type="password" autocomplete="off" spellcheck="false" />
+            </label>
+            <button id="qcConnectButton" type="button">Check service</button>
+          </fieldset>
+
+          <fieldset class="qc-workbook-settings">
+            <legend>Test workbook</legend>
+            <label class="qc-file-picker">
+              <span>Scenario / test workbook</span>
+              <input id="qcWorkbookInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+            </label>
+            <label class="qc-file-picker">
+              <span>Feature/spec reference (optional)</span>
+              <input id="qcReferenceWorkbookInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+            </label>
+            <label>
+              <span>Allowed ERP domains</span>
+              <input id="qcAllowedDomains" type="text" placeholder="erp.example.com, staging.example.com" spellcheck="false" />
+            </label>
+            <label class="qc-discovery-toggle">
+              <input id="qcDiscoveryMode" type="checkbox" />
+              <span>Discovery Mode — learn verified page and field candidates</span>
+            </label>
+            <button id="qcCompileButton" class="qc-primary" type="button">Compile workbook</button>
+          </fieldset>
+
+          <p id="qcStatus" class="qc-status" role="status" aria-live="polite">
+            Connect the local service, then choose an .xlsx workbook.
+          </p>
+          <div id="qcRunPlan" class="qc-run-plan" aria-label="Compiled QC run plan"></div>
+
+          <details class="qc-subworkspace">
+            <summary>Excel ↔ ERP Data Compare</summary>
+            <div class="qc-subworkspace-body">
+              <label>
+                Sheet
+                <input id="qcComparisonSheet" type="text" placeholder="Sheet1" />
+              </label>
+              <label>
+                Header row
+                <input id="qcComparisonHeaderRow" type="number" min="1" value="1" />
+              </label>
+              <label>
+                Key column(s)
+                <input id="qcComparisonKeys" type="text" placeholder="Code" />
+              </label>
+              <label>
+                Approved column mapping (JSON)
+                <textarea id="qcComparisonMappings" rows="4" spellcheck="false"
+                  placeholder='[{"excel_column":"Code","ui_field":"Mã","value_type":"text"}]'></textarea>
+              </label>
+              <button id="qcCompileComparisonButton" type="button">Compile comparison plan</button>
+              <button id="qcCollectComparisonButton" type="button" disabled>Collect all UI pages with Lumi</button>
+              <p id="qcComparisonStatus" class="qc-status"></p>
+            </div>
+          </details>
+
+          <details class="qc-subworkspace">
+            <summary>Daily schedules</summary>
+            <div class="qc-subworkspace-body">
+              <label>
+                Schedule name
+                <input id="qcScheduleName" type="text" placeholder="Daily HICAS regression" />
+              </label>
+              <label>
+                Local time
+                <input id="qcScheduleTime" type="time" value="08:00" />
+              </label>
+              <fieldset class="qc-weekdays">
+                <legend>Days</legend>
+                <label><input type="checkbox" data-qc-weekday="0" checked />Mon</label>
+                <label><input type="checkbox" data-qc-weekday="1" checked />Tue</label>
+                <label><input type="checkbox" data-qc-weekday="2" checked />Wed</label>
+                <label><input type="checkbox" data-qc-weekday="3" checked />Thu</label>
+                <label><input type="checkbox" data-qc-weekday="4" checked />Fri</label>
+                <label><input type="checkbox" data-qc-weekday="5" />Sat</label>
+                <label><input type="checkbox" data-qc-weekday="6" />Sun</label>
+              </fieldset>
+              <button id="qcCreateScheduleButton" type="button">Create from completed run</button>
+              <button id="qcRefreshSchedulesButton" type="button">Refresh schedules</button>
+              <div id="qcScheduleList" class="qc-mini-list"></div>
+            </div>
+          </details>
+
+          <details class="qc-subworkspace">
+            <summary>Redmine bug drafts</summary>
+            <div class="qc-subworkspace-body">
+              <p>Drafts are editable. LUMI only creates an issue after you press <strong>Send</strong>.</p>
+              <button id="qcRefreshBugDraftsButton" type="button">Refresh drafts</button>
+              <div id="qcBugDraftList" class="qc-mini-list"></div>
+            </div>
+          </details>
+
+          <div class="qc-run-actions">
+            <button id="qcRefineButton" type="button" disabled>Refine with Lumi</button>
+            <button id="qcApproveButton" type="button" disabled>Approve plan</button>
+            <button id="qcStartRunButton" class="qc-primary" type="button" disabled>Start run</button>
+            <button id="qcPauseRunButton" type="button" disabled>Pause</button>
+            <button id="qcResumeRunButton" type="button" disabled>Resume</button>
+            <button id="qcCancelRunButton" class="qc-danger" type="button" disabled>Cancel</button>
+          </div>
+
+          <button id="qcApproveStepButton" class="qc-risk-approval" type="button" hidden>
+            Approve current high-risk step
+          </button>
+
+          <div id="qcDownloads" class="qc-downloads" hidden>
+            <button id="qcDownloadExcel" type="button">Download executed Excel</button>
+            <button id="qcDownloadHtml" type="button">Download HTML report</button>
+          </div>
+        </div>
+      </details>
 
       <section class="chat-stage" aria-label="Conversation with Lumi">
         <section id="mcpToolNotice" class="mcp-tool-notice" role="alert" aria-live="assertive" hidden>
@@ -63,7 +221,7 @@
         <section id="transcript" class="transcript" aria-live="polite">
           <article class="message message-lumi">
             <span>Lumi</span>
-            <p>Hi! Save your Gemini key, open any web page, then talk to me. I follow your active tab automatically. ✦</p>
+            <p>Open your ERP page and tell me what to do. I will work on the current tab, verify each action, and stay inside its scope. ✦</p>
           </article>
         </section>
 
@@ -155,7 +313,7 @@
               id="messageInput"
               rows="1"
               maxlength="4000"
-              placeholder="Type a message to Lumi…"
+              placeholder="Tell Lumi what to do on this page…"
             ></textarea>
           </div>
           <button id="messageSubmit" type="submit" data-mode="send" aria-label="Send message" title="Send message" disabled>

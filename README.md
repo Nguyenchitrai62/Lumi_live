@@ -9,6 +9,12 @@
 
 # Lumi Live
 
+Open an ERP page, open the Lumi side panel, and enter a prompt. Lumi Work Mode
+binds that turn to the current tab and host, observes the page, performs the
+requested browser workflow, and verifies the result. The Excel QC workspace is
+an optional stricter run-plan mode rather than a prerequisite for prompt-driven
+ERP work.
+
 Lumi Live is a real-time AI companion that supports voice and text conversations,
 understands page context, assists with browser interactions, connects to external
 tools, and responds through an animated avatar.
@@ -124,6 +130,53 @@ permissions individually.
 The extension may also provide quick-connect integrations for selected services.
 Available integrations and their setup flow depend on the current build.
 
+## Run Excel QC tests
+
+Lumi can compile a semi-structured `.xlsx` workbook into a reviewable run plan,
+execute its test cases sequentially in the current Chrome profile, checkpoint
+every step, and export a new executed workbook plus an HTML evidence report.
+Version 0.2.0 also embeds the sanitized `hicas-erp-qc` knowledge source and
+runtime index, stores local chat history in IndexedDB, locks an active run to
+its ERP tab, records redacted console/network evidence, prepares editable
+Redmine drafts, compares Excel data with paginated ERP grids, and creates
+reviewed daily schedules. Scheduled and ordinary runs keep the same approval,
+owned-sandbox, and high-risk action gates.
+
+Install and start the local service on Windows:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".\qc_service[dev]"
+.\.venv\Scripts\lumi-qc-service.exe --data-dir .\.lumi-qc
+```
+
+If `python` is not installed, create the virtual environment with any Python
+3.11+ executable. The service defaults to
+[http://127.0.0.1:8765](http://127.0.0.1:8765) and prints its installation
+token at startup.
+
+Open **Excel Web Agent** in the Lumi side panel:
+
+1. Enter the local service URL and installation token.
+2. Choose the scenario/test `.xlsx` workbook, optionally attach a feature/spec
+   reference workbook, and list the ERP domains the run may access.
+3. Compile and review the canonical plan. Use **Refine with Lumi** for ambiguous
+   action mappings; missing business expectations remain specification issues.
+4. Approve the whole plan and start the run.
+5. Download `<original>_executed_<run-id>.xlsx` and the HTML evidence report.
+
+Run approval never reaches Gemini. The extension keeps an opaque token in
+`chrome.storage.session`, and the local service binds every mutating browser
+action to the active run, step, domain, action type, and any separate high-risk
+approval. ERP credentials are not persisted by the QC service.
+
+For the Hawee SIT adapter, project names are generated with a unique
+`LUMI-QC-<run>...` marker. The service registers a project as owned only after
+fresh post-save evidence contains that marker. Any later mutation under
+`/du-an/...` is denied unless the latest verified page state contains a project
+marker registered to the same run. Existing project cards and edit controls are
+therefore outside the run's mutation scope.
+
 ## Run the web app
 
 ```powershell
@@ -145,8 +198,10 @@ vision, chat, avatar customization, page interaction, and connected tools.
 | `npm run typecheck` | Type-check the project without emitting files |
 | `npm test` | Run extension regression tests |
 | `npm run build:extension` | Build the Lumi Live Chrome extension |
+| `npm run build:hicas-skill` | Validate the embedded HICAS skill and regenerate its runtime index |
 | `npm run build` | Build the extension and Next.js app |
 | `npm run start` | Start the production server |
+| `.\.venv\Scripts\python.exe -m unittest discover -s qc_service/tests -v` | Run QC service tests |
 
 ## Safety notes
 

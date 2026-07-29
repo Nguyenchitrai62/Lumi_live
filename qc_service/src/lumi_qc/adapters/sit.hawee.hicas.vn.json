@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "domain": "sit.hawee.hicas.vn",
+  "page_fingerprints": {
+    "project_catalog": {
+      "path": "/tong-quan",
+      "required_text": ["Tổng quan", "Danh mục dự án", "Tạo dự án"],
+      "project_card_selector": "[data-testid^=\"div-project-card-\"][data-testid$=\"-projects-grid-view\"]",
+      "project_id_pattern": "^div-project-card-([0-9a-f-]{36})-projects-grid-view$"
+    },
+    "project_create": {
+      "path": "/du-an/them",
+      "required_text": ["Tạo dự án", "Tên dự án", "Lưu"]
+    }
+  },
+  "project_creation": {
+    "instruction": "tao du an",
+    "name_selector": "#input-project-name-create-update-project-page",
+    "save_selector": "#button-save-create-update-project-page",
+    "name_prefix": "LUMI-QC"
+  },
+  "mutation_policy": {
+    "mode": "run_created_projects_only",
+    "deny_existing_project_edit_selector": "#button-edit-projects-grid-view",
+    "ownership_evidence": "A registered run marker must be present in the latest verified page state before any project mutation."
+  }
+}

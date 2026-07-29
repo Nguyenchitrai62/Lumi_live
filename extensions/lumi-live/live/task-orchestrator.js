@@ -104,6 +104,23 @@ function taskEvents(history, taskId) {
   return history.filter((event) => event.taskId === taskId);
 }
 
+export function qcPhaseForAction(name, kind = "") {
+  const actionName = String(name || "");
+  if (actionName === AGENT_DONE_ACTION_NAME || actionName === "qc_complete_run") return "COMPLETE";
+  if (actionName === "qc_get_run_plan" || actionName === "qc_update_step_mapping") return "PLAN";
+  if (actionName === "qc_begin_step") return "OBSERVE";
+  if (actionName === "qc_record_step") return "RECORD";
+  if (actionName === "browser_wait_for_page_state") return "STABILIZE";
+  if (
+    kind === "browser_observation"
+    || actionName === "browser_get_page_state"
+    || actionName === "browser_find_semantic_context"
+    || actionName === "browser_inspect_screenshot"
+  ) return "OBSERVE";
+  if (kind === "browser_action" || actionName.startsWith("browser_")) return "ACT";
+  return "PLAN";
+}
+
 export function createTaskOrchestrator({
   maxSteps = DEFAULT_AGENT_MAX_STEPS,
   identicalStateActionLimit = DEFAULT_IDENTICAL_STATE_ACTION_LIMIT,
@@ -234,6 +251,10 @@ export function createTaskOrchestrator({
     return {
       taskId,
       status: done ? (done.success ? "completed" : "failed") : "running",
+      phase: done
+        ? "COMPLETE"
+        : [...taskEvents(history, taskId)].reverse().find((event) => event.phase)?.phase
+          || "PLAN",
       usedSteps,
       maxSteps: started?.maxSteps || defaultMaxSteps,
       remainingSteps,
@@ -265,6 +286,7 @@ export function createTaskOrchestrator({
           }))
         : [],
       reason,
+      phase: "COMPLETE",
     });
   };
 
@@ -288,6 +310,7 @@ export function createTaskOrchestrator({
         Math.trunc(Number(metadata.maxSteps) || defaultMaxSteps),
       ),
       turnSequence: Number(metadata.turnSequence) || 0,
+      phase: "PLAN",
     });
     return taskId;
   };
@@ -315,6 +338,7 @@ export function createTaskOrchestrator({
     }
     const actionKind = cleanText(action.kind, 80)
       || (name === AGENT_DONE_ACTION_NAME ? "done" : "tool_action");
+    const phase = qcPhaseForAction(name, actionKind);
     const unverifiedBrowserAction = latestUnverifiedBrowserAction(taskId);
     if (
       name === AGENT_DONE_ACTION_NAME
@@ -431,6 +455,7 @@ export function createTaskOrchestrator({
         },
         actionFingerprint,
         contextFingerprint,
+        phase: "RECOVER",
         retryAttempt: sameActionFailures,
         observation: {
           summary: "No action ran. Choose a different target, query, wait condition, or supported interaction path.",
@@ -479,6 +504,7 @@ export function createTaskOrchestrator({
       },
       actionFingerprint,
       contextFingerprint,
+      phase,
       retryAttempt: sameActionFailures,
       observation: null,
     });
@@ -534,6 +560,7 @@ export function createTaskOrchestrator({
         repeated: false,
         verification,
       },
+      phase: failed ? "RECOVER" : step.phase,
     });
     if (step.action.kind === "browser_observation" && !failed) {
       const priorUnverified = latestUnverifiedBrowserAction(step.taskId);

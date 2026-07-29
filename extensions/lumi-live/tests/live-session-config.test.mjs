@@ -148,6 +148,9 @@ test("keeps website navigation available from New Tab and Chrome internal pages"
   assert.match(listTabsTool.description, /List all tabs/i);
   assert.match(switchTabTool.description, /Activate any existing Chrome tab/i);
   assert.match(instruction, /navigation tools .+ remain available from every active tab/i);
+  assert.match(instruction, /\[EXTENSION-AUTHORED WORK TARGET\]/);
+  assert.match(instruction, /exact tab as the default work surface/i);
+  assert.match(instruction, /Do not navigate to another host unless USER REQUEST explicitly names it/i);
   assert.match(instruction, /http, https, or file tab/i);
   assert.match(instruction, /Allow access to file URLs/i);
   assert.match(instruction, /must open exactly https:\/\/www\.google\.com\//i);

@@ -3145,6 +3145,9 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
   var BROWSER_ACTION_CLEANUP_DELAY_MS = 420;
   var FORM_INPUT_REVEAL_DURATION_MS = 500;
   var PAGE_SCROLL_DURATION_MS = 1e3;
+  var QC_FAST_ACTION_CLEANUP_DELAY_MS = 80;
+  var QC_FAST_FORM_INPUT_DURATION_MS = 120;
+  var QC_FAST_PAGE_SCROLL_DURATION_MS = 250;
   var PAGE_SCROLL_FRAME_ENTRANCE_DURATION_MS = 180;
   var PAGE_SCROLL_HUD_ENTRANCE_DURATION_MS = 220;
   var PAGE_SCROLL_ARROW_PULSE_DURATION_MS = 720;
@@ -3722,8 +3725,52 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
       throw new Error("Lumi blocks typing passwords, OTPs, payment-card data, API keys, and other secrets.");
     }
   }
-  function assertConfirmedPageAgentClick(element, confirmed) {
+  function projectMutationLabel(element) {
+    return joinElementValues(element, [
+      "innerText",
+      "textContent",
+      "aria-label",
+      "title",
+      "id",
+      "name",
+      "data-testid"
+    ]);
+  }
+  function isProtectedProjectMutationControl(element, workPolicy = null) {
+    const label = projectMutationLabel(element);
+    const projectCard = element.closest?.('[data-testid^="div-project-card-"]');
+    const mutationLabel = /(edit|delete|remove|save|update|archive|sửa|xóa|lưu|cập nhật|chỉnh sửa)/i;
+    const stableMutationId = /(button-(?:edit|delete|remove|save|update)-project|edit-projects-grid-view)/i;
+    const onProjectDetail = /^\/du-an\/(?!them(?:\/|$))[^/]+/i.test(String(workPolicy?.currentPath || ""));
+    return stableMutationId.test(label) || Boolean(projectCard) && mutationLabel.test(label) || onProjectDetail && mutationLabel.test(label);
+  }
+  function assertSafeErpProjectInput(_element, workPolicy = null) {
+    if (workPolicy?.protectExistingProjects === true && workPolicy?.allowProjectMutation !== true && /^\/du-an\/(?!them(?:\/|$))[^/]+/i.test(String(workPolicy.currentPath || ""))) {
+      throw new Error(
+        "Lumi Work Mode blocks editing a pre-existing ERP project. Only a new project created and verified in this Lumi conversation may be modified."
+      );
+    }
+  }
+  function assertConfirmedPageAgentClick(element, confirmed, workPolicy = null) {
     if (!element) return;
+    const link = element.closest?.("a[href], area[href]");
+    if (workPolicy?.lockToAllowedHost === true && link?.href) {
+      try {
+        const destination = new URL(link.href, globalThis.location?.href);
+        if (["http:", "https:"].includes(destination.protocol) && destination.hostname.toLowerCase() !== String(workPolicy.allowedHost || "").toLowerCase()) {
+          throw new Error(
+            `Lumi Work Mode blocks this link because it leaves ${workPolicy.allowedHost}. Name the other website explicitly in a new prompt if it should become part of the task.`
+          );
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Lumi Work Mode blocks")) throw error;
+      }
+    }
+    if (workPolicy?.protectExistingProjects === true && workPolicy?.allowProjectMutation !== true && isProtectedProjectMutationControl(element, workPolicy)) {
+      throw new Error(
+        "Lumi Work Mode blocks modifying or deleting a pre-existing ERP project. Open the create-project flow or work only with a project Lumi created and verified in this conversation."
+      );
+    }
     const label = joinElementValues(element, [
       "innerText",
       "textContent",
@@ -3739,15 +3786,21 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
 
   // extensions/lumi-live/core/visual-preferences.js
   var DEFAULT_VISUAL_PREFERENCES = Object.freeze({
+    executionMode: "step",
     showElementHighlights: DEFAULT_SHOW_ELEMENT_HIGHLIGHTS,
+    actionCleanupDelayMs: BROWSER_ACTION_CLEANUP_DELAY_MS,
     scrollDurationMs: PAGE_SCROLL_DURATION_MS,
     typingDurationMs: FORM_INPUT_REVEAL_DURATION_MS
   });
   function normalizeVisualPreferences(value = {}) {
+    const executionMode = value.executionMode === "fast_verified" ? "fast_verified" : "step";
+    const fast = executionMode === "fast_verified";
     return {
+      executionMode,
       showElementHighlights: typeof value.showElementHighlights === "boolean" ? value.showElementHighlights : DEFAULT_VISUAL_PREFERENCES.showElementHighlights,
-      scrollDurationMs: DEFAULT_VISUAL_PREFERENCES.scrollDurationMs,
-      typingDurationMs: DEFAULT_VISUAL_PREFERENCES.typingDurationMs
+      actionCleanupDelayMs: fast ? QC_FAST_ACTION_CLEANUP_DELAY_MS : DEFAULT_VISUAL_PREFERENCES.actionCleanupDelayMs,
+      scrollDurationMs: fast ? QC_FAST_PAGE_SCROLL_DURATION_MS : DEFAULT_VISUAL_PREFERENCES.scrollDurationMs,
+      typingDurationMs: fast ? QC_FAST_FORM_INPUT_DURATION_MS : DEFAULT_VISUAL_PREFERENCES.typingDurationMs
     };
   }
 
@@ -4896,14 +4949,15 @@ ${clippedAnchor.content}`);
         return { url: link.href, target: "_blank", source: "link" };
       }
       return null;
-    }, assertSafeInput = function(index) {
+    }, assertSafeInput = function(index, workPolicy = null) {
       const element = indexedElement(index);
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
       assertSafePageAgentInput(element);
-    }, assertConfirmedHighImpactClick = function(index, confirmed) {
+      assertSafeErpProjectInput(element, workPolicy);
+    }, assertConfirmedHighImpactClick = function(index, confirmed, workPolicy = null) {
       const element = indexedElement(index);
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
-      assertConfirmedPageAgentClick(element, confirmed);
+      assertConfirmedPageAgentClick(element, confirmed, workPolicy);
     };
     getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, collectFileInputs2 = collectFileInputs, isFileInput2 = isFileInput, isFileUploadTrigger2 = isFileUploadTrigger, clearPreparedFileUploadTarget2 = clearPreparedFileUploadTarget, getDeclarativeNewTabIntent2 = getDeclarativeNewTabIntent, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
     const runtime = {
@@ -4995,7 +5049,7 @@ ${clippedAnchor.content}`);
         if (!actionController.signal.aborted) {
           await new Promise((resolve) => setTimeout(
             resolve,
-            BROWSER_ACTION_CLEANUP_DELAY_MS
+            runtime.visualPreferences.actionCleanupDelayMs
           ));
         }
         await pageController.hideMask();
@@ -5148,7 +5202,7 @@ ${clippedAnchor.content}`);
       }
       if (tool === "browser_click") {
         const index = requireIndex(args);
-        assertConfirmedHighImpactClick(index, args.confirmed);
+        assertConfirmedHighImpactClick(index, args.confirmed, args._lumiWorkPolicy);
         const element = indexedElement(index);
         const videoClick = captureYouTubeVideoClick(element);
         const newTabIntent = getDeclarativeNewTabIntent(element);
@@ -5170,7 +5224,7 @@ ${clippedAnchor.content}`);
       if (tool === "browser_input_text") {
         const index = requireIndex(args);
         const text = String(args.text ?? "");
-        assertSafeInput(index);
+        assertSafeInput(index, args._lumiWorkPolicy);
         return withVisualAction(async (activeController, signal2) => {
           const element = indexedElement(index);
           if (!element || element.nodeType !== Node.ELEMENT_NODE) {
@@ -5189,6 +5243,7 @@ ${clippedAnchor.content}`);
         const index = requireIndex(args);
         const optionText = String(args.optionText ?? "").trim();
         if (!optionText) throw new Error("optionText is required.");
+        assertSafeErpProjectInput(indexedElement(index), args._lumiWorkPolicy);
         return withVisualAction((activeController) => activeController.selectOption(index, optionText));
       }
       if (tool === "browser_scroll") {

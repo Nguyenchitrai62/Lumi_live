@@ -2,7 +2,10 @@
 
 # dependencies
 /node_modules
-/.venv/
+**/.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
 /.pnp
 .pnp.*
 .yarn/*

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   assertConfirmedPageAgentClick,
+  assertSafeErpProjectInput,
   assertSafePageAgentInput,
 } from "../browser/page-agent-safety.js";
 
@@ -47,5 +48,62 @@ test("consequential clicks require an explicit confirmation in both languages", 
   assert.throws(
     () => assertConfirmedPageAgentClick(englishButton),
     /current user-authored request explicitly authorizes this exact action, target, and scope/,
+  );
+});
+
+test("Work Mode blocks mutations to existing ERP projects", () => {
+  const existingProjectPolicy = {
+    protectExistingProjects: true,
+    allowProjectMutation: false,
+    currentPath: "/du-an/existing-project",
+    allowedHost: "sit.hawee.hicas.vn",
+    lockToAllowedHost: true,
+  };
+  const editButton = element(
+    { "data-testid": "button-edit-projects-grid-view" },
+    {
+      innerText: "Edit",
+      closest(selector) {
+        return selector.includes("data-testid") ? {} : null;
+      },
+    },
+  );
+
+  assert.throws(
+    () => assertConfirmedPageAgentClick(editButton, true, existingProjectPolicy),
+    /blocks modifying or deleting a pre-existing ERP project/,
+  );
+  assert.throws(
+    () => assertSafeErpProjectInput(
+      element({ id: "input-project-name" }),
+      existingProjectPolicy,
+    ),
+    /blocks editing a pre-existing ERP project/,
+  );
+  assert.doesNotThrow(
+    () => assertSafeErpProjectInput(
+      element({ id: "input-project-name" }),
+      { ...existingProjectPolicy, allowProjectMutation: true },
+    ),
+  );
+});
+
+test("Work Mode blocks links that leave the selected ERP host", () => {
+  const externalLink = {
+    href: "https://example.com/",
+  };
+  const linkElement = element({}, {
+    innerText: "External",
+    closest(selector) {
+      return selector.includes("a[href]") ? externalLink : null;
+    },
+  });
+
+  assert.throws(
+    () => assertConfirmedPageAgentClick(linkElement, false, {
+      lockToAllowedHost: true,
+      allowedHost: "sit.hawee.hicas.vn",
+    }),
+    /blocks this link because it leaves sit\.hawee\.hicas\.vn/,
   );
 });

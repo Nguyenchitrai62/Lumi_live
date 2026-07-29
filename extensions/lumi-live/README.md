@@ -2,7 +2,62 @@
 
 The standalone Chrome extension runs Gemini Live, the Lumi Pixel Companion, the Lumi VTuber, PageAgent browser controls, and user-configured MCP tools without requiring the Next.js app.
 
+## Work on the current ERP tab
+
+The default experience is prompt-first. Open the ERP page, open Lumi beside it,
+and type the outcome you want. For every typed turn, the extension supplies a
+fresh extension-authored Work Target containing the exact active tab title and
+sanitized URL. Gemini therefore starts with a semantic page observation and
+works on that tab without asking which website to use.
+
+Work Mode keeps browser actions on the selected host unless the user's prompt
+explicitly names another website. On `sit.hawee.hicas.vn`, generic prompt work
+also protects all pre-existing projects: project edit, save, update, and delete
+controls are blocked outside the create-project route. A newly created project
+becomes writable only after Lumi observes a conclusive redirect to that new
+project during the same conversation. Excel QC remains available as an optional
+audited workflow when a workbook-driven run is needed.
+
 It also exposes a built-in `live_translate` agent tool backed by `gemini-3.5-live-translate-preview`. The tool reuses the saved Gemini API key, captures the active media element's audio, and plays the translated speech itself so the conversational agent does not repeat the dialogue.
+
+The collapsible **Excel Web Agent** workspace connects only to a loopback Lumi
+QC service. It compiles `.xlsx` test specifications, displays the full plan,
+accepts an optional feature/spec reference workbook, supports Gemini-assisted
+mapping through strict `qc_*` tools, and controls
+approve/start/pause/resume/cancel. During execution, the service persists the
+`PLAN → OBSERVE → ACT → STABILIZE → VERIFY → RECORD → RECOVER → COMPLETE`
+timeline and produces a new executed workbook and HTML report. The source
+workbook is never overwritten.
+
+Reference workbooks cannot expand the approved plan. Missing expected results
+remain blocking specification issues. For a domain adapter that enables
+run-created project ownership, each browser mapping also carries an entity
+scope; the extension cannot reclassify an existing project as owned.
+
+The conversational agent uses `gemini-3.1-flash-live-preview`; setup can fall
+back to `gemini-2.5-flash-native-audio-preview-12-2025` when the primary model
+is unavailable. Live Translate remains isolated on
+`gemini-3.5-live-translate-preview` and is never used as a tool-calling agent.
+
+## HICAS QC 0.2.0
+
+The extension packages `skills/hicas-erp-qc/SKILL.md`, its agent metadata, and
+the module references as source files. `npm run build:extension` validates those
+files, rejects credential/UUID/business-data findings, and regenerates
+`runtime-index.json` with source SHA-256, route fingerprints, controls, fields,
+workflows, and coverage. On HICAS pages the agent must call
+`hicas_get_skill_context` before planning or after a route change.
+
+QC Fast mode applies short visual delays only to an exact `skill_record` whose
+packaged control status is `verified`. Every other control, an unknown selector,
+a changed fingerprint, or inconclusive verification falls back to normal step
+mode. Observation, post-action verification, checkpointing, owned-sandbox
+restrictions, and separate high-risk approval remain mandatory.
+
+The Excel Web Agent now includes approved prompt plans, data comparison across
+all grid pages, schedules based on a previously successful run, terminal
+attention banners/badges/notifications, redacted audit evidence, and editable
+Redmine bug drafts. A draft is never sent until the user presses **Send**.
 
 ## Install
 
@@ -26,7 +81,7 @@ The protocol validates and safely coerces each selected action's arguments again
 
 If the Gemini key is missing or invalid, a centered warning opens Lumi Settings from its action button. If the Live WebSocket ends unexpectedly, the same warning surface offers **Reconnect**.
 
-The chat box remains editable while Lumi is responding or reconnecting. Sending during an active response adds the message to a visible queue and sends it automatically when the current turn finishes. Choose **Steer** on the queue row to interrupt the current turn and send that message immediately, or use the trash icon to remove it. Voice transcripts and typed turns are kept only in the side panel's memory and are supplied as initial history after a WebSocket reconnect, so Lumi stays silent instead of greeting again. Closing the side panel clears that conversation context.
+The chat box remains editable while Lumi is responding or reconnecting. Sending during an active response adds the message to a visible queue and sends it automatically when the current turn finishes. Choose **Steer** on the queue row to interrupt the current turn and send that message immediately, or use the trash icon to remove it. Voice transcripts and typed turns are saved locally in extension IndexedDB and are supplied as bounded initial history after a WebSocket reconnect, so Lumi stays silent instead of greeting again. Closing the panel ends the Live socket but preserves the conversation. Users can rename, continue, delete one, or delete all conversations. Storage is capped at 100 conversations or 100 MB; Lumi warns at the cap and never silently removes history.
 
 The chat composer accepts one JPEG, PNG, WebP, or GIF image per message from the attachment button, the clipboard, or drag and drop. Lumi shows a removable preview, resizes the image locally before sending it as a Gemini Live video frame, and omits the automatic active-tab screenshot for that message so the attached image remains the only visual context.
 
@@ -63,6 +118,7 @@ Implementations are grouped by responsibility:
 | `offscreen/` | Authorized tab-audio translation document |
 | `settings/` | Settings page and MCP permission UI |
 | `side-panel/` | Main Lumi panel, avatars, petals, and MCP activity UI |
+| `../../qc_service/` | Local FastAPI compiler, SQLite run state, approval gate, and reports |
 | `tests/` | Unit, integration, manifest, asset, and import-graph checks |
 
 `manifest.json` loads `background/index.js`, `side-panel/index.html`, and `settings/index.html` directly. `extensions/build.mjs` bundles `browser/controller.js` into `dist/controller.js`. `npm test` validates these paths and recursively resolves every local JavaScript import reachable at runtime.
@@ -149,7 +205,7 @@ Each connected server also has an enable switch. Turning it off keeps the saved 
 
 ## Local data and permissions
 
-The Gemini key, selected voice, thinking level, avatar preference, MCP servers, dynamically registered OAuth client metadata, OAuth tokens, Redmine API keys, and tool policies are stored in `chrome.storage.local`, which is isolated to the extension's Chrome profile and is not synchronized through `chrome.storage.sync`. Conversation context is not stored there; it remains in side-panel memory until the panel closes. Removing a connector deletes its saved connector identity and tokens. Connector authorization codes, tokens, OAuth credentials, and API keys are never sent to a Lumi-owned backend; they are sent only to the relevant provider or authorized MCP/Redmine endpoint.
+The Gemini key, selected voice, thinking level, avatar preference, MCP servers, dynamically registered OAuth client metadata, OAuth tokens, Redmine API keys, and tool policies are stored in `chrome.storage.local`, which is isolated to the extension's Chrome profile and is not synchronized through `chrome.storage.sync`. Sanitized conversations are stored separately in IndexedDB; raw model thinking, API keys, tokens, cookies, passwords, and secret-bearing arguments are excluded. Removing a connector deletes its saved connector identity and tokens. Connector authorization codes, tokens, OAuth credentials, and API keys are never sent to a Lumi-owned backend; they are sent only to the relevant provider or authorized MCP/Redmine endpoint.
 
 This local-only boundary means the extension author does not receive connector credentials or maintain user accounts. It does not mean no third party processes connector content: Notion, Atlassian, Redmine, or a user-configured MCP server serves the requested data, and MCP tool inputs/results needed for the agent task can be sent to the user's configured Gemini service. `chrome.storage.local` is browser-profile storage, not an operating-system encrypted credential vault, so users must still protect their Chrome profile and device.
 

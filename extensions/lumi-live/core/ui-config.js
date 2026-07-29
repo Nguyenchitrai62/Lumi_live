@@ -9,12 +9,16 @@ export const DEFAULT_AVATAR_MODE = "pixel";
 export const DEFAULT_FALLING_PETALS_ENABLED = true;
 // Tự kết nối khi side panel mở và đã có key/microphone. Options: true, false.
 export const DEFAULT_AUTO_CONNECT_ENABLED = true;
+// Primary and fallback Live Agent models. Live Translate remains a separate,
+// translation-only session and is configured in live/translate.js.
+export const DEFAULT_LIVE_AGENT_MODEL = "gemini-3.1-flash-live-preview";
+export const FALLBACK_LIVE_AGENT_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025";
 // Hiển thị highlight phần tử PageAgent mặc định. Options: true, false.
 export const DEFAULT_SHOW_ELEMENT_HIGHLIGHTS = false;
 
 // Lumi Task orchestration
 // Maximum number of non-done actions allowed in one Lumi Task.
-export const DEFAULT_AGENT_MAX_STEPS = 100;
+export const DEFAULT_AGENT_MAX_STEPS = 24;
 // Block an identical action after this many executions against the same observation.
 export const DEFAULT_IDENTICAL_STATE_ACTION_LIMIT = 2;
 // Number of controller prompts allowed when Gemini ends a turn without structured done.
@@ -78,6 +82,11 @@ export const BROWSER_ACTION_CLEANUP_DELAY_MS = 420;
 export const FORM_INPUT_REVEAL_DURATION_MS = 500;
 // Thời gian cuộn một browser_scroll (ms).
 export const PAGE_SCROLL_DURATION_MS = 1000;
+// QC Fast keeps the visible pointer/mask but shortens decorative delays. These
+// values are used only after an approved plan selects verified skill controls.
+export const QC_FAST_ACTION_CLEANUP_DELAY_MS = 80;
+export const QC_FAST_FORM_INPUT_DURATION_MS = 120;
+export const QC_FAST_PAGE_SCROLL_DURATION_MS = 250;
 // Thời gian viền hiệu ứng scroll xuất hiện (ms).
 export const PAGE_SCROLL_FRAME_ENTRANCE_DURATION_MS = 180;
 // Thời gian HUD hiệu ứng scroll trượt vào (ms).

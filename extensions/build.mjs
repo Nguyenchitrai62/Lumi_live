@@ -2,6 +2,7 @@ import { build } from "esbuild";
 import { cp, copyFile, mkdir, readFile, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { buildHicasSkillIndex } from "./hicas-skill-index.mjs";
 
 const extensionsRoot = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(extensionsRoot, "..");
@@ -11,6 +12,8 @@ const iconDirectory = path.join(extensionRoot, "icons");
 const avatarDirectory = path.join(extensionRoot, "assets", "avatars");
 const vtuberDirectory = path.join(avatarDirectory, "vtuber");
 const pixelAvatarDirectory = path.join(avatarDirectory, "pixel");
+
+await buildHicasSkillIndex();
 
 const pageControllerSameOriginIframePlugin = {
   name: "page-controller-same-origin-iframes",

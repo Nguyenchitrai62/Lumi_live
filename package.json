@@ -1,6 +1,6 @@
 {
   "name": "lumi-live",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -9,6 +9,7 @@
     "dev": "next dev",
     "build": "npm run build:extension && next build",
     "build:extension": "node extensions/build.mjs",
+    "build:hicas-skill": "node extensions/hicas-skill-index.mjs",
     "build:extensions": "npm run build:extension",
     "start": "next start",
     "lint": "eslint app extensions/lumi-live --ignore-pattern extensions/lumi-live/dist",

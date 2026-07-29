@@ -28,8 +28,69 @@ export function assertSafePageAgentInput(element) {
   }
 }
 
-export function assertConfirmedPageAgentClick(element, confirmed) {
+function projectMutationLabel(element) {
+  return joinElementValues(element, [
+    "innerText",
+    "textContent",
+    "aria-label",
+    "title",
+    "id",
+    "name",
+    "data-testid",
+  ]);
+}
+
+function isProtectedProjectMutationControl(element, workPolicy = null) {
+  const label = projectMutationLabel(element);
+  const projectCard = element.closest?.('[data-testid^="div-project-card-"]');
+  const mutationLabel = /(edit|delete|remove|save|update|archive|sửa|xóa|lưu|cập nhật|chỉnh sửa)/i;
+  const stableMutationId = /(button-(?:edit|delete|remove|save|update)-project|edit-projects-grid-view)/i;
+  const onProjectDetail = /^\/du-an\/(?!them(?:\/|$))[^/]+/i
+    .test(String(workPolicy?.currentPath || ""));
+  return stableMutationId.test(label)
+    || (Boolean(projectCard) && mutationLabel.test(label))
+    || (onProjectDetail && mutationLabel.test(label));
+}
+
+export function assertSafeErpProjectInput(_element, workPolicy = null) {
+  if (
+    workPolicy?.protectExistingProjects === true
+    && workPolicy?.allowProjectMutation !== true
+    && /^\/du-an\/(?!them(?:\/|$))[^/]+/i.test(String(workPolicy.currentPath || ""))
+  ) {
+    throw new Error(
+      "Lumi Work Mode blocks editing a pre-existing ERP project. Only a new project created and verified in this Lumi conversation may be modified.",
+    );
+  }
+}
+
+export function assertConfirmedPageAgentClick(element, confirmed, workPolicy = null) {
   if (!element) return;
+  const link = element.closest?.("a[href], area[href]");
+  if (workPolicy?.lockToAllowedHost === true && link?.href) {
+    try {
+      const destination = new URL(link.href, globalThis.location?.href);
+      if (
+        ["http:", "https:"].includes(destination.protocol)
+        && destination.hostname.toLowerCase() !== String(workPolicy.allowedHost || "").toLowerCase()
+      ) {
+        throw new Error(
+          `Lumi Work Mode blocks this link because it leaves ${workPolicy.allowedHost}. Name the other website explicitly in a new prompt if it should become part of the task.`,
+        );
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Lumi Work Mode blocks")) throw error;
+    }
+  }
+  if (
+    workPolicy?.protectExistingProjects === true
+    && workPolicy?.allowProjectMutation !== true
+    && isProtectedProjectMutationControl(element, workPolicy)
+  ) {
+    throw new Error(
+      "Lumi Work Mode blocks modifying or deleting a pre-existing ERP project. Open the create-project flow or work only with a project Lumi created and verified in this conversation.",
+    );
+  }
   const label = joinElementValues(element, [
     "innerText",
     "textContent",

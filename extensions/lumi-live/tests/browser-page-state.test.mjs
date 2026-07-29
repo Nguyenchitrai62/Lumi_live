@@ -48,7 +48,8 @@ test("browser page state supports targeted queries and dynamic waiting", () => {
   assert.match(instruction, /open Shadow DOM/i);
   assert.match(instruction, /same-origin frames/i);
   assert.match(instruction, /do not scroll again/i);
-  assert.doesNotMatch(instruction, /Hawee/i);
+  assert.match(instruction, /hicas_get_skill_context/i);
+  assert.match(instruction, /sit\.hawee\.hicas\.vn/i);
 });
 
 test("centers a long page-state response on an exact filename", () => {

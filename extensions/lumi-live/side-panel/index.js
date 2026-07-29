@@ -17,6 +17,7 @@ import {
   buildSessionInstruction,
   configureMcpTools,
   DEFAULT_THINKING_LEVEL,
+  FALLBACK_MODEL,
   findRejectedMcpDeclaration,
   MAX_AUTOMATIC_SESSION_RECONNECT_ATTEMPTS,
   MAX_MCP_TOOL_RESPONSE_CHARS,
@@ -84,6 +85,16 @@ import {
   shouldRenderStandaloneToolActivity,
   taskOwnsTurn,
 } from "./task-transcript-policy.js";
+import { isQcTool } from "../live/qc-tools.js";
+import { isHicasSkillTool } from "../live/hicas-tools.js";
+import { createQcWorkspaceController } from "./qc-workspace-controller.js";
+import { createHicasSkillRuntime } from "./hicas-skill-runtime.js";
+import { createConversationHistoryStore } from "./conversation-history.js";
+import {
+  authorizeWorkModeAction,
+  createWorkModeTurn,
+  recordCreatedProjectFromResult,
+} from "./work-mode-context.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
@@ -94,6 +105,7 @@ const PETALS_STORAGE_KEY = STORAGE_KEYS.fallingPetals;
 const AVATAR_MODE_STORAGE_KEY = STORAGE_KEYS.avatarMode;
 const THINKING_LEVEL_STORAGE_KEY = STORAGE_KEYS.thinkingLevel;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
+const HISTORY_ACTIVE_CONVERSATION_STORAGE_KEY = STORAGE_KEYS.historyActiveConversation;
 const PANEL_LIFECYCLE_MESSAGE = EXTENSION_EVENTS.lifecycle;
 const GEMINI_SETUP_TIMEOUT_MS = 15000;
 const EARLY_CONNECTION_DROP_MS = 3000;
@@ -118,6 +130,18 @@ const elements = {
   targetHint: document.querySelector("#targetHint"),
   connectTabButton: document.querySelector("#connectTabButton"),
   transcript: document.querySelector("#transcript"),
+  historyButton: document.querySelector("#historyButton"),
+  historyDrawer: document.querySelector("#historyDrawer"),
+  historyCloseButton: document.querySelector("#historyCloseButton"),
+  historyNewButton: document.querySelector("#historyNewButton"),
+  historyClearButton: document.querySelector("#historyClearButton"),
+  historyStatus: document.querySelector("#historyStatus"),
+  historyList: document.querySelector("#historyList"),
+  runAttention: document.querySelector("#runAttention"),
+  runAttentionTitle: document.querySelector("#runAttentionTitle"),
+  runAttentionMessage: document.querySelector("#runAttentionMessage"),
+  runAttentionReturn: document.querySelector("#runAttentionReturn"),
+  runAttentionAcknowledge: document.querySelector("#runAttentionAcknowledge"),
   mcpToolNotice: document.querySelector("#mcpToolNotice"),
   mcpToolNoticeTitle: document.querySelector("#mcpToolNoticeTitle"),
   mcpToolNoticeMessage: document.querySelector("#mcpToolNoticeMessage"),
@@ -161,6 +185,43 @@ const elements = {
   thinkingLevelLabel: document.querySelector("#thinkingLevelLabel"),
   thinkingMenu: document.querySelector("#thinkingMenu"),
   thinkingOptions: [...document.querySelectorAll("[data-thinking-level]")],
+  qcWorkspace: document.querySelector("#qcWorkspace"),
+  qcRunSummary: document.querySelector("#qcRunSummary"),
+  qcServiceUrl: document.querySelector("#qcServiceUrl"),
+  qcServiceToken: document.querySelector("#qcServiceToken"),
+  qcAllowedDomains: document.querySelector("#qcAllowedDomains"),
+  qcDiscoveryMode: document.querySelector("#qcDiscoveryMode"),
+  qcWorkbookInput: document.querySelector("#qcWorkbookInput"),
+  qcReferenceWorkbookInput: document.querySelector("#qcReferenceWorkbookInput"),
+  qcConnectButton: document.querySelector("#qcConnectButton"),
+  qcCompileButton: document.querySelector("#qcCompileButton"),
+  qcStatus: document.querySelector("#qcStatus"),
+  qcRunPlan: document.querySelector("#qcRunPlan"),
+  qcComparisonSheet: document.querySelector("#qcComparisonSheet"),
+  qcComparisonHeaderRow: document.querySelector("#qcComparisonHeaderRow"),
+  qcComparisonKeys: document.querySelector("#qcComparisonKeys"),
+  qcComparisonMappings: document.querySelector("#qcComparisonMappings"),
+  qcCompileComparisonButton: document.querySelector("#qcCompileComparisonButton"),
+  qcCollectComparisonButton: document.querySelector("#qcCollectComparisonButton"),
+  qcComparisonStatus: document.querySelector("#qcComparisonStatus"),
+  qcScheduleName: document.querySelector("#qcScheduleName"),
+  qcScheduleTime: document.querySelector("#qcScheduleTime"),
+  qcScheduleWeekdays: [...document.querySelectorAll("[data-qc-weekday]")],
+  qcCreateScheduleButton: document.querySelector("#qcCreateScheduleButton"),
+  qcRefreshSchedulesButton: document.querySelector("#qcRefreshSchedulesButton"),
+  qcScheduleList: document.querySelector("#qcScheduleList"),
+  qcRefreshBugDraftsButton: document.querySelector("#qcRefreshBugDraftsButton"),
+  qcBugDraftList: document.querySelector("#qcBugDraftList"),
+  qcRefineButton: document.querySelector("#qcRefineButton"),
+  qcApproveButton: document.querySelector("#qcApproveButton"),
+  qcStartRunButton: document.querySelector("#qcStartRunButton"),
+  qcPauseRunButton: document.querySelector("#qcPauseRunButton"),
+  qcResumeRunButton: document.querySelector("#qcResumeRunButton"),
+  qcCancelRunButton: document.querySelector("#qcCancelRunButton"),
+  qcApproveStepButton: document.querySelector("#qcApproveStepButton"),
+  qcDownloads: document.querySelector("#qcDownloads"),
+  qcDownloadExcel: document.querySelector("#qcDownloadExcel"),
+  qcDownloadHtml: document.querySelector("#qcDownloadHtml"),
 };
 
 let sessionStatus = "idle";
@@ -210,6 +271,8 @@ let contextRefreshPending = false;
 let backgroundSessionReconnectPending = false;
 let pendingSessionHandoffSocket = null;
 let activeTurnUserRequest = "";
+let activeWorkModeTurn = null;
+const ownedWorkModeProjectUrls = new Set();
 const conversationHistory = [];
 const queuedUserMessages = [];
 const initialTranscriptMarkup = elements.transcript.innerHTML;
@@ -220,6 +283,10 @@ let thinkingCollapseFrameId = null;
 let transcriptAutoFollow = true;
 let transcriptProgrammaticScroll = false;
 let transcriptProgrammaticScrollTimerId = null;
+const conversationHistoryStore = createConversationHistoryStore();
+let activeConversationId = "";
+let historyReady = false;
+let historyLimitWarning = "";
 
 let petalsEnabled = DEFAULT_FALLING_PETALS_ENABLED;
 
@@ -283,7 +350,154 @@ const taskStepView = createTaskStepView({
 });
 const taskOrchestrator = createTaskOrchestrator({
   maxSteps: DEFAULT_AGENT_MAX_STEPS,
-  onHistoryChange: (history) => taskStepView.render(history),
+  onHistoryChange: (history, event) => {
+    taskStepView.render(history);
+    void recordTaskHistoryEvent(event);
+  },
+});
+const hicasSkill = createHicasSkillRuntime();
+const qcWorkspace = createQcWorkspaceController({
+  elements: {
+    workspace: elements.qcWorkspace,
+    summary: elements.qcRunSummary,
+    serviceUrl: elements.qcServiceUrl,
+    serviceToken: elements.qcServiceToken,
+    domains: elements.qcAllowedDomains,
+    discovery: elements.qcDiscoveryMode,
+    workbook: elements.qcWorkbookInput,
+    referenceWorkbook: elements.qcReferenceWorkbookInput,
+    connectButton: elements.qcConnectButton,
+    compileButton: elements.qcCompileButton,
+    status: elements.qcStatus,
+    plan: elements.qcRunPlan,
+    comparisonSheet: elements.qcComparisonSheet,
+    comparisonHeaderRow: elements.qcComparisonHeaderRow,
+    comparisonKeys: elements.qcComparisonKeys,
+    comparisonMappings: elements.qcComparisonMappings,
+    compileComparisonButton: elements.qcCompileComparisonButton,
+    collectComparisonButton: elements.qcCollectComparisonButton,
+    comparisonStatus: elements.qcComparisonStatus,
+    scheduleName: elements.qcScheduleName,
+    scheduleTime: elements.qcScheduleTime,
+    scheduleWeekdays: elements.qcScheduleWeekdays,
+    createScheduleButton: elements.qcCreateScheduleButton,
+    refreshSchedulesButton: elements.qcRefreshSchedulesButton,
+    scheduleList: elements.qcScheduleList,
+    refreshBugDraftsButton: elements.qcRefreshBugDraftsButton,
+    bugDraftList: elements.qcBugDraftList,
+    refineButton: elements.qcRefineButton,
+    approveButton: elements.qcApproveButton,
+    startButton: elements.qcStartRunButton,
+    pauseButton: elements.qcPauseRunButton,
+    resumeButton: elements.qcResumeRunButton,
+    cancelButton: elements.qcCancelRunButton,
+    approveStepButton: elements.qcApproveStepButton,
+    downloads: elements.qcDownloads,
+    downloadExcel: elements.qcDownloadExcel,
+    downloadHtml: elements.qcDownloadHtml,
+  },
+  storageKeys: {
+    url: STORAGE_KEYS.qcServiceUrl,
+    token: STORAGE_KEYS.qcServiceToken,
+    domains: STORAGE_KEYS.qcAllowedDomains,
+    discovery: STORAGE_KEYS.qcDiscoveryEnabled,
+    activeRun: STORAGE_KEYS.qcActiveRun,
+    approvalToken: STORAGE_KEYS.qcRunApprovalToken,
+  },
+  onRefineRequested: ({ runId, needsReview }) => {
+    queueUserMessage(
+      `Review draft QC run ${runId}. Load it with qc_get_run_plan and resolve its ${needsReview} ambiguous step mapping(s) using qc_update_step_mapping. Do not invent missing expected business results; leave those as needs_review and explain the blocker. Finish by reporting how many steps still need human review.`,
+    );
+  },
+  onRunStarted: ({ runId, testCases, steps, executionMode = "step", scheduled = false }) => {
+    void sendRuntime("set_qc_execution_mode", {
+      executionMode,
+      tabId: activeWorkModeTurn?.target?.tabId ?? null,
+    }).catch(() => {});
+    queueUserMessage(
+      `Execute ${scheduled ? "scheduled " : ""}approved Excel QC run ${runId}: ${testCases} test case(s), ${steps} step(s). Load the canonical plan with qc_get_run_plan and process it sequentially. For each step call qc_begin_step, observe-act-stabilize-verify through browser tools, then qc_record_step. Use fast execution only for controls explicitly returned as verified by hicas_get_skill_context; otherwise use step mode or needs_review. Read every pagination page or virtualized segment for comparisons. Do not skip terminal records. Call qc_complete_run only after every step is recorded.`,
+    );
+  },
+  onComparisonRunReady: ({ runId, comparisonId, execute = false }) => {
+    if (!execute) {
+      elements.statusLine.textContent =
+        `Comparison plan ${runId} is ready for mapping/key review and approval.`;
+      return;
+    }
+    queueUserMessage(
+      `Execute approved Data Compare run ${runId}, comparison ${comparisonId}. Extract every row from the current ERP grid across all pagination pages and virtualized segments. Use the approved field mapping and key only; send the complete row array with qc_record_comparison_actual. Ambiguous mapping or incomplete grid coverage must be needs_review, never a product defect.`,
+    );
+  },
+  getActiveTarget: () => sendRuntime("browser_tool", {
+    tool: "browser_get_active_context",
+    args: {},
+  }),
+  getKnowledgeTarget: (url) => hicasSkill.routeMetadata(url),
+  onSchedulesChanged: (schedules) => {
+    void sendRuntime("qc_schedules_sync", { schedules }).catch(() => {});
+  },
+  onSendBugDraft: async (item) => {
+    const draft = item.draft || {};
+    const searchTool = [...activeMcpTools.values()].find(
+      (tool) => tool.toolName === "redmine_search_issues",
+    );
+    const createTool = [...activeMcpTools.values()].find(
+      (tool) => tool.toolName === "redmine_create_issue",
+    );
+    if (!createTool) {
+      throw new Error("Connect the Redmine connector in Lumi Settings before sending this draft.");
+    }
+    let duplicates = [];
+    if (searchTool) {
+      const searchResult = await runMcpTool(searchTool, {
+        projectId: draft.project_id,
+        statusId: "open",
+        limit: 100,
+        sort: "updated_on:desc",
+      }, `redmine-duplicate-${item.id}`);
+      const issues = searchResult?.issues || searchResult?.structuredContent?.issues || [];
+      const fingerprintText = `${draft.module || ""} ${draft.step_id || ""}`.toLowerCase();
+      duplicates = issues.filter((issue) => {
+        const text = `${issue.subject || ""} ${issue.description || ""}`.toLowerCase();
+        return fingerprintText.split(/\s+/).filter((term) => term.length > 3)
+          .some((term) => text.includes(term));
+      }).slice(0, 5);
+    }
+    if (
+      duplicates.length
+      && !window.confirm(
+        `Redmine may already contain ${duplicates.length} similar open issue(s): `
+        + `${duplicates.map((issue) => `#${issue.id}`).join(", ")}. Send anyway?`,
+      )
+    ) {
+      throw new Error("Send cancelled after possible duplicate warning.");
+    }
+    const result = await runMcpTool(createTool, {
+      projectId: draft.project_id,
+      subject: draft.subject,
+      description: draft.description,
+      ...(draft.tracker_id ? { trackerId: draft.tracker_id } : {}),
+      ...(draft.priority_id ? { priorityId: draft.priority_id } : {}),
+      ...(draft.assigned_to_id ? { assignedToId: draft.assigned_to_id } : {}),
+    }, `redmine-send-${item.id}`);
+    const issue = result?.issue || result?.structuredContent?.issue || result;
+    const issueId = Number(issue?.id);
+    if (!Number.isInteger(issueId) || issueId < 1) {
+      throw new Error("Redmine did not return a created issue ID.");
+    }
+    return {
+      issueId,
+      issueUrl: issue?.url || "",
+    };
+  },
+  onCriticalApprovalGranted: ({ runId, stepId }) => {
+    queueUserMessage(
+      `The user granted separate approval for high-risk QC step ${stepId} in run ${runId}. Begin that exact step again, then continue the approved run without broadening its scope.`,
+    );
+  },
+  onStatus: (message, tone) => {
+    if (tone === "error") elements.statusLine.textContent = message;
+  },
 });
 
 function sendRuntime(command, payload = {}) {
@@ -820,11 +1034,13 @@ function updateTarget(status) {
     ? status.title || "Active web page"
     : navigationReady ? "Navigation ready" : "No controllable page";
   elements.targetHint.textContent = connected
-    ? status.controllerReady === false ? "PageAgent is preparing this page..." : "Auto-following the active Chrome tab."
+    ? status.controllerReady === false
+      ? "Preparing Work Mode for this page..."
+      : "Prompt-ready. Lumi will work on this exact tab."
     : status?.reason || "Lumi can open or switch to a website from this tab.";
-  elements.connectTabButton.textContent = connected ? "Auto" : navigationReady ? "Ready" : "Waiting";
+  elements.connectTabButton.textContent = connected ? "Work" : navigationReady ? "Ready" : "Waiting";
   elements.connectTabButton.title = connected
-    ? status.url || "Automatically follows the active tab"
+    ? status.url || "This tab is the Work Mode target"
     : navigationReady ? "Website navigation is available" : "Waiting for an http/https tab";
 }
 
@@ -857,6 +1073,237 @@ function rememberConversationTurn(role, text) {
   conversationHistory.push({ role: normalizedRole, text: clean });
   const recentHistory = trimConversationHistory(conversationHistory);
   conversationHistory.splice(0, conversationHistory.length, ...recentHistory);
+  void persistHistoryMessage(normalizedRole, clean);
+}
+
+async function ensureActiveConversation() {
+  if (activeConversationId) {
+    const existing = await conversationHistoryStore.getConversation(activeConversationId);
+    if (existing) return existing;
+  }
+  const conversation = await conversationHistoryStore.createConversation();
+  activeConversationId = conversation.id;
+  await chrome.storage.local.set({
+    [HISTORY_ACTIVE_CONVERSATION_STORAGE_KEY]: activeConversationId,
+  });
+  return conversation;
+}
+
+async function persistHistoryMessage(role, text, {
+  kind = "chat",
+  runId = qcWorkspace?.activeRun?.run_id || "",
+} = {}) {
+  if (!historyReady) return;
+  try {
+    const conversation = await ensureActiveConversation();
+    await conversationHistoryStore.addMessage(conversation.id, {
+      role,
+      text,
+      kind,
+      runId,
+    });
+    historyLimitWarning = "";
+    if (!elements.historyDrawer.hidden) await renderHistoryList();
+  } catch (error) {
+    historyLimitWarning = error instanceof Error ? error.message : "Could not save chat history.";
+    elements.historyStatus.textContent = historyLimitWarning;
+    elements.statusLine.textContent = historyLimitWarning;
+  }
+}
+
+async function recordTaskHistoryEvent(event) {
+  if (event?.type === "task_started") {
+    void sendRuntime("task_target_lock", {
+      taskId: event.taskId,
+      runId: qcWorkspace?.activeRun?.run_id || "",
+      tabId: activeWorkModeTurn?.target?.tabId ?? null,
+    }).catch(() => {});
+    return;
+  }
+  if (event?.type !== "task_done") return;
+  if (!event.success) {
+    await raiseTerminalAttention(event);
+  }
+  void sendRuntime("set_qc_execution_mode", { executionMode: "step" }).catch(() => {});
+  void sendRuntime("task_target_release", { taskId: event.taskId }).catch(() => {});
+  if (!historyReady) return;
+  const outcome = event.success ? "Completed" : "Failed";
+  await persistHistoryMessage(
+    "system",
+    `${outcome}: ${event.result}${event.evidence ? `\nEvidence: ${event.evidence}` : ""}`,
+    {
+      kind: event.success ? "task_summary" : "terminal_error",
+    },
+  );
+}
+
+function renderRunAttention(attention) {
+  elements.runAttention.hidden = !attention;
+  if (!attention) return;
+  elements.runAttentionTitle.textContent = attention.title || "LUMI needs your attention";
+  elements.runAttentionMessage.textContent =
+    attention.message || "The current workflow stopped.";
+  elements.runAttentionReturn.disabled = !Number.isInteger(attention.tabId);
+  elements.runAttentionAcknowledge.disabled = Number.isInteger(attention.tabId);
+}
+
+async function raiseTerminalAttention(event) {
+  const message = String(event.result || event.evidence || "The current workflow failed.")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1000);
+  const runId = qcWorkspace?.activeRun?.run_id || "";
+  const attention = await sendRuntime("attention_raise", {
+    taskId: event.taskId,
+    runId,
+    tabId: activeWorkModeTurn?.target?.tabId ?? null,
+    title: "LUMI workflow stopped",
+    message,
+  }).catch(() => ({
+    taskId: event.taskId,
+    tabId: activeWorkModeTurn?.target?.tabId ?? null,
+    title: "LUMI workflow stopped",
+    message,
+  }));
+  renderRunAttention(attention);
+  avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
+  elements.statusLine.textContent = message;
+  let savedEvidence = null;
+  const taskUrl = activeWorkModeTurn?.target?.url || "";
+  if (qcWorkspace.mayCaptureOwnedSandboxEvidence(taskUrl)) {
+    const captured = await captureCurrentTabFrame().catch(() => null);
+    if (
+      captured?.frame
+      && captured.source?.tabId === activeWorkModeTurn?.target?.tabId
+    ) {
+      savedEvidence = await qcWorkspace.saveTerminalEvidence(
+        captured.frame,
+        captured.source.url || taskUrl,
+      ).catch(() => null);
+    }
+  }
+  await qcWorkspace.blockActiveRun(message).catch(() => null);
+  if (savedEvidence?.path) {
+    void persistHistoryMessage(
+      "system",
+      `Terminal evidence recorded for the owned sandbox run: ${savedEvidence.path}`,
+      { kind: "task_summary" },
+    );
+  }
+}
+
+function formatHistoryTime(value) {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(value));
+  } catch {
+    return "";
+  }
+}
+
+async function renderHistoryList() {
+  const conversations = await conversationHistoryStore.listConversations();
+  const usage = await conversationHistoryStore.storageUsage();
+  elements.historyStatus.textContent = historyLimitWarning
+    || `${usage.conversations}/100 chats · ${(usage.bytes / (1024 * 1024)).toFixed(1)}/100 MB`;
+  elements.historyList.replaceChildren();
+  for (const conversation of conversations) {
+    const item = document.createElement("li");
+    item.dataset.active = String(conversation.id === activeConversationId);
+    const open = document.createElement("button");
+    open.type = "button";
+    open.dataset.action = "open";
+    open.dataset.conversationId = conversation.id;
+    const title = document.createElement("strong");
+    title.textContent = conversation.title;
+    const metadata = document.createElement("small");
+    metadata.textContent =
+      `${conversation.messageCount} messages · ${formatHistoryTime(conversation.updatedAt)}`;
+    open.append(title, metadata);
+    const actions = document.createElement("div");
+    actions.className = "history-item-actions";
+    for (const [action, label] of [["rename", "Rename"], ["delete", "Delete"]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.action = action;
+      button.dataset.conversationId = conversation.id;
+      button.textContent = label;
+      actions.append(button);
+    }
+    item.append(open, actions);
+    elements.historyList.append(item);
+  }
+}
+
+async function restoreConversation(conversationId, { reconnect = true } = {}) {
+  if (taskOrchestrator.activeTask) {
+    elements.historyStatus.textContent = "Finish or stop the current task before switching chats.";
+    return false;
+  }
+  const conversation = await conversationHistoryStore.getConversation(conversationId);
+  if (!conversation) return false;
+  const messages = await conversationHistoryStore.getMessages(conversationId);
+  clearConversationContext();
+  if (messages.length) elements.transcript.replaceChildren();
+  for (const message of messages) {
+    if (!["user", "model"].includes(message.role)) continue;
+    const role = message.role === "model" ? "lumi" : "user";
+    const rendered = createMessage(role, message.text);
+    if (role === "lumi") renderMarkdown(rendered.content, message.text);
+    conversationHistory.push({ role: message.role, text: message.text });
+  }
+  const recentHistory = trimConversationHistory(conversationHistory);
+  conversationHistory.splice(0, conversationHistory.length, ...recentHistory);
+  activeConversationId = conversation.id;
+  await chrome.storage.local.set({
+    [HISTORY_ACTIVE_CONVERSATION_STORAGE_KEY]: activeConversationId,
+  });
+  await renderHistoryList();
+  elements.historyDrawer.hidden = true;
+  if (reconnect && sessionStatus === "ready") {
+    void restartSessionWithContext("Loading local chat history…");
+  }
+  return true;
+}
+
+async function createNewConversation() {
+  if (taskOrchestrator.activeTask) {
+    elements.historyStatus.textContent = "Finish or stop the current task before starting a new chat.";
+    return;
+  }
+  try {
+    const conversation = await conversationHistoryStore.createConversation();
+    activeConversationId = conversation.id;
+    await chrome.storage.local.set({
+      [HISTORY_ACTIVE_CONVERSATION_STORAGE_KEY]: activeConversationId,
+    });
+    clearConversationContext();
+    await renderHistoryList();
+    elements.historyDrawer.hidden = true;
+    if (sessionStatus === "ready") {
+      void restartSessionWithContext("Starting a new local chat…", {
+        discardOldContext: true,
+      });
+    }
+  } catch (error) {
+    historyLimitWarning = error instanceof Error ? error.message : "Could not create a new chat.";
+    elements.historyStatus.textContent = historyLimitWarning;
+  }
+}
+
+async function initializeConversationHistory() {
+  await conversationHistoryStore.openDatabase();
+  const stored = await chrome.storage.local.get(HISTORY_ACTIVE_CONVERSATION_STORAGE_KEY);
+  activeConversationId = String(stored[HISTORY_ACTIVE_CONVERSATION_STORAGE_KEY] || "");
+  historyReady = true;
+  let conversation = activeConversationId
+    ? await conversationHistoryStore.getConversation(activeConversationId)
+    : null;
+  if (!conversation) conversation = await ensureActiveConversation();
+  await restoreConversation(conversation.id, { reconnect: false });
+  await renderHistoryList();
 }
 
 function clearConversationContext() {
@@ -1486,25 +1933,133 @@ async function runLiveTranslationTool(args = {}) {
   };
 }
 
+function redactAuditText(value) {
+  return String(value || "")
+    .replace(/\bAIza[A-Za-z0-9_-]{30,}\b/g, "[REDACTED_API_KEY]")
+    .replace(
+      /\b(password|passwd|pwd|otp|secret|token|authorization|cookie)\s*[:=]\s*([^\s,;]+)/gi,
+      "$1=[REDACTED]",
+    )
+    .slice(0, 8000);
+}
+
+function auditBrowserArguments(tool, args = {}) {
+  const audit = { ...args };
+  delete audit._lumiWorkPolicy;
+  delete audit.confirmed;
+  if (tool === "browser_input_text") audit.text = "[REDACTED_INPUT]";
+  if (Array.isArray(audit.filePaths)) {
+    audit.filePaths = audit.filePaths.map((value) =>
+      String(value).split(/[\\/]/).at(-1)).slice(0, 12);
+  }
+  return audit;
+}
+
+function auditBrowserResult(result = {}) {
+  const verification = result?.controllerVerification || {};
+  const diagnostics = result?.runtimeDiagnostics || {};
+  return {
+    success: result?.success !== false,
+    message: redactAuditText(result?.message || result?.error || ""),
+    url: redactAuditText(verification.url || result?.url || ""),
+    title: redactAuditText(verification.title || result?.title || ""),
+    query: redactAuditText(verification.query || ""),
+    queryMatched: verification.queryMatched,
+    evidence: redactAuditText(
+      verification.content
+      || verification.pageState
+      || result?.content
+      || "",
+    ),
+    consoleErrors: Array.isArray(diagnostics.consoleErrors)
+      ? diagnostics.consoleErrors.slice(-50)
+      : [],
+    networkErrors: Array.isArray(diagnostics.networkErrors)
+      ? diagnostics.networkErrors.slice(-50)
+      : [],
+  };
+}
+
 async function runBrowserTool(tool, args) {
   browserToolRunning = true;
+  const controllerStartedAt = performance.now();
   const isUiAction = BROWSER_UI_ACTION_TOOLS.has(tool);
   avatarController.transitionState(isUiAction ? "ui_control" : "thinking");
   try {
+    const activeContext = await sendRuntime("browser_tool", {
+      tool: "browser_get_active_context",
+      args: {},
+    }).catch(() => null);
+    if (isUiAction) {
+      const knowledgeGate = await hicasSkill.actionGate(activeContext?.url || "");
+      if (knowledgeGate.required && !knowledgeGate.prepared) {
+        const error = new Error(knowledgeGate.error);
+        error.recoverable = true;
+        throw error;
+      }
+    }
+    const qcRunActive = ["running", "paused"].includes(qcWorkspace.activeRun?.status);
+    let effectiveExecutionMode = "step";
+    if (
+      isUiAction
+      && qcRunActive
+      && qcWorkspace.activeRun?.plan?.execution_mode === "fast_verified"
+    ) {
+      const controlCheck = await hicasSkill.verifiedControl({
+        url: activeContext?.url || "",
+        recordId: qcWorkspace.activeStep?.skill_record || "",
+      });
+      const fastAllowed = controlCheck.allowed
+        && qcWorkspace.activeStep?.coverage_status === "verified";
+      effectiveExecutionMode = fastAllowed ? "fast_verified" : "step";
+      await sendRuntime("set_qc_execution_mode", {
+        tabId: activeWorkModeTurn?.target?.tabId ?? null,
+        executionMode: effectiveExecutionMode,
+      });
+    }
+    const workModeAuthorization = isUiAction && !qcRunActive
+      ? authorizeWorkModeAction({
+          turn: activeWorkModeTurn,
+          tool,
+          args,
+          currentContext: activeContext,
+          ownedProjectUrls: ownedWorkModeProjectUrls,
+        })
+      : { args, projectPolicy: null };
+    const qcAuthorizedArgs = isUiAction
+      ? await qcWorkspace.authorizeBrowserAction(
+          tool,
+          workModeAuthorization.args,
+          activeContext?.url || "",
+        )
+      : null;
+    const executionArgs = qcAuthorizedArgs || workModeAuthorization.args || args;
+    await qcWorkspace.recordAgentEvent({
+      type: isUiAction ? "browser_action_started" : "browser_observation_started",
+      phase: isUiAction ? "ACT" : "OBSERVE",
+      payload: {
+        tool,
+        arguments: auditBrowserArguments(tool, executionArgs),
+        url: activeContext?.url || "",
+        execution_mode: effectiveExecutionMode,
+      },
+    });
     let result = tool === "browser_inspect_screenshot"
       ? await captureAndSendVisualInspectionFrame()
-      : await sendRuntime("browser_tool", { tool, args });
+      : await sendRuntime("browser_tool", { tool, args: executionArgs });
+    const actionCompletedAt = performance.now();
     if (tool === "browser_capture_screenshot" && result?.previewDataUrl) {
       createCapturedTabMessage(result);
       result = { ...result };
       delete result.previewDataUrl;
     }
     if (isUiAction) {
+      const stabilizationStartedAt = performance.now();
       result = {
         ...result,
         controllerVerification: await collectAutomaticBrowserVerification({
           tool,
-          args,
+          args: executionArgs,
           result,
           readPageState: (query) => sendRuntime("browser_tool", {
             tool: "browser_get_page_state",
@@ -1512,7 +2067,48 @@ async function runBrowserTool(tool, args) {
           }),
         }),
       };
+      result.lumiTimings = {
+        controller_ms: Math.round(actionCompletedAt - controllerStartedAt),
+        stabilize_ms: Math.round(performance.now() - stabilizationStartedAt),
+        total_ms: Math.round(performance.now() - controllerStartedAt),
+      };
+      result.runtimeDiagnostics = await sendRuntime("collect_runtime_diagnostics", {
+        tabId: activeWorkModeTurn?.target?.tabId ?? null,
+        clear: true,
+      }).catch(() => ({
+        installed: false,
+        consoleErrors: [],
+        networkErrors: [],
+      }));
+      if (!qcRunActive) {
+        recordCreatedProjectFromResult({
+          turn: activeWorkModeTurn,
+          tool,
+          args: executionArgs,
+          beforeContext: activeContext,
+          result,
+          ownedProjectUrls: ownedWorkModeProjectUrls,
+        });
+      }
     }
+    await qcWorkspace.recordAgentEvent({
+      type: isUiAction ? "browser_action_completed" : "browser_observation_completed",
+      phase: isUiAction ? "VERIFY" : "OBSERVE",
+      payload: {
+        tool,
+        result: auditBrowserResult(result),
+        timings: result?.lumiTimings || {
+          total_ms: Math.round(performance.now() - controllerStartedAt),
+        },
+      },
+    });
+    void qcWorkspace.recordDiscovery({
+      url: result?.controllerVerification?.url || result?.url || activeContext?.url || "",
+      title: result?.controllerVerification?.title || result?.title || activeContext?.title || "",
+      tool,
+      args: auditBrowserArguments(tool, executionArgs),
+      result: auditBrowserResult(result),
+    });
     if (isUiAction) {
       avatarController.transitionState("success", {
         forMs: AVATAR_SUCCESS_STATE_DURATION_MS,
@@ -1523,7 +2119,24 @@ async function runBrowserTool(tool, args) {
     }
     return result;
   } catch (error) {
+    await qcWorkspace.recordAgentEvent({
+      type: "browser_tool_failed",
+      phase: "RECOVER",
+      payload: {
+        tool,
+        error: redactAuditText(error instanceof Error ? error.message : error),
+        recoverable: error?.recoverable !== false,
+        timings: {
+          total_ms: Math.round(performance.now() - controllerStartedAt),
+        },
+      },
+    }).catch(() => null);
     avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
+    if (error?.recoverable !== false) {
+      elements.qcStatus.dataset.tone = "warning";
+      elements.qcStatus.textContent =
+        `Recoverable browser issue: ${redactAuditText(error instanceof Error ? error.message : error)}`;
+    }
     if (tool === "browser_upload_file") {
       const detail = error instanceof Error ? error.message : String(error || "Unknown upload error.");
       elements.statusLine.textContent = `Upload failed: ${detail}`;
@@ -1840,6 +2453,8 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
       let activityTool = null;
       let renderStandaloneActivity = false;
       let isBrowserTool = false;
+      let isQcToolCall = false;
+      let isHicasSkillToolCall = false;
       let protocolStep = null;
       let orchestration = null;
       const stepStartedAt = performance.now();
@@ -1887,6 +2502,14 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
           continue;
         }
         if (actionName === AGENT_DONE_ACTION_NAME) {
+          if (
+            actionArgs.success === true
+            && ["running", "paused"].includes(qcWorkspace.activeRun?.status)
+          ) {
+            throw new Error(
+              "The active QC run is not complete. Record every remaining step and call qc_complete_run before done.",
+            );
+          }
           const finished = taskOrchestrator.finishDoneStep(
             orchestration.stepId,
             actionArgs,
@@ -1912,9 +2535,17 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
         }
 
         isBrowserTool = BROWSER_TOOLS.some((tool) => tool.name === actionName);
+        isQcToolCall = isQcTool(actionName);
+        isHicasSkillToolCall = isHicasSkillTool(actionName);
         const isLiveTranslationTool = actionName === LIVE_TRANSLATE_TOOL_NAME;
         mcpTool = activeMcpTools.get(actionName) || null;
-        if (!isBrowserTool && !isLiveTranslationTool && !mcpTool) {
+        if (
+          !isBrowserTool
+          && !isLiveTranslationTool
+          && !isQcToolCall
+          && !isHicasSkillToolCall
+          && !mcpTool
+        ) {
           throw new Error(`Unsupported tool: ${actionName}`);
         }
         if (mcpTool?.disabled) throw new Error("This MCP tool is disabled for the rest of this session.");
@@ -1924,6 +2555,18 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
               toolName: LIVE_TRANSLATE_TOOL_NAME,
               serverName: "Gemini Live Translate",
             }
+          : isQcToolCall
+            ? {
+                activityLabel: "QC TOOL",
+                toolName: actionName,
+                serverName: "Lumi QC Local Service",
+              }
+          : isHicasSkillToolCall
+            ? {
+                activityLabel: "ERP SKILL",
+                toolName: actionName,
+                serverName: "Packaged HICAS knowledge",
+              }
           : mcpTool;
         renderStandaloneActivity = Boolean(activityTool)
           && shouldRenderStandaloneToolActivity(orchestration);
@@ -1932,6 +2575,16 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
         }
         let result = isLiveTranslationTool
           ? await runLiveTranslationTool(actionArgs)
+          : isHicasSkillToolCall
+            ? await hicasSkill.lookup(
+                actionArgs,
+                (await sendRuntime("browser_tool", {
+                  tool: "browser_get_active_context",
+                  args: {},
+                }).catch(() => null))?.url || "",
+              )
+          : isQcToolCall
+            ? await qcWorkspace.runTool(actionName, actionArgs)
           : isBrowserTool
             ? await runBrowserTool(actionName, actionArgs)
             : normalizeMcpToolResult(await runMcpTool(mcpTool, actionArgs, callId));
@@ -1939,8 +2592,8 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
           result = addBrowserWorkflowContext(result, {
             toolName: actionName,
             userRequest: activeTurnUserRequest,
-          });
-        }
+      });
+    }
         if (isBrowserTool || isLiveTranslationTool) {
           const consumed = consumeResponseAudioDirective(result);
           result = consumed.result;
@@ -2087,6 +2740,7 @@ function openGeminiSocket(
     mcpFunctionDeclarations,
     activeTabContext,
   } = options;
+  const sessionModel = options.model || MODEL;
   sessionConnectionOptions = options;
   const handoffPredecessor = predecessorSocket?.readyState === WebSocket.OPEN
     && predecessorSocket.lumiSetupComplete
@@ -2123,7 +2777,7 @@ function openGeminiSocket(
     if (!isTrackedGeminiSocket(sessionSocket)) return;
     sendJson({
       setup: {
-        model: `models/${MODEL}`,
+        model: `models/${sessionModel}`,
         ...buildSessionHandshakeConfig(resumptionHandle),
         generationConfig: {
           responseModalities: ["AUDIO"],
@@ -2215,6 +2869,28 @@ function openGeminiSocket(
         mcpInfo,
         mcpFunctionDeclarations,
         activeTabContext,
+      }, {
+        background: sessionSocket.lumiBackgroundReconnect,
+        discardOldContext: sessionSocket.lumiDiscardOldContext,
+        predecessorSocket: handoffPredecessorSocket,
+      });
+      return;
+    }
+
+    const primaryModelUnavailable = !expected
+      && !sessionSocket.lumiSetupComplete
+      && sessionModel !== FALLBACK_MODEL
+      && /(model|resource).*(not found|unsupported|unavailable)|not found.*model/i.test(reason);
+    if (primaryModelUnavailable) {
+      if (closingActiveSocket) websocket = null;
+      if (closingHandoffSocket) pendingSessionHandoffSocket = null;
+      setSessionStatus(
+        "connecting",
+        `Primary Live model is unavailable. Retrying with ${FALLBACK_MODEL}…`,
+      );
+      openGeminiSocket({
+        ...options,
+        model: FALLBACK_MODEL,
       }, {
         background: sessionSocket.lumiBackgroundReconnect,
         discardOldContext: sessionSocket.lumiDiscardOldContext,
@@ -2522,6 +3198,14 @@ async function enableMicrophone({ persistPreference = true } = {}) {
     elements.statusLine.textContent = "Microphone is on. You can speak or continue typing.";
     return true;
   } catch (error) {
+    await qcWorkspace.recordAgentEvent({
+      type: "browser_tool_failed",
+      phase: "RECOVER",
+      payload: {
+        tool,
+        error: error instanceof Error ? error.message : String(error || "Browser tool failed."),
+      },
+    }).catch(() => {});
     panelAudio.stopMicrophone();
     isMuted = true;
     const diagnosis = describeStartError(error);
@@ -2578,13 +3262,23 @@ async function sendText(
   textSendPending = true;
   syncMessageComposer();
   const frame = selectedAttachment?.frame || null;
+  const userRequest = clean
+    || "Please inspect the attached image and respond with the most helpful relevant analysis.";
+  const activeContext = await sendRuntime("browser_tool", {
+    tool: "browser_get_active_context",
+    args: {},
+  }).catch(() => null);
+  activeWorkModeTurn = createWorkModeTurn({
+    userRequest,
+    activeContext,
+  });
+  const modelText = activeWorkModeTurn.modelText;
   textSendPending = false;
   if (!isGeminiTransportReady() || agentTurnActive || turnCancellationPending) {
     syncMessageComposer();
     return false;
   }
   const displayText = clean || `Image · ${selectedAttachment.name}`;
-  const modelText = clean || "Please inspect the attached image and respond with the most helpful relevant analysis.";
   const videoSent = frame ? sendJson({ realtimeInput: { video: frame } }) : true;
   const textSent = videoSent && sendJson({ realtimeInput: { text: modelText } });
   if (!videoSent || !textSent) {
@@ -2603,7 +3297,7 @@ async function sendText(
     return false;
   }
 
-  activeTurnUserRequest = modelText;
+  activeTurnUserRequest = userRequest;
   turnExecutionSequence += 1;
   if (suppressServerOutputUntilNextUserTurn) markFreshUserInputStarted();
   responseAudioGate.reset();
@@ -2614,7 +3308,7 @@ async function sendText(
   if (remember) {
     rememberConversationTurn(
       "user",
-      selectedAttachment ? `${modelText} [Attached image: ${selectedAttachment.name}]` : modelText,
+      selectedAttachment ? `${userRequest} [Attached image: ${selectedAttachment.name}]` : userRequest,
     );
   }
   avatarController.transitionState("thinking");
@@ -2888,9 +3582,82 @@ elements.messageForm.addEventListener("submit", (event) => {
     cancelCurrentTurn();
   }
 });
+elements.historyButton.addEventListener("click", () => {
+  elements.historyDrawer.hidden = !elements.historyDrawer.hidden;
+  if (!elements.historyDrawer.hidden) void renderHistoryList();
+});
+elements.historyCloseButton.addEventListener("click", () => {
+  elements.historyDrawer.hidden = true;
+});
+elements.historyNewButton.addEventListener("click", () => void createNewConversation());
+elements.historyClearButton.addEventListener("click", () => {
+  if (!window.confirm("Delete all local Lumi chat history on this computer?")) return;
+  void (async () => {
+    await conversationHistoryStore.clear();
+    activeConversationId = "";
+    await chrome.storage.local.remove(HISTORY_ACTIVE_CONVERSATION_STORAGE_KEY);
+    await createNewConversation();
+  })();
+});
+elements.historyList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const conversationId = button.dataset.conversationId;
+  if (!conversationId) return;
+  if (button.dataset.action === "open") {
+    void restoreConversation(conversationId);
+    return;
+  }
+  if (button.dataset.action === "rename") {
+    void (async () => {
+      const conversation = await conversationHistoryStore.getConversation(conversationId);
+      const title = window.prompt("Rename local chat", conversation?.title || "");
+      if (title === null) return;
+      await conversationHistoryStore.renameConversation(conversationId, title);
+      await renderHistoryList();
+    })();
+    return;
+  }
+  if (button.dataset.action === "delete") {
+    if (!window.confirm("Delete this local chat history?")) return;
+    void (async () => {
+      await conversationHistoryStore.deleteConversation(conversationId);
+      if (conversationId === activeConversationId) {
+        activeConversationId = "";
+        await createNewConversation();
+      } else {
+        await renderHistoryList();
+      }
+    })();
+  }
+});
+elements.runAttentionReturn.addEventListener("click", () => {
+  void (async () => {
+    try {
+      await sendRuntime("attention_return_to_target");
+      elements.runAttentionAcknowledge.disabled = false;
+      elements.statusLine.textContent = "Returned to the ERP tab that needs review.";
+    } catch (error) {
+      elements.statusLine.textContent =
+        error instanceof Error ? error.message : "Could not return to the ERP tab.";
+    }
+  })();
+});
+elements.runAttentionAcknowledge.addEventListener("click", () => {
+  void (async () => {
+    try {
+      await sendRuntime("attention_acknowledge");
+      renderRunAttention(null);
+      elements.statusLine.textContent =
+        "The alert was acknowledged. Resume the run only after checking the failed step.";
+    } catch (error) {
+      elements.statusLine.textContent =
+        error instanceof Error ? error.message : "Could not acknowledge the alert.";
+    }
+  })();
+});
 window.addEventListener("unload", () => {
   intentionalClose = true;
-  clearConversationContext();
   sidePanelLifecyclePort.disconnect();
   petalEmitter.stop();
   websocket?.close();
@@ -2953,6 +3720,29 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === EXTENSION_EVENTS.scheduledRun && message.result?.run) {
+    void (async () => {
+      const canExecute = sessionStatus === "ready" && isGeminiTransportReady();
+      await qcWorkspace.activateScheduledRun(message.result, { execute: canExecute });
+      if (!canExecute) {
+        const reason =
+          "The scheduled run was blocked because the Gemini Live agent session is not ready.";
+        await qcWorkspace.blockActiveRun(reason).catch(() => null);
+        const attention = await sendRuntime("attention_raise", {
+          runId: message.result.run.run_id,
+          tabId: message.tabId,
+          title: "LUMI scheduled run blocked",
+          message: reason,
+        }).catch(() => null);
+        renderRunAttention(attention);
+      }
+    })();
+    return;
+  }
+  if (message?.type === EXTENSION_EVENTS.attention) {
+    renderRunAttention(message.attention || null);
+    return;
+  }
   if (message?.type === EXTENSION_EVENTS.translationState) {
     setLiveTranslationBadge(message.state || "off", message.targetLanguageCode || message.detail || "");
     if (message.state === "error" && message.detail) {
@@ -2967,7 +3757,6 @@ chrome.runtime.onMessage.addListener((message) => {
     if (message.state === "opened") petalEmitter.restart();
     else if (message.state === "closed") {
       petalEmitter.stop();
-      clearConversationContext();
     }
     return;
   }
@@ -2976,6 +3765,8 @@ chrome.runtime.onMessage.addListener((message) => {
 
 async function initialize() {
   elements.extensionVersion.textContent = `v${chrome.runtime.getManifest().version}`;
+  await initializeConversationHistory();
+  await qcWorkspace.initialize();
   const stored = await chrome.storage.local.get([
     API_KEY_STORAGE_KEY,
     PETALS_STORAGE_KEY,
@@ -3012,6 +3803,8 @@ async function initialize() {
     setSessionStatus("idle", "Preparing automatic connection…");
   }
   await refreshTarget();
+  const activeAttention = await sendRuntime("attention_status").catch(() => null);
+  renderRunAttention(activeAttention);
   const translationStatus = await sendRuntime("live_translation_status").catch(() => null);
   if (translationStatus?.prepared) {
     setLiveTranslationBadge(translationStatus.state || "off", translationStatus.targetLanguageCode || "");

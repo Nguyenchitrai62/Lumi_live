@@ -135,7 +135,13 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /discardOldContext \? "" : sessionResumptionHandle/);
   assert.match(controller, /pendingSessionHandoffSocket\s*=\s*sessionSocket/);
   assert.match(controller, /predecessorSocket\.close\(1000,\s*"Gemini Live handoff complete"\)/);
-  assert.match(controller, /window\.addEventListener\("unload"[^]*clearConversationContext\(\)/);
+  const unloadSource = controller.slice(
+    controller.indexOf('window.addEventListener("unload"'),
+    controller.indexOf('window.addEventListener("focus"'),
+  );
+  assert.doesNotMatch(unloadSource, /clearConversationContext\(\)/);
+  assert.match(controller, /initializeConversationHistory\(\)/);
+  assert.match(controller, /conversationHistoryStore\.addMessage/);
   assert.match(controller, /getLiveModelPartTranscriptRole\(part\)/);
   assert.match(controller, /updateTranscript\(transcriptRole,\s*part\.text\)/);
   assert.match(controller, /document\.createElement\("details"\)/);
@@ -245,7 +251,8 @@ test("captures visual context only when the agent requests it and renders rich c
   assert.match(controller, /chrome\.windows\.getCurrent\(\)/);
   assert.match(controller, /tool === "browser_inspect_screenshot"[^]*captureAndSendVisualInspectionFrame\(\)/);
   assert.match(controller, /addBrowserWorkflowContext\(result/);
-  assert.match(controller, /activeTurnUserRequest = modelText/);
+  assert.match(controller, /activeTurnUserRequest = userRequest/);
+  assert.match(controller, /activeWorkModeTurn = createWorkModeTurn/);
   assert.doesNotMatch(controller, /AUTOMATIC_TAB_CAPTURE_ORIGINS|screenshotAccessRequest/);
   assert.doesNotMatch(controller, /chrome\.permissions\.(?:request|contains)\(\{\s*origins:/);
   assert.match(controller, /realtimeInput:\s*\{\s*video:\s*frame\s*\}/);

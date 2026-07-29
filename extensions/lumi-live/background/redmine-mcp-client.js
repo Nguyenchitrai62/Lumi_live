@@ -398,11 +398,15 @@ export class RedmineMcpClient {
         throw new Error("Redmine projectId and subject are required.");
       }
       const uploads = await this.prepareUploads(args, options);
-      return this.request("issues.json", {
+      const result = await this.request("issues.json", {
         method: "POST",
         body: { issue: issuePayload(args, true, uploads) },
         signal: options.signal,
       });
+      if (result?.issue?.id && !result.issue.url) {
+        result.issue.url = `${this.url}/issues/${result.issue.id}`;
+      }
+      return result;
     }
     const issueId = Number(args.issueId);
     if (!Number.isInteger(issueId) || issueId < 1) throw new Error("A positive Redmine issueId is required.");

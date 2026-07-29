@@ -19,11 +19,18 @@ import {
   localFileName,
   normalizeUploadFilePaths,
 } from "../browser/file-upload.js";
+import {
+  collectRuntimeDiagnosticsInPage,
+  installRuntimeDiagnosticsProbeInPage,
+  removeRuntimeDiagnosticsProbeInPage,
+} from "../browser/runtime-diagnostics.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
 const TARGET_STORAGE_KEY = STORAGE_KEYS.targetTabId;
 const TARGET_CHANGED_MESSAGE = EXTENSION_EVENTS.targetChanged;
+const ATTENTION_MESSAGE = EXTENSION_EVENTS.attention;
+const SCHEDULED_RUN_MESSAGE = EXTENSION_EVENTS.scheduledRun;
 const PANEL_LIFECYCLE_MESSAGE = EXTENSION_EVENTS.lifecycle;
 const ELEMENT_HIGHLIGHTS_STORAGE_KEY = STORAGE_KEYS.elementHighlights;
 const OFFSCREEN_DOCUMENT_PATH = "offscreen/index.html";
@@ -33,12 +40,17 @@ const TAB_CAPTURE_RETRY_DELAY_MS = 550;
 const WINDOW_OPEN_PROBE_KEY = "__LUMI_WINDOW_OPEN_PROBE__";
 const CLICK_NEW_TAB_WATCH_MS = 2500;
 const FILE_CHOOSER_WAIT_MS = 10000;
+const QC_SCHEDULE_ALARM_PREFIX = "lumi-qc-schedule:";
+const HICAS_HOST = "sit.hawee.hicas.vn";
 
 let connectedTabId = null;
 let listedTabIds = new Set();
 let listedTabsExpireAt = 0;
 let activeBrowserAction = null;
 let creatingOffscreenDocument = null;
+let lockedTaskTarget = null;
+let attentionState = null;
+let qcExecutionMode = "step";
 const sidePanelPorts = new Set();
 const {
   addMcpServer,
@@ -221,6 +233,352 @@ async function setConnectedTab(tabId) {
   notifyTargetChanged();
 }
 
+function publishAttention() {
+  void chrome.runtime.sendMessage({
+    type: ATTENTION_MESSAGE,
+    attention: attentionState,
+  }).catch(() => {});
+}
+
+async function returnToTaskTarget() {
+  const tabId = attentionState?.tabId ?? lockedTaskTarget?.tabId;
+  if (!Number.isInteger(tabId)) throw new Error("The original task tab is no longer available.");
+  const tab = await chrome.tabs.get(tabId);
+  await chrome.tabs.update(tabId, { active: true });
+  await chrome.windows.update(tab.windowId, { focused: true });
+  await setConnectedTab(tabId);
+  return serializeTab(await chrome.tabs.get(tabId));
+}
+
+async function raiseAttention(value = {}) {
+  const targetTabId = Number.isInteger(value.tabId)
+    ? value.tabId
+    : lockedTaskTarget?.tabId ?? connectedTabId;
+  attentionState = {
+    id: `attention-${Date.now()}`,
+    taskId: String(value.taskId || lockedTaskTarget?.taskId || ""),
+    runId: String(value.runId || lockedTaskTarget?.runId || ""),
+    tabId: Number.isInteger(targetTabId) ? targetTabId : null,
+    title: String(value.title || "LUMI needs your attention").slice(0, 200),
+    message: String(value.message || "The current workflow stopped.").slice(0, 1200),
+    createdAt: Date.now(),
+  };
+  const activeTab = await getActiveTab().catch(() => null);
+  const badgeTargets = new Set([attentionState.tabId, activeTab?.id].filter(Number.isInteger));
+  await Promise.all([...badgeTargets].map(async (tabId) => {
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: "#c82f47" }).catch(() => {});
+    await chrome.action.setBadgeText({ tabId, text: "!" }).catch(() => {});
+  }));
+  if (sidePanelPorts.size === 0) {
+    await chrome.notifications.create(`lumi-attention-${attentionState.id}`, {
+      type: "basic",
+      iconUrl: chrome.runtime.getURL("icons/lumi-live.png"),
+      title: attentionState.title,
+      message: attentionState.message,
+      priority: 2,
+      requireInteraction: true,
+      buttons: [{ title: "Return to ERP tab" }],
+    }).catch(() => {});
+  }
+  publishAttention();
+  return attentionState;
+}
+
+async function acknowledgeAttention() {
+  const previous = attentionState;
+  attentionState = null;
+  if (previous?.tabId) {
+    await chrome.action.setBadgeBackgroundColor({
+      tabId: previous.tabId,
+      color: "#745bc4",
+    }).catch(() => {});
+    await chrome.action.setBadgeText({
+      tabId: previous.tabId,
+      text: previous.tabId === connectedTabId ? "ON" : "",
+    }).catch(() => {});
+  }
+  const activeTab = await getActiveTab().catch(() => null);
+  if (activeTab?.id && activeTab.id !== previous?.tabId) {
+    await chrome.action.setBadgeText({
+      tabId: activeTab.id,
+      text: activeTab.id === connectedTabId ? "ON" : "",
+    }).catch(() => {});
+  }
+  publishAttention();
+  return { acknowledged: true };
+}
+
+async function executeMainWorldProbe(tabId, func, args = []) {
+  if (!Number.isInteger(tabId)) return null;
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func,
+    args,
+  });
+  return results?.[0]?.result || null;
+}
+
+function scheduleParts(timestamp, timezone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone || "Asia/Bangkok",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(timestamp));
+  return Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+}
+
+function nextScheduleTimestamp(schedule, now = Date.now()) {
+  const [hour, minute] = String(schedule.local_time || "").split(":").map(Number);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
+  const dayMap = new Map([
+    ["Mon", 0], ["Tue", 1], ["Wed", 2], ["Thu", 3],
+    ["Fri", 4], ["Sat", 5], ["Sun", 6],
+  ]);
+  const days = new Set((schedule.days_of_week || []).map(Number));
+  const start = Math.floor(now / 60000) * 60000 + 60000;
+  for (let offset = 0; offset < 8 * 24 * 60; offset += 1) {
+    const timestamp = start + offset * 60000;
+    const parts = scheduleParts(timestamp, schedule.timezone);
+    if (
+      Number(parts.hour) === hour
+      && Number(parts.minute) === minute
+      && days.has(dayMap.get(parts.weekday))
+    ) return timestamp;
+  }
+  return null;
+}
+
+async function qcServiceRequest(path, { method = "GET", body } = {}) {
+  const stored = await chrome.storage.local.get([
+    STORAGE_KEYS.qcServiceUrl,
+    STORAGE_KEYS.qcServiceToken,
+  ]);
+  const token = String(stored[STORAGE_KEYS.qcServiceToken] || "").trim();
+  const endpoint = new URL(String(
+    stored[STORAGE_KEYS.qcServiceUrl] || "http://127.0.0.1:8765",
+  ));
+  if (
+    endpoint.protocol !== "http:"
+    || !["127.0.0.1", "localhost"].includes(endpoint.hostname)
+    || !token
+  ) throw new Error("Local QC Service is not configured.");
+  endpoint.pathname = endpoint.pathname.replace(/\/+$/, "") + path;
+  endpoint.search = "";
+  endpoint.hash = "";
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(endpoint, {
+      method,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: {
+        "X-Lumi-Installation-Token": token,
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      let detail = "";
+      try {
+        detail = String((await response.json())?.detail || "");
+      } catch {
+        detail = "";
+      }
+      throw new Error(detail || `Local QC Service returned ${response.status}.`);
+    }
+    return response.status === 204 ? null : response.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function syncQcScheduleAlarms(schedules = []) {
+  const existing = await chrome.alarms.getAll();
+  await Promise.all(existing
+    .filter((alarm) => alarm.name.startsWith(QC_SCHEDULE_ALARM_PREFIX))
+    .map((alarm) => chrome.alarms.clear(alarm.name)));
+  for (const schedule of schedules) {
+    if (!schedule?.enabled || !schedule?.id) continue;
+    const when = nextScheduleTimestamp(schedule);
+    if (!when) continue;
+    await chrome.alarms.create(`${QC_SCHEDULE_ALARM_PREFIX}${schedule.id}`, { when });
+  }
+  return {
+    scheduled: schedules.filter((schedule) => schedule?.enabled).length,
+  };
+}
+
+async function refreshQcScheduleAlarms() {
+  const schedules = await qcServiceRequest("/v1/schedules");
+  return syncQcScheduleAlarms(schedules);
+}
+
+function routeMatchesTarget(tabUrl, targetUrl) {
+  try {
+    const tab = new URL(tabUrl);
+    const target = new URL(targetUrl);
+    if (tab.hostname !== target.hostname) return false;
+    const targetRoot = target.pathname.split("/").filter(Boolean).slice(0, 2).join("/");
+    return !targetRoot || tab.pathname.includes(targetRoot);
+  } catch {
+    return false;
+  }
+}
+
+function skillRoutePattern(template) {
+  const escaped = String(template).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped
+    .replace(/\\\{project_id\\\}/g, "[^/]+")
+    .replace(/\\\{entity_id\\\}/g, "[^/]+")}/?$`, "i");
+}
+
+async function hicasRouteFingerprint(urlValue) {
+  try {
+    const url = new URL(urlValue);
+    if (url.hostname !== HICAS_HOST) return null;
+    const response = await fetch(
+      chrome.runtime.getURL("skills/hicas-erp-qc/runtime-index.json"),
+      { cache: "no-store" },
+    );
+    if (!response.ok) return null;
+    const index = await response.json();
+    const routeUrl = `${url.pathname}${url.search}`;
+    const route = (index.routes || []).find((item) => item.template === routeUrl)
+      || (index.routes || []).find((item) => item.template === url.pathname)
+      || (index.routes || []).find((item) =>
+        skillRoutePattern(item.template).test(routeUrl)
+        || skillRoutePattern(item.template).test(url.pathname));
+    return route || null;
+  } catch {
+    return null;
+  }
+}
+
+async function scheduledRunBlock(result, reason, tabId = null) {
+  const runId = result?.run?.run_id || "";
+  if (runId) {
+    await qcServiceRequest(`/v1/runs/${encodeURIComponent(runId)}/block`, {
+      method: "POST",
+      body: { reason },
+    }).catch(() => null);
+  }
+  await raiseAttention({
+    runId,
+    tabId,
+    title: "LUMI scheduled run blocked",
+    message: reason,
+  });
+}
+
+async function handleQcScheduleAlarm(scheduleId) {
+  let result = null;
+  try {
+    result = await qcServiceRequest(
+      `/v1/schedules/${encodeURIComponent(scheduleId)}/run-now`,
+      { method: "POST" },
+    );
+    const session = await chrome.storage.session.get(STORAGE_KEYS.qcActiveRun);
+    const conflictingRunId = String(session[STORAGE_KEYS.qcActiveRun] || "");
+    if (conflictingRunId && conflictingRunId !== result.run.run_id) {
+      const conflicting = await qcServiceRequest(
+        `/v1/runs/${encodeURIComponent(conflictingRunId)}`,
+      ).catch(() => null);
+      if (["approved", "running", "paused"].includes(conflicting?.status)) {
+        await scheduledRunBlock(result, `Another QC run ${conflictingRunId} is still active.`);
+        return;
+      }
+    }
+    const targetUrl = result.run.plan?.comparison_specs?.[0]?.target_url
+      || result.run.plan?.test_cases?.[0]?.steps?.find((step) =>
+        /^https?:\/\//i.test(step.target || ""))?.target
+      || `https://${HICAS_HOST}/`;
+    const tabs = await chrome.tabs.query({});
+    const targetTab = tabs.find((tab) =>
+      routeMatchesTarget(tab.url || "", targetUrl))
+      || tabs.find((tab) => {
+        try {
+          return new URL(tab.url || "").hostname === HICAS_HOST;
+        } catch {
+          return false;
+        }
+      });
+    if (!targetTab?.id) {
+      await scheduledRunBlock(result, "No HICAS ERP tab is open.");
+      return;
+    }
+    if (sidePanelPorts.size === 0) {
+      await scheduledRunBlock(
+        result,
+        "LUMI side panel is closed, so the scheduled agent runtime is unavailable.",
+        targetTab.id,
+      );
+      return;
+    }
+    if (!await ensureController(targetTab.id, 4)) {
+      await scheduledRunBlock(result, "The HICAS tab controller is unavailable.", targetTab.id);
+      return;
+    }
+    const expectedFingerprint = String(result.run.plan?.target_fingerprint || "").trim();
+    if (expectedFingerprint) {
+      const route = await hicasRouteFingerprint(targetTab.url || "");
+      if (!route || route.fingerprint !== expectedFingerprint) {
+        await scheduledRunBlock(
+          result,
+          "The HICAS route fingerprint no longer matches the approved run template.",
+          targetTab.id,
+        );
+        return;
+      }
+    }
+    const pageState = await chrome.tabs.sendMessage(targetTab.id, {
+      source: CONTENT_REQUEST_SOURCE,
+      tool: "browser_get_page_state",
+      args: { query: "Đăng nhập" },
+    }).catch(() => null);
+    const pageText = String(pageState?.content || pageState?.message || "");
+    if (
+      /\/login(?:\/|$|\?)/i.test(targetTab.url || "")
+      || /password.*(?:đăng nhập|login)|(?:đăng nhập|login).*password/i.test(pageText)
+    ) {
+      await scheduledRunBlock(result, "The ERP session is logged out.", targetTab.id);
+      return;
+    }
+    await setConnectedTab(targetTab.id);
+    lockedTaskTarget = {
+      tabId: targetTab.id,
+      taskId: `scheduled-${result.run.run_id}`,
+      runId: result.run.run_id,
+    };
+    await executeMainWorldProbe(
+      targetTab.id,
+      installRuntimeDiagnosticsProbeInPage,
+    ).catch(() => null);
+    qcExecutionMode = result.run.plan?.execution_mode === "fast_verified"
+      ? "fast_verified"
+      : "step";
+    await applyControllerVisualPreferences(targetTab.id);
+    await chrome.storage.session.set({
+      [STORAGE_KEYS.qcActiveRun]: result.run.run_id,
+      [STORAGE_KEYS.qcRunApprovalToken]: result.approval_token,
+    });
+    await chrome.runtime.sendMessage({
+      type: SCHEDULED_RUN_MESSAGE,
+      result,
+      tabId: targetTab.id,
+    });
+  } catch (error) {
+    await scheduledRunBlock(
+      result,
+      error instanceof Error ? error.message : "The scheduled run could not start.",
+    );
+  } finally {
+    void refreshQcScheduleAlarms().catch(() => {});
+  }
+}
+
 async function pingController(tabId) {
   return chrome.tabs.sendMessage(tabId, {
     source: CONTENT_REQUEST_SOURCE,
@@ -232,6 +590,7 @@ async function pingController(tabId) {
 async function getVisualPreferences() {
   const stored = await chrome.storage.local.get(ELEMENT_HIGHLIGHTS_STORAGE_KEY);
   return normalizeVisualPreferences({
+    executionMode: qcExecutionMode,
     showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
   });
 }
@@ -1201,6 +1560,64 @@ async function handleMessage(message) {
   if (message.command === "connect_active_tab") return getStatus();
   if (message.command === "disconnect_tab") return getStatus();
   if (message.command === "get_status") return getStatus();
+  if (message.command === "task_target_lock") {
+    const tabId = Number.isInteger(message.tabId) ? message.tabId : connectedTabId;
+    if (!Number.isInteger(tabId)) throw new Error("A controllable task tab is required.");
+    lockedTaskTarget = {
+      tabId,
+      taskId: String(message.taskId || ""),
+      runId: String(message.runId || ""),
+    };
+    void executeMainWorldProbe(
+      tabId,
+      installRuntimeDiagnosticsProbeInPage,
+    ).catch(() => {});
+    return { locked: true, ...lockedTaskTarget };
+  }
+  if (message.command === "task_target_release") {
+    const releasedTabId = lockedTaskTarget?.tabId;
+    if (!message.taskId || lockedTaskTarget?.taskId === message.taskId) {
+      lockedTaskTarget = null;
+      void executeMainWorldProbe(
+        releasedTabId,
+        removeRuntimeDiagnosticsProbeInPage,
+      ).catch(() => {});
+      void followActiveTab();
+    }
+    return { locked: Boolean(lockedTaskTarget), target: lockedTaskTarget };
+  }
+  if (message.command === "attention_raise") return raiseAttention(message);
+  if (message.command === "attention_acknowledge") return acknowledgeAttention();
+  if (message.command === "attention_status") return attentionState;
+  if (message.command === "attention_return_to_target") return returnToTaskTarget();
+  if (message.command === "qc_schedules_sync") {
+    return syncQcScheduleAlarms(Array.isArray(message.schedules) ? message.schedules : []);
+  }
+  if (message.command === "collect_runtime_diagnostics") {
+    const tabId = Number.isInteger(message.tabId)
+      ? message.tabId
+      : lockedTaskTarget?.tabId ?? connectedTabId;
+    return executeMainWorldProbe(
+      tabId,
+      collectRuntimeDiagnosticsInPage,
+      [message.clear !== false],
+    );
+  }
+  if (message.command === "set_qc_execution_mode") {
+    qcExecutionMode = message.executionMode === "fast_verified" ? "fast_verified" : "step";
+    const current = await getVisualPreferences();
+    const visualPreferences = normalizeVisualPreferences({
+      ...current,
+      executionMode: qcExecutionMode,
+    });
+    const tabId = Number.isInteger(message.tabId)
+      ? message.tabId
+      : lockedTaskTarget?.tabId ?? connectedTabId;
+    if (Number.isInteger(tabId)) {
+      await applyControllerVisualPreferences(tabId, visualPreferences);
+    }
+    return visualPreferences;
+  }
   if (message.command === "set_visual_preferences") {
     const visualPreferences = normalizeVisualPreferences({
       showElementHighlights: message.showElementHighlights === true,
@@ -1316,6 +1733,16 @@ async function handleMessage(message) {
 chrome.tabs.onRemoved.addListener((tabId) => {
   void releaseTranslationCapture(tabId).catch(() => {});
   if (tabId !== connectedTabId) return;
+  if (lockedTaskTarget?.tabId === tabId) {
+    void raiseAttention({
+      taskId: lockedTaskTarget.taskId,
+      runId: lockedTaskTarget.runId,
+      tabId: null,
+      title: "LUMI task tab was closed",
+      message: "Reopen the approved ERP page and review the blocked run.",
+    });
+    lockedTaskTarget = null;
+  }
   void setConnectedTab(null).then(() => followActiveTab());
 });
 
@@ -1339,6 +1766,10 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   void releaseCaptureForDifferentTab(tabId).catch(() => {});
   void getActiveTab(windowId).then(async (tab) => {
     if (tab?.id !== tabId) return;
+    if (lockedTaskTarget?.tabId && lockedTaskTarget.tabId !== tabId) {
+      notifyTargetChanged();
+      return;
+    }
     if (!isControllablePage(tab.url)) {
       await setConnectedTab(null);
       return;
@@ -1359,6 +1790,22 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
   });
 });
 
+chrome.notifications.onClicked.addListener((notificationId) => {
+  if (!notificationId.startsWith("lumi-attention-")) return;
+  void returnToTaskTarget().catch(() => {});
+});
+
+chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) => {
+  if (!notificationId.startsWith("lumi-attention-") || buttonIndex !== 0) return;
+  void returnToTaskTarget().catch(() => {});
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (!alarm.name.startsWith(QC_SCHEDULE_ALARM_PREFIX)) return;
+  const scheduleId = alarm.name.slice(QC_SCHEDULE_ALARM_PREFIX.length);
+  if (scheduleId) void handleQcScheduleAlarm(scheduleId);
+});
+
 chrome.storage.onChanged.addListener((changes, areaName) => {
   const visualPreferenceChanged = areaName === "local" && changes[ELEMENT_HIGHLIGHTS_STORAGE_KEY];
   if (!visualPreferenceChanged || !connectedTabId) return;
@@ -1368,6 +1815,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 void ready.then(() => followActiveTab()).catch(() => {
   void setConnectedTab(null);
 });
+void ready.then(() => refreshQcScheduleAlarms()).catch(() => {});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === EXTENSION_EVENTS.translationState && message.state === "error") {

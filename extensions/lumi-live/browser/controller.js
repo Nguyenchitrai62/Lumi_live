@@ -11,6 +11,7 @@ import {
 import { typeTextGradually } from "./effects/text-input.js";
 import {
   assertConfirmedPageAgentClick,
+  assertSafeErpProjectInput,
   assertSafePageAgentInput,
 } from "./page-agent-safety.js";
 import {
@@ -18,7 +19,6 @@ import {
   normalizeVisualPreferences,
 } from "../core/visual-preferences.js";
 import {
-  BROWSER_ACTION_CLEANUP_DELAY_MS,
   BROWSER_CLICK_RIPPLE_DURATION_MS,
 } from "../core/ui-config.js";
 import { RESPONSE_AUDIO_DIRECTIVE_KEY } from "../core/response-audio-policy.js";
@@ -244,16 +244,17 @@ if (!globalThis[GLOBAL_KEY]) {
     return null;
   }
 
-  function assertSafeInput(index) {
+  function assertSafeInput(index, workPolicy = null) {
     const element = indexedElement(index);
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
     assertSafePageAgentInput(element);
+    assertSafeErpProjectInput(element, workPolicy);
   }
 
-  function assertConfirmedHighImpactClick(index, confirmed) {
+  function assertConfirmedHighImpactClick(index, confirmed, workPolicy = null) {
     const element = indexedElement(index);
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
-    assertConfirmedPageAgentClick(element, confirmed);
+    assertConfirmedPageAgentClick(element, confirmed, workPolicy);
   }
 
   async function withVisualAction(action) {
@@ -275,7 +276,7 @@ if (!globalThis[GLOBAL_KEY]) {
       if (!actionController.signal.aborted) {
         await new Promise((resolve) => setTimeout(
           resolve,
-          BROWSER_ACTION_CLEANUP_DELAY_MS,
+          runtime.visualPreferences.actionCleanupDelayMs,
         ));
       }
       await pageController.hideMask();
@@ -445,7 +446,7 @@ if (!globalThis[GLOBAL_KEY]) {
 
     if (tool === "browser_click") {
       const index = requireIndex(args);
-      assertConfirmedHighImpactClick(index, args.confirmed);
+      assertConfirmedHighImpactClick(index, args.confirmed, args._lumiWorkPolicy);
       const element = indexedElement(index);
       const videoClick = captureYouTubeVideoClick(element);
       const newTabIntent = getDeclarativeNewTabIntent(element);
@@ -470,7 +471,7 @@ if (!globalThis[GLOBAL_KEY]) {
     if (tool === "browser_input_text") {
       const index = requireIndex(args);
       const text = String(args.text ?? "");
-      assertSafeInput(index);
+      assertSafeInput(index, args._lumiWorkPolicy);
       return withVisualAction(async (activeController, signal) => {
         const element = indexedElement(index);
         if (!element || element.nodeType !== Node.ELEMENT_NODE) {
@@ -490,6 +491,7 @@ if (!globalThis[GLOBAL_KEY]) {
       const index = requireIndex(args);
       const optionText = String(args.optionText ?? "").trim();
       if (!optionText) throw new Error("optionText is required.");
+      assertSafeErpProjectInput(indexedElement(index), args._lumiWorkPolicy);
       return withVisualAction((activeController) => activeController.selectOption(index, optionText));
     }
 
