@@ -87,8 +87,11 @@ import {
   taskOwnsTurn,
 } from "./task-transcript-policy.js";
 import {
+  createLocalChatSession,
   createLocalChatHistoryStore,
+  deriveLocalChatSessionTitle,
   normalizeLocalChatHistory,
+  normalizeLocalChatHistoryState,
 } from "./local-chat-history.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
@@ -121,7 +124,15 @@ const elements = {
   extensionVersion: document.querySelector("#extensionVersion"),
   liveBadge: document.querySelector("#liveBadge"),
   translateBadge: document.querySelector("#translateBadge"),
+  activeChatTitle: document.querySelector("#activeChatTitle"),
+  chatHistoryButton: document.querySelector("#chatHistoryButton"),
+  chatHistoryCloseButton: document.querySelector("#chatHistoryCloseButton"),
+  chatHistoryDialog: document.querySelector("#chatHistoryDialog"),
+  chatSessionEmpty: document.querySelector("#chatSessionEmpty"),
+  chatSessionList: document.querySelector("#chatSessionList"),
   clearHistoryButton: document.querySelector("#clearHistoryButton"),
+  historyNewChatButton: document.querySelector("#historyNewChatButton"),
+  newChatButton: document.querySelector("#newChatButton"),
   settingsButton: document.querySelector("#settingsButton"),
   fastModeButton: document.querySelector("#fastModeButton"),
   avatarModeButton: document.querySelector("#avatarModeButton"),
@@ -226,6 +237,8 @@ let pendingSessionHandoffSocket = null;
 let activeTurnUserRequest = "";
 const conversationHistory = [];
 const localChatHistory = [];
+let chatHistoryState = normalizeLocalChatHistoryState(null);
+let chatSessionMutationPending = false;
 const queuedUserMessages = [];
 const initialTranscriptMarkup = elements.transcript.innerHTML;
 const activeTranscriptReveals = new Set();
@@ -878,6 +891,168 @@ function hideConnectionNotice() {
   elements.connectionNoticeSettings.hidden = true;
 }
 
+function createChatSessionId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createBlankChatSession() {
+  const timestamp = Date.now();
+  return createLocalChatSession({
+    id: createChatSessionId(),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+}
+
+function getActiveChatSession() {
+  return chatHistoryState.sessions.find(
+    (session) => session.id === chatHistoryState.activeSessionId,
+  ) || null;
+}
+
+function ensureActiveChatSession() {
+  const existing = getActiveChatSession();
+  if (existing) return existing;
+  const session = createBlankChatSession();
+  chatHistoryState = normalizeLocalChatHistoryState({
+    ...chatHistoryState,
+    activeSessionId: session.id,
+    sessions: [session, ...chatHistoryState.sessions],
+  });
+  return getActiveChatSession();
+}
+
+function formatChatSessionTime(timestamp) {
+  const date = new Date(timestamp);
+  const today = new Date();
+  const startOfToday = new Date(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate(),
+  );
+  const startOfDate = new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate(),
+  );
+  const dayDifference = Math.round(
+    (startOfToday.getTime() - startOfDate.getTime()) / 86400000,
+  );
+  if (dayDifference === 0) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  if (dayDifference === 1) return "Yesterday";
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function renderChatSessionList() {
+  const activeSession = ensureActiveChatSession();
+  elements.activeChatTitle.textContent = activeSession.title;
+  elements.chatSessionList.innerHTML = "";
+  elements.chatSessionEmpty.hidden = chatHistoryState.sessions.length > 0;
+  for (const session of chatHistoryState.sessions) {
+    const row = document.createElement("article");
+    row.className = "chat-session-row";
+    row.classList.toggle("is-active", session.id === activeSession.id);
+    row.setAttribute("role", "listitem");
+
+    const openButton = document.createElement("button");
+    openButton.className = "chat-session-open";
+    openButton.type = "button";
+    openButton.dataset.chatSessionId = session.id;
+    openButton.disabled = chatSessionMutationPending;
+    openButton.setAttribute(
+      "aria-current",
+      session.id === activeSession.id ? "true" : "false",
+    );
+
+    const title = document.createElement("span");
+    title.className = "chat-session-title";
+    title.textContent = session.title;
+    const time = document.createElement("time");
+    time.className = "chat-session-time";
+    time.dateTime = new Date(session.updatedAt).toISOString();
+    time.textContent = formatChatSessionTime(session.updatedAt);
+    const preview = document.createElement("span");
+    preview.className = "chat-session-preview";
+    preview.textContent = session.turns.at(-1)?.text || "Empty conversation";
+    openButton.append(title, time, preview);
+
+    const deleteButton = document.createElement("button");
+    deleteButton.className = "chat-session-delete";
+    deleteButton.type = "button";
+    deleteButton.dataset.deleteChatSessionId = session.id;
+    deleteButton.disabled = chatSessionMutationPending;
+    deleteButton.setAttribute("aria-label", `Delete ${session.title}`);
+    deleteButton.title = "Delete chat";
+    deleteButton.innerHTML = `
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"></path>
+      </svg>
+    `;
+
+    row.append(openButton, deleteButton);
+    elements.chatSessionList.append(row);
+  }
+}
+
+function setChatSessionMutationPending(pending) {
+  chatSessionMutationPending = pending === true;
+  elements.chatHistoryButton.disabled = chatSessionMutationPending;
+  elements.newChatButton.disabled = chatSessionMutationPending;
+  elements.historyNewChatButton.disabled = chatSessionMutationPending;
+  elements.clearHistoryButton.disabled = chatSessionMutationPending;
+  renderChatSessionList();
+}
+
+function syncActiveChatSessionFromMemory({ touch = true } = {}) {
+  const activeSession = ensureActiveChatSession();
+  const turns = normalizeLocalChatHistory(localChatHistory);
+  const updatedSession = createLocalChatSession({
+    ...activeSession,
+    title: deriveLocalChatSessionTitle(turns, activeSession.title),
+    updatedAt: touch && turns.length ? Date.now() : activeSession.updatedAt,
+    turns,
+  });
+  chatHistoryState = normalizeLocalChatHistoryState({
+    ...chatHistoryState,
+    activeSessionId: updatedSession.id,
+    sessions: chatHistoryState.sessions.map((session) => (
+      session.id === updatedSession.id ? updatedSession : session
+    )),
+  });
+  renderChatSessionList();
+  return getActiveChatSession();
+}
+
+function renderActiveChatSession() {
+  const activeSession = ensureActiveChatSession();
+  const restored = normalizeLocalChatHistory(activeSession.turns);
+  localChatHistory.splice(0, localChatHistory.length, ...restored);
+  const recentConversation = trimConversationHistory(restored);
+  conversationHistory.splice(
+    0,
+    conversationHistory.length,
+    ...recentConversation,
+  );
+  elements.transcript.innerHTML = restored.length ? "" : initialTranscriptMarkup;
+  for (const turn of restored) {
+    const role = turn.role === "model" ? "lumi" : "user";
+    const message = createMessage(role, turn.text);
+    if (role === "lumi") {
+      renderMarkdown(message.content, turn.text);
+      message.visibleText = turn.text;
+    }
+  }
+  transcriptAutoFollow = true;
+  scrollTranscriptToLatest({ force: true });
+  renderChatSessionList();
+  return restored.length;
+}
+
 function rememberConversationTurn(role, text) {
   const normalizedRole = role === "model" || role === "lumi" ? "model" : role === "user" ? "user" : "";
   const clean = String(text || "").replace(/\s+/g, " ").trim();
@@ -895,52 +1070,161 @@ function rememberConversationTurn(role, text) {
     localChatHistory.length,
     ...retainedLocalHistory,
   );
-  void chatHistoryStore.save(localChatHistory).catch(() => {});
+  syncActiveChatSessionFromMemory();
+  void chatHistoryStore.save(chatHistoryState).catch(() => {});
 }
 
 async function restoreLocalChatHistory() {
-  const restored = await chatHistoryStore.load().catch(() => []);
-  if (!restored.length) return 0;
-  localChatHistory.splice(0, localChatHistory.length, ...restored);
-  const recentConversation = trimConversationHistory(restored);
-  conversationHistory.splice(
-    0,
-    conversationHistory.length,
-    ...recentConversation,
+  chatHistoryState = await chatHistoryStore.load().catch(
+    () => normalizeLocalChatHistoryState(null),
   );
-  elements.transcript.innerHTML = "";
-  for (const turn of restored) {
-    const role = turn.role === "model" ? "lumi" : "user";
-    const message = createMessage(role, turn.text);
-    if (role === "lumi") {
-      renderMarkdown(message.content, turn.text);
-      message.visibleText = turn.text;
-    }
+  ensureActiveChatSession();
+  const restoredCount = renderActiveChatSession();
+  await chatHistoryStore.save(chatHistoryState).catch(() => {});
+  return restoredCount;
+}
+
+function openChatHistory() {
+  renderChatSessionList();
+  if (!elements.chatHistoryDialog.open) elements.chatHistoryDialog.showModal();
+  elements.chatHistoryButton.setAttribute("aria-expanded", "true");
+  requestAnimationFrame(() => elements.chatHistoryCloseButton.focus());
+}
+
+function closeChatHistory() {
+  if (elements.chatHistoryDialog.open) elements.chatHistoryDialog.close();
+  elements.chatHistoryButton.setAttribute("aria-expanded", "false");
+}
+
+async function reconnectAfterChatSessionChange(shouldReconnect) {
+  if (shouldReconnect && DEFAULT_AUTO_CONNECT_ENABLED) {
+    await autoStartSessionIfReady();
   }
-  transcriptAutoFollow = true;
-  scrollTranscriptToLatest({ force: true });
-  return restored.length;
+}
+
+async function runChatSessionMutation(operation) {
+  if (chatSessionMutationPending) return false;
+  setChatSessionMutationPending(true);
+  try {
+    return await operation();
+  } finally {
+    setChatSessionMutationPending(false);
+  }
+}
+
+async function startNewChatSession() {
+  return runChatSessionMutation(async () => {
+    const shouldReconnect = sessionStatus === "ready" || sessionStatus === "connecting";
+    if (shouldReconnect) stopSession();
+    const currentSession = getActiveChatSession();
+    const nextSession = currentSession?.turns.length
+      ? createBlankChatSession()
+      : currentSession || createBlankChatSession();
+    clearConversationContext();
+    chatHistoryState = normalizeLocalChatHistoryState({
+      ...chatHistoryState,
+      activeSessionId: nextSession.id,
+      sessions: chatHistoryState.sessions.some(
+        (session) => session.id === nextSession.id,
+      )
+        ? chatHistoryState.sessions
+        : [nextSession, ...chatHistoryState.sessions],
+    });
+    renderActiveChatSession();
+    await chatHistoryStore.save(chatHistoryState);
+    closeChatHistory();
+    elements.statusLine.textContent = "New chat started.";
+    await reconnectAfterChatSessionChange(shouldReconnect);
+    elements.messageInput.focus();
+    return true;
+  });
+}
+
+async function activateChatSession(sessionId) {
+  const requestedSessionId = String(sessionId || "");
+  if (!requestedSessionId || requestedSessionId === chatHistoryState.activeSessionId) {
+    closeChatHistory();
+    return false;
+  }
+  return runChatSessionMutation(async () => {
+    const selectedSession = chatHistoryState.sessions.find(
+      (session) => session.id === requestedSessionId,
+    );
+    if (!selectedSession) return false;
+    const shouldReconnect = sessionStatus === "ready" || sessionStatus === "connecting";
+    if (shouldReconnect) stopSession();
+    clearConversationContext();
+    chatHistoryState = normalizeLocalChatHistoryState({
+      ...chatHistoryState,
+      activeSessionId: selectedSession.id,
+    });
+    renderActiveChatSession();
+    await chatHistoryStore.save(chatHistoryState);
+    closeChatHistory();
+    elements.statusLine.textContent = `Opened “${selectedSession.title}”.`;
+    await reconnectAfterChatSessionChange(shouldReconnect);
+    return true;
+  });
+}
+
+async function deleteChatSession(sessionId) {
+  const selectedSession = chatHistoryState.sessions.find(
+    (session) => session.id === sessionId,
+  );
+  if (!selectedSession) return false;
+  const confirmed = window.confirm(`Delete “${selectedSession.title}” from this device?`);
+  if (!confirmed) return false;
+  return runChatSessionMutation(async () => {
+    const deletingActiveSession = selectedSession.id === chatHistoryState.activeSessionId;
+    const shouldReconnect = deletingActiveSession
+      && (sessionStatus === "ready" || sessionStatus === "connecting");
+    if (shouldReconnect) stopSession();
+    const remainingSessions = chatHistoryState.sessions.filter(
+      (session) => session.id !== selectedSession.id,
+    );
+    const fallbackSession = remainingSessions[0] || createBlankChatSession();
+    chatHistoryState = normalizeLocalChatHistoryState({
+      ...chatHistoryState,
+      activeSessionId: deletingActiveSession
+        ? fallbackSession.id
+        : chatHistoryState.activeSessionId,
+      sessions: remainingSessions.length ? remainingSessions : [fallbackSession],
+    });
+    if (deletingActiveSession) {
+      clearConversationContext();
+      renderActiveChatSession();
+    } else {
+      renderChatSessionList();
+    }
+    await chatHistoryStore.save(chatHistoryState);
+    elements.statusLine.textContent = "Chat deleted from this device.";
+    await reconnectAfterChatSessionChange(shouldReconnect);
+    return true;
+  });
 }
 
 async function clearLocalChatHistory() {
   const confirmed = window.confirm(
-    "Clear the saved Lumi chat history on this device and start a new conversation?",
+    "Clear every saved Lumi chat on this device and start a new conversation?",
   );
   if (!confirmed) return false;
-  const shouldReconnect = sessionStatus === "ready" || sessionStatus === "connecting";
-  elements.clearHistoryButton.disabled = true;
-  try {
+  return runChatSessionMutation(async () => {
+    const shouldReconnect = sessionStatus === "ready" || sessionStatus === "connecting";
     if (shouldReconnect) stopSession();
     clearConversationContext();
+    const session = createBlankChatSession();
+    chatHistoryState = normalizeLocalChatHistoryState({
+      activeSessionId: session.id,
+      sessions: [session],
+    });
+    renderActiveChatSession();
     await chatHistoryStore.clear();
-    elements.statusLine.textContent = "Local chat history cleared.";
-    if (shouldReconnect && DEFAULT_AUTO_CONNECT_ENABLED) {
-      await autoStartSessionIfReady();
-    }
+    await chatHistoryStore.save(chatHistoryState);
+    closeChatHistory();
+    elements.statusLine.textContent = "All local chat history cleared.";
+    await reconnectAfterChatSessionChange(shouldReconnect);
     return true;
-  } finally {
-    elements.clearHistoryButton.disabled = false;
-  }
+  });
 }
 
 function clearConversationContext() {
@@ -2888,11 +3172,46 @@ async function toggleAvatarMode() {
 }
 
 elements.settingsButton.addEventListener("click", () => void openSettings());
+elements.chatHistoryButton.addEventListener("click", openChatHistory);
+elements.chatHistoryCloseButton.addEventListener("click", closeChatHistory);
+elements.chatHistoryDialog.addEventListener("close", () => {
+  elements.chatHistoryButton.setAttribute("aria-expanded", "false");
+});
+elements.chatHistoryDialog.addEventListener("click", (event) => {
+  if (event.target === elements.chatHistoryDialog) closeChatHistory();
+});
+elements.chatSessionList.addEventListener("click", (event) => {
+  const deleteButton = event.target.closest?.("[data-delete-chat-session-id]");
+  if (deleteButton) {
+    void deleteChatSession(deleteButton.dataset.deleteChatSessionId).catch((error) => {
+      elements.statusLine.textContent = error instanceof Error
+        ? error.message
+        : "Could not delete this chat.";
+    });
+    return;
+  }
+  const sessionButton = event.target.closest?.("[data-chat-session-id]");
+  if (!sessionButton) return;
+  void activateChatSession(sessionButton.dataset.chatSessionId).catch((error) => {
+    elements.statusLine.textContent = error instanceof Error
+      ? error.message
+      : "Could not open this chat.";
+  });
+});
+for (const button of [elements.newChatButton, elements.historyNewChatButton]) {
+  button.addEventListener("click", () => {
+    void startNewChatSession().catch((error) => {
+      elements.statusLine.textContent = error instanceof Error
+        ? error.message
+        : "Could not start a new chat.";
+    });
+  });
+}
 elements.clearHistoryButton.addEventListener("click", () => {
   void clearLocalChatHistory().catch((error) => {
     elements.statusLine.textContent = error instanceof Error
       ? error.message
-      : "Could not clear local chat history.";
+      : "Could not clear the saved chats.";
   });
 });
 elements.fastModeButton.addEventListener("click", () => void fastModeController.toggle());
@@ -3010,7 +3329,6 @@ elements.messageForm.addEventListener("submit", (event) => {
 });
 window.addEventListener("unload", () => {
   intentionalClose = true;
-  clearConversationContext();
   sidePanelLifecyclePort.disconnect();
   petalEmitter.stop();
   websocket?.close();
@@ -3089,10 +3407,7 @@ chrome.runtime.onMessage.addListener((message) => {
   }
   if (message?.type === PANEL_LIFECYCLE_MESSAGE) {
     if (message.state === "opened") petalEmitter.restart();
-    else if (message.state === "closed") {
-      petalEmitter.stop();
-      clearConversationContext();
-    }
+    else if (message.state === "closed") petalEmitter.stop();
     return;
   }
   if (message?.type === EXTENSION_EVENTS.targetChanged) void refreshTarget();

@@ -135,7 +135,12 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /discardOldContext \? "" : sessionResumptionHandle/);
   assert.match(controller, /pendingSessionHandoffSocket\s*=\s*sessionSocket/);
   assert.match(controller, /predecessorSocket\.close\(1000,\s*"Gemini Live handoff complete"\)/);
-  assert.match(controller, /window\.addEventListener\("unload"[^]*clearConversationContext\(\)/);
+  const unloadSource = controller.slice(
+    controller.indexOf('window.addEventListener("unload"'),
+    controller.indexOf('window.addEventListener("focus"'),
+  );
+  assert.match(unloadSource, /cleanupMedia\(\)/);
+  assert.doesNotMatch(unloadSource, /clearConversationContext\(\)/);
   assert.match(controller, /getLiveModelPartTranscriptRole\(part\)/);
   assert.match(controller, /updateTranscript\(transcriptRole,\s*part\.text\)/);
   assert.match(controller, /document\.createElement\("details"\)/);
