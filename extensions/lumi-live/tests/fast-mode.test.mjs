@@ -104,3 +104,23 @@ test("wires Fast mode through settings, the side panel, the workspace, and the p
   assert.match(panelStyles, /body\.fast-mode \*, body\.fast-mode \*::before/);
   assert.match(panelStyles, /fast-mode-engage/);
 });
+
+test("releases Fast workspace with the panel and restores it from the active tab", async () => {
+  const [worker, uiConfig, panelController, settingsController] = await Promise.all([
+    readFile(new URL("background/index.js", extensionRoot), "utf8"),
+    readFile(new URL("core/ui-config.js", extensionRoot), "utf8"),
+    readFile(new URL("side-panel/index.js", extensionRoot), "utf8"),
+    readFile(new URL("settings/index.js", extensionRoot), "utf8"),
+  ]);
+  const panelLifecycle = worker.slice(
+    worker.indexOf("chrome.runtime.onConnect.addListener"),
+    worker.indexOf("function isWebPage"),
+  );
+  assert.match(panelLifecycle, /if \(fastModeEnabled\) await activateFastWorkspace\(\)/);
+  assert.match(panelLifecycle, /await fastWorkspace\.release\(\)/);
+  assert.match(panelLifecycle, /await setConnectedTab\(null\)/);
+  assert.match(worker, /activateWorkspace = sidePanelPorts\.size > 0/);
+  assert.match(uiConfig, /export const DEFAULT_FAST_MODE_ENABLED = (?:true|false)/);
+  assert.match(panelController, /DEFAULT_FAST_MODE_ENABLED/);
+  assert.match(settingsController, /DEFAULT_FAST_MODE_ENABLED/);
+});

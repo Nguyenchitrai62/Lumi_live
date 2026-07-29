@@ -679,6 +679,25 @@ export function createTaskOrchestrator({
     onHistoryChange(history, null, "clear");
   };
 
+  const restore = (storedHistory = []) => {
+    const restored = Array.isArray(storedHistory)
+      ? storedHistory
+        .filter((event) => event && typeof event === "object")
+        .map((event) => Object.freeze({ ...event }))
+      : [];
+    history = restored;
+    taskSequence = restored.reduce((highest, event) => {
+      const match = String(event.taskId || "").match(/^task-(\d+)$/);
+      return Math.max(highest, Number(match?.[1]) || 0);
+    }, 0);
+    eventSequence = restored.reduce((highest, event) => {
+      const match = String(event.id || "").match(/^event-(\d+)$/);
+      return Math.max(highest, Number(match?.[1]) || 0);
+    }, 0);
+    onHistoryChange(history, null, "restore");
+    return history;
+  };
+
   return {
     get history() {
       return history;
@@ -690,6 +709,7 @@ export function createTaskOrchestrator({
     cancelTask,
     checkpoint,
     clear,
+    restore,
     completeTask,
     ensureTask,
     finishDoneStep,

@@ -50,6 +50,7 @@ import {
   AVATAR_SUCCESS_STATE_DURATION_MS,
   DEFAULT_AUTO_CONNECT_ENABLED,
   DEFAULT_AGENT_MAX_STEPS,
+  DEFAULT_FAST_MODE_ENABLED,
   DEFAULT_FALLING_PETALS_ENABLED,
   DEFAULT_VOICE_NAME,
 } from "../core/ui-config.js";
@@ -93,6 +94,7 @@ import {
   normalizeLocalChatHistory,
   normalizeLocalChatHistoryState,
 } from "./local-chat-history.js";
+import { createLocalChatSnapshotStore } from "./local-chat-snapshots.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
@@ -120,6 +122,7 @@ const chatHistoryStore = createLocalChatHistoryStore({
   storageArea: chrome.storage.local,
   storageKey: CHAT_HISTORY_STORAGE_KEY,
 });
+const chatSnapshotStore = createLocalChatSnapshotStore();
 const elements = {
   extensionVersion: document.querySelector("#extensionVersion"),
   liveBadge: document.querySelector("#liveBadge"),
@@ -239,10 +242,13 @@ const conversationHistory = [];
 const localChatHistory = [];
 let chatHistoryState = normalizeLocalChatHistoryState(null);
 let chatSessionMutationPending = false;
+let chatSnapshotPersistTimerId = null;
+let chatSnapshotPersistenceSuspended = false;
 const queuedUserMessages = [];
 const initialTranscriptMarkup = elements.transcript.innerHTML;
 const activeTranscriptReveals = new Set();
 const completedThinkingMessagesAwaitingContent = new Set();
+const restoredTranscriptDisclosures = new Set();
 let lumiContentSequence = 0;
 let thinkingCollapseFrameId = null;
 let transcriptAutoFollow = true;
@@ -319,7 +325,11 @@ const taskStepView = createTaskStepView({
 });
 const taskOrchestrator = createTaskOrchestrator({
   maxSteps: DEFAULT_AGENT_MAX_STEPS,
-  onHistoryChange: (history) => taskStepView.render(history),
+  onHistoryChange: (history, _event, change) => {
+    if (change === "restore") taskStepView.hydrate(history);
+    else taskStepView.render(history);
+    scheduleActiveChatSnapshotPersist();
+  },
 });
 
 function sendRuntime(command, payload = {}) {
@@ -891,6 +901,125 @@ function hideConnectionNotice() {
   elements.connectionNoticeSettings.hidden = true;
 }
 
+function disposeRestoredTranscriptDisclosures() {
+  for (const disclosure of restoredTranscriptDisclosures) disclosure.dispose();
+  restoredTranscriptDisclosures.clear();
+}
+
+function createTranscriptSnapshotHtml() {
+  const clone = elements.transcript.cloneNode(true);
+  for (const node of clone.querySelectorAll("[style]")) {
+    node.removeAttribute("style");
+  }
+  for (const disclosure of clone.querySelectorAll(
+    ".message-thinking, .mcp-activity, .agent-step-card",
+  )) {
+    disclosure.dataset.expanded = String(disclosure.open === true);
+    const summary = disclosure.querySelector(":scope > summary");
+    summary?.setAttribute("aria-expanded", String(disclosure.open === true));
+  }
+  return clone.innerHTML;
+}
+
+function sanitizeStoredTranscriptHtml(value) {
+  const template = document.createElement("template");
+  template.innerHTML = String(value || "");
+  for (const blocked of template.content.querySelectorAll(
+    "script, style, iframe, object, embed, form, input, textarea, select, meta, link",
+  )) {
+    blocked.remove();
+  }
+  for (const node of template.content.querySelectorAll("*")) {
+    node.removeAttribute("style");
+    for (const attribute of [...node.attributes]) {
+      const name = attribute.name.toLowerCase();
+      const content = attribute.value.trim();
+      const isUrlAttribute = name === "href" || name === "src";
+      const safeDataImage = /^data:image\/(?:jpeg|png|webp|gif);base64,/i.test(
+        content,
+      );
+      if (
+        name.startsWith("on")
+        || name === "srcdoc"
+        || (isUrlAttribute && !safeDataImage && !isSafeMarkdownUrl(content))
+      ) {
+        node.removeAttribute(attribute.name);
+      }
+    }
+  }
+  return template.innerHTML;
+}
+
+function attachRestoredTranscriptDisclosures({ includeTaskSteps = false } = {}) {
+  disposeRestoredTranscriptDisclosures();
+  const selector = includeTaskSteps
+    ? ".message-thinking, .mcp-activity, .agent-step-card"
+    : ".message-thinking, .mcp-activity";
+  for (const root of elements.transcript.querySelectorAll(selector)) {
+    const summary = root.querySelector(":scope > summary");
+    const body = root.querySelector(
+      ":scope > .thinking-summary-body, :scope > .mcp-activity-body, :scope > .agent-step-body",
+    );
+    if (!summary || !body) continue;
+    restoredTranscriptDisclosures.add(attachAnimatedDisclosure({
+      root,
+      summary,
+      body,
+      initiallyExpanded: root.open || root.dataset.expanded === "true",
+    }));
+  }
+}
+
+async function persistActiveChatSessionSnapshot() {
+  if (chatSnapshotPersistenceSuspended) return null;
+  const activeSession = getActiveChatSession();
+  if (!activeSession?.id) return null;
+  return chatSnapshotStore.save({
+    sessionId: activeSession.id,
+    transcriptHtml: createTranscriptSnapshotHtml(),
+    transcriptScrollTop: elements.transcript.scrollTop,
+    taskHistory: taskOrchestrator.history,
+  });
+}
+
+function scheduleActiveChatSnapshotPersist() {
+  if (chatSnapshotPersistenceSuspended) return;
+  clearTimeout(chatSnapshotPersistTimerId);
+  chatSnapshotPersistTimerId = setTimeout(() => {
+    chatSnapshotPersistTimerId = null;
+    void persistActiveChatSessionSnapshot().catch(() => {});
+  }, 80);
+}
+
+async function flushActiveChatSnapshotPersist() {
+  clearTimeout(chatSnapshotPersistTimerId);
+  chatSnapshotPersistTimerId = null;
+  return persistActiveChatSessionSnapshot().catch(() => null);
+}
+
+async function restoreActiveChatSessionSnapshot(session) {
+  const snapshot = await chatSnapshotStore.load(session?.id).catch(() => null);
+  taskOrchestrator.restore([]);
+  if (!snapshot?.transcriptHtml) return false;
+  elements.transcript.innerHTML = sanitizeStoredTranscriptHtml(
+    snapshot.transcriptHtml,
+  );
+  if (snapshot.taskHistory.length) {
+    taskOrchestrator.restore(snapshot.taskHistory);
+  }
+  attachRestoredTranscriptDisclosures({
+    includeTaskSteps: snapshot.taskHistory.length === 0,
+  });
+  requestAnimationFrame(() => {
+    elements.transcript.scrollTop = Math.min(
+      snapshot.transcriptScrollTop,
+      Math.max(0, elements.transcript.scrollHeight - elements.transcript.clientHeight),
+    );
+    transcriptAutoFollow = isScrollAtBottom(elements.transcript);
+  });
+  return true;
+}
+
 function createChatSessionId() {
   if (typeof globalThis.crypto?.randomUUID === "function") {
     return globalThis.crypto.randomUUID();
@@ -1008,6 +1137,14 @@ function setChatSessionMutationPending(pending) {
   renderChatSessionList();
 }
 
+function removeSnapshotsForDroppedSessions(previousSessions, nextSessions) {
+  const retainedIds = new Set(nextSessions.map((session) => session.id));
+  for (const session of previousSessions) {
+    if (retainedIds.has(session.id)) continue;
+    void chatSnapshotStore.delete(session.id).catch(() => {});
+  }
+}
+
 function syncActiveChatSessionFromMemory({ touch = true } = {}) {
   const activeSession = ensureActiveChatSession();
   const turns = normalizeLocalChatHistory(localChatHistory);
@@ -1017,6 +1154,7 @@ function syncActiveChatSessionFromMemory({ touch = true } = {}) {
     updatedAt: touch && turns.length ? Date.now() : activeSession.updatedAt,
     turns,
   });
+  const previousSessions = chatHistoryState.sessions;
   chatHistoryState = normalizeLocalChatHistoryState({
     ...chatHistoryState,
     activeSessionId: updatedSession.id,
@@ -1024,11 +1162,12 @@ function syncActiveChatSessionFromMemory({ touch = true } = {}) {
       session.id === updatedSession.id ? updatedSession : session
     )),
   });
+  removeSnapshotsForDroppedSessions(previousSessions, chatHistoryState.sessions);
   renderChatSessionList();
   return getActiveChatSession();
 }
 
-function renderActiveChatSession() {
+async function renderActiveChatSession() {
   const activeSession = ensureActiveChatSession();
   const restored = normalizeLocalChatHistory(activeSession.turns);
   localChatHistory.splice(0, localChatHistory.length, ...restored);
@@ -1038,17 +1177,27 @@ function renderActiveChatSession() {
     conversationHistory.length,
     ...recentConversation,
   );
-  elements.transcript.innerHTML = restored.length ? "" : initialTranscriptMarkup;
-  for (const turn of restored) {
-    const role = turn.role === "model" ? "lumi" : "user";
-    const message = createMessage(role, turn.text);
-    if (role === "lumi") {
-      renderMarkdown(message.content, turn.text);
-      message.visibleText = turn.text;
+  const previousSnapshotSuspension = chatSnapshotPersistenceSuspended;
+  chatSnapshotPersistenceSuspended = true;
+  try {
+    disposeRestoredTranscriptDisclosures();
+    const snapshotRestored = await restoreActiveChatSessionSnapshot(activeSession);
+    if (!snapshotRestored) {
+      elements.transcript.innerHTML = restored.length ? "" : initialTranscriptMarkup;
+      for (const turn of restored) {
+        const role = turn.role === "model" ? "lumi" : "user";
+        const message = createMessage(role, turn.text);
+        if (role === "lumi") {
+          renderMarkdown(message.content, turn.text);
+          message.visibleText = turn.text;
+        }
+      }
+      transcriptAutoFollow = true;
+      scrollTranscriptToLatest({ force: true });
     }
+  } finally {
+    chatSnapshotPersistenceSuspended = previousSnapshotSuspension;
   }
-  transcriptAutoFollow = true;
-  scrollTranscriptToLatest({ force: true });
   renderChatSessionList();
   return restored.length;
 }
@@ -1072,6 +1221,7 @@ function rememberConversationTurn(role, text) {
   );
   syncActiveChatSessionFromMemory();
   void chatHistoryStore.save(chatHistoryState).catch(() => {});
+  scheduleActiveChatSnapshotPersist();
 }
 
 async function restoreLocalChatHistory() {
@@ -1079,7 +1229,7 @@ async function restoreLocalChatHistory() {
     () => normalizeLocalChatHistoryState(null),
   );
   ensureActiveChatSession();
-  const restoredCount = renderActiveChatSession();
+  const restoredCount = await renderActiveChatSession();
   await chatHistoryStore.save(chatHistoryState).catch(() => {});
   return restoredCount;
 }
@@ -1116,11 +1266,16 @@ async function startNewChatSession() {
   return runChatSessionMutation(async () => {
     const shouldReconnect = sessionStatus === "ready" || sessionStatus === "connecting";
     if (shouldReconnect) stopSession();
+    await flushActiveChatSnapshotPersist();
     const currentSession = getActiveChatSession();
     const nextSession = currentSession?.turns.length
       ? createBlankChatSession()
       : currentSession || createBlankChatSession();
+    if (nextSession.id === currentSession?.id) {
+      await chatSnapshotStore.delete(nextSession.id);
+    }
     clearConversationContext();
+    const previousSessions = chatHistoryState.sessions;
     chatHistoryState = normalizeLocalChatHistoryState({
       ...chatHistoryState,
       activeSessionId: nextSession.id,
@@ -1130,7 +1285,8 @@ async function startNewChatSession() {
         ? chatHistoryState.sessions
         : [nextSession, ...chatHistoryState.sessions],
     });
-    renderActiveChatSession();
+    removeSnapshotsForDroppedSessions(previousSessions, chatHistoryState.sessions);
+    await renderActiveChatSession();
     await chatHistoryStore.save(chatHistoryState);
     closeChatHistory();
     elements.statusLine.textContent = "New chat started.";
@@ -1153,12 +1309,13 @@ async function activateChatSession(sessionId) {
     if (!selectedSession) return false;
     const shouldReconnect = sessionStatus === "ready" || sessionStatus === "connecting";
     if (shouldReconnect) stopSession();
+    await flushActiveChatSnapshotPersist();
     clearConversationContext();
     chatHistoryState = normalizeLocalChatHistoryState({
       ...chatHistoryState,
       activeSessionId: selectedSession.id,
     });
-    renderActiveChatSession();
+    await renderActiveChatSession();
     await chatHistoryStore.save(chatHistoryState);
     closeChatHistory();
     elements.statusLine.textContent = `Opened “${selectedSession.title}”.`;
@@ -1179,6 +1336,7 @@ async function deleteChatSession(sessionId) {
     const shouldReconnect = deletingActiveSession
       && (sessionStatus === "ready" || sessionStatus === "connecting");
     if (shouldReconnect) stopSession();
+    if (deletingActiveSession) await flushActiveChatSnapshotPersist();
     const remainingSessions = chatHistoryState.sessions.filter(
       (session) => session.id !== selectedSession.id,
     );
@@ -1192,10 +1350,11 @@ async function deleteChatSession(sessionId) {
     });
     if (deletingActiveSession) {
       clearConversationContext();
-      renderActiveChatSession();
+      await renderActiveChatSession();
     } else {
       renderChatSessionList();
     }
+    await chatSnapshotStore.delete(selectedSession.id);
     await chatHistoryStore.save(chatHistoryState);
     elements.statusLine.textContent = "Chat deleted from this device.";
     await reconnectAfterChatSessionChange(shouldReconnect);
@@ -1217,7 +1376,8 @@ async function clearLocalChatHistory() {
       activeSessionId: session.id,
       sessions: [session],
     });
-    renderActiveChatSession();
+    await chatSnapshotStore.clear();
+    await renderActiveChatSession();
     await chatHistoryStore.clear();
     await chatHistoryStore.save(chatHistoryState);
     closeChatHistory();
@@ -1228,38 +1388,47 @@ async function clearLocalChatHistory() {
 }
 
 function clearConversationContext() {
-  for (const message of activeTranscriptReveals) {
-    cancelAnimationFrame(message.revealFrameId);
+  const previousSnapshotSuspension = chatSnapshotPersistenceSuspended;
+  chatSnapshotPersistenceSuspended = true;
+  clearTimeout(chatSnapshotPersistTimerId);
+  chatSnapshotPersistTimerId = null;
+  try {
+    for (const message of activeTranscriptReveals) {
+      cancelAnimationFrame(message.revealFrameId);
+    }
+    activeTranscriptReveals.clear();
+    disposeRestoredTranscriptDisclosures();
+    if (thinkingCollapseFrameId !== null) cancelAnimationFrame(thinkingCollapseFrameId);
+    thinkingCollapseFrameId = null;
+    completedThinkingMessagesAwaitingContent.clear();
+    lumiContentSequence = 0;
+    conversationHistory.length = 0;
+    localChatHistory.length = 0;
+    queuedUserMessages.length = 0;
+    taskOrchestrator.clear();
+    taskStepView.clear();
+    clearTimeout(transcriptProgrammaticScrollTimerId);
+    transcriptProgrammaticScrollTimerId = null;
+    transcriptProgrammaticScroll = false;
+    transcriptAutoFollow = true;
+    hasConnectedInPanelLifetime = false;
+    pendingThinkingReconnect = false;
+    for (const role of Object.keys(partialMessages)) {
+      partialMessages[role]?.disclosure?.dispose();
+      partialMessages[role] = null;
+    }
+    elements.transcript.innerHTML = initialTranscriptMarkup;
+    elements.messageInput.value = "";
+    imageAttachmentPending = false;
+    imageDragDepth = 0;
+    elements.messageForm.classList.remove("is-image-dragging");
+    clearPendingImageAttachment();
+    resizeMessageInput();
+    syncMessageComposer();
+    syncQueuedMessagePanel();
+  } finally {
+    chatSnapshotPersistenceSuspended = previousSnapshotSuspension;
   }
-  activeTranscriptReveals.clear();
-  if (thinkingCollapseFrameId !== null) cancelAnimationFrame(thinkingCollapseFrameId);
-  thinkingCollapseFrameId = null;
-  completedThinkingMessagesAwaitingContent.clear();
-  lumiContentSequence = 0;
-  conversationHistory.length = 0;
-  localChatHistory.length = 0;
-  queuedUserMessages.length = 0;
-  taskOrchestrator.clear();
-  taskStepView.clear();
-  clearTimeout(transcriptProgrammaticScrollTimerId);
-  transcriptProgrammaticScrollTimerId = null;
-  transcriptProgrammaticScroll = false;
-  transcriptAutoFollow = true;
-  hasConnectedInPanelLifetime = false;
-  pendingThinkingReconnect = false;
-  for (const role of Object.keys(partialMessages)) {
-    partialMessages[role]?.disclosure?.dispose();
-    partialMessages[role] = null;
-  }
-  elements.transcript.innerHTML = initialTranscriptMarkup;
-  elements.messageInput.value = "";
-  imageAttachmentPending = false;
-  imageDragDepth = 0;
-  elements.messageForm.classList.remove("is-image-dragging");
-  clearPendingImageAttachment();
-  resizeMessageInput();
-  syncMessageComposer();
-  syncQueuedMessagePanel();
 }
 
 function showConnectionNotice({ action, title, message, actionLabel, showSettings = false, earlyDisconnect = false }) {
@@ -1527,6 +1696,7 @@ function createCapturedTabMessage(capture) {
   article.append(author, figure);
   elements.transcript.append(article);
   scrollTranscriptToLatest({ smooth: true });
+  scheduleActiveChatSnapshotPersist();
 }
 
 function updateTranscript(role, incoming) {
@@ -1583,6 +1753,7 @@ function finalizeTranscript(role) {
     scrollTranscriptToLatest();
   }
   partialMessages[role] = null;
+  scheduleActiveChatSnapshotPersist();
 }
 
 function sendJson(payload, targetSocket = websocket) {
@@ -2668,7 +2839,9 @@ async function startSession() {
     const apiKey = String(stored[API_KEY_STORAGE_KEY] || "").trim();
     const voiceName = String(stored[VOICE_STORAGE_KEY] || DEFAULT_VOICE_NAME);
     const sessionThinkingLevel = normalizeThinkingLevel(stored[THINKING_LEVEL_STORAGE_KEY]);
-    const sessionFastMode = stored[FAST_MODE_STORAGE_KEY] === true;
+    const sessionFastMode = typeof stored[FAST_MODE_STORAGE_KEY] === "boolean"
+      ? stored[FAST_MODE_STORAGE_KEY]
+      : DEFAULT_FAST_MODE_ENABLED;
     microphoneEnabled = stored[MICROPHONE_ENABLED_STORAGE_KEY] === true;
     isMuted = true;
     microphoneWarning = "";
@@ -3243,9 +3416,16 @@ elements.mcpToolNoticePrimary.addEventListener("click", () => void handleMcpTool
 elements.mcpToolNoticeSecondary.addEventListener("click", () => void handleMcpToolNoticeAction("secondary"));
 elements.mcpToolNoticeTertiary.addEventListener("click", () => void handleMcpToolNoticeAction("tertiary"));
 elements.transcript.addEventListener("scroll", () => {
-  if (transcriptProgrammaticScroll) return;
-  transcriptAutoFollow = isScrollAtBottom(elements.transcript);
+  if (!transcriptProgrammaticScroll) {
+    transcriptAutoFollow = isScrollAtBottom(elements.transcript);
+  }
+  scheduleActiveChatSnapshotPersist();
 }, { passive: true });
+elements.transcript.addEventListener(
+  "toggle",
+  scheduleActiveChatSnapshotPersist,
+  true,
+);
 elements.transcript.addEventListener("scrollend", () => {
   clearTimeout(transcriptProgrammaticScrollTimerId);
   transcriptProgrammaticScrollTimerId = null;
@@ -3333,6 +3513,7 @@ window.addEventListener("unload", () => {
   petalEmitter.stop();
   websocket?.close();
   cleanupMedia();
+  void flushActiveChatSnapshotPersist();
   fastModeController.dispose();
   panelAudio.dispose();
   avatarController.dispose();
@@ -3344,7 +3525,12 @@ document.addEventListener("visibilitychange", () => {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes[FAST_MODE_STORAGE_KEY]) {
-    fastModeController.apply(changes[FAST_MODE_STORAGE_KEY].newValue === true);
+    const storedFastMode = changes[FAST_MODE_STORAGE_KEY].newValue;
+    fastModeController.apply(
+      typeof storedFastMode === "boolean"
+        ? storedFastMode
+        : DEFAULT_FAST_MODE_ENABLED,
+    );
   }
   if (changes[MCP_TOOL_POLICIES_STORAGE_KEY]) {
     applyMcpToolPolicies(changes[MCP_TOOL_POLICIES_STORAGE_KEY].newValue);
@@ -3431,7 +3617,11 @@ async function initialize() {
   if (typeof stored[MICROPHONE_ENABLED_STORAGE_KEY] !== "boolean") {
     await chrome.storage.local.set({ [MICROPHONE_ENABLED_STORAGE_KEY]: false });
   }
-  fastModeController.apply(stored[FAST_MODE_STORAGE_KEY] === true);
+  fastModeController.apply(
+    typeof stored[FAST_MODE_STORAGE_KEY] === "boolean"
+      ? stored[FAST_MODE_STORAGE_KEY]
+      : DEFAULT_FAST_MODE_ENABLED,
+  );
   const storedPetals = stored[PETALS_STORAGE_KEY];
   applyPetals(typeof storedPetals === "boolean"
     ? storedPetals

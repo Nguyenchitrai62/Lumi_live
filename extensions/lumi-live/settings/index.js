@@ -1,6 +1,9 @@
 import { createMcpSettingsController } from "./mcp-settings-controller.js";
 import { EXTENSION_EVENTS, STORAGE_KEYS } from "../core/extension-config.js";
-import { DEFAULT_VOICE_NAME } from "../core/ui-config.js";
+import {
+  DEFAULT_FAST_MODE_ENABLED,
+  DEFAULT_VOICE_NAME,
+} from "../core/ui-config.js";
 import {
   createVoicePreviewController,
   VOICE_PROFILES,
@@ -196,7 +199,9 @@ async function initialize() {
   elements.voiceInput.value = String(stored[VOICE_STORAGE_KEY] || DEFAULT_VOICE_NAME);
   voicePreview.updateVoiceProfiles();
   applyVisualPreferenceControls({
-    fastMode: stored[FAST_MODE_STORAGE_KEY] === true,
+    fastMode: typeof stored[FAST_MODE_STORAGE_KEY] === "boolean"
+      ? stored[FAST_MODE_STORAGE_KEY]
+      : DEFAULT_FAST_MODE_ENABLED,
     showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
   });
   elements.connectMcpButton.disabled = true;
@@ -216,7 +221,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     FAST_MODE_STORAGE_KEY,
     ELEMENT_HIGHLIGHTS_STORAGE_KEY,
   ]).then((stored) => applyVisualPreferenceControls({
-    fastMode: stored[FAST_MODE_STORAGE_KEY] === true,
+    fastMode: typeof stored[FAST_MODE_STORAGE_KEY] === "boolean"
+      ? stored[FAST_MODE_STORAGE_KEY]
+      : DEFAULT_FAST_MODE_ENABLED,
     showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
   }));
 });

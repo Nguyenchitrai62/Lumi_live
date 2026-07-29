@@ -34,6 +34,7 @@ test("manifest and HTML entrypoints keep their stable unpacked-extension paths",
   assert.ok(manifest.permissions.includes("identity"));
   assert.ok(manifest.permissions.includes("activeTab"));
   assert.ok(manifest.permissions.includes("debugger"));
+  assert.ok(manifest.permissions.includes("unlimitedStorage"));
   assert.match(manifest.version, /^\d+(?:\.\d+){0,3}$/);
   assert.equal(Object.hasOwn(manifest, "oauth2"), false);
   const entrypoints = [

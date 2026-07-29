@@ -46,6 +46,7 @@ let listedTabsExpireAt = 0;
 let activeBrowserAction = null;
 let creatingOffscreenDocument = null;
 const sidePanelPorts = new Set();
+let sidePanelLifecycleWork = Promise.resolve();
 const {
   addMcpServer,
   callMcpTool,
@@ -75,7 +76,10 @@ async function loadBackgroundState() {
     Promise.all([loadTarget(), fastWorkspace.initialize()]),
     chrome.storage.local.get(FAST_MODE_STORAGE_KEY),
   ]);
-  fastModeEnabled = stored[FAST_MODE_STORAGE_KEY] === true;
+  fastModeEnabled = normalizeVisualPreferences({
+    fastMode: stored[FAST_MODE_STORAGE_KEY],
+  }).fastMode;
+  if (sidePanelPorts.size === 0) await fastWorkspace.release();
 }
 
 const ready = loadBackgroundState();
@@ -189,13 +193,37 @@ async function startPreparedTranslation(status, tab, message) {
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "lumi_live_side_panel") return;
+  const firstOpenPanel = sidePanelPorts.size === 0;
   sidePanelPorts.add(port);
-  void chrome.runtime.sendMessage({ type: PANEL_LIFECYCLE_MESSAGE, state: "opened" }).catch(() => {});
+  if (firstOpenPanel) {
+    sidePanelLifecycleWork = sidePanelLifecycleWork.catch(() => {}).then(async () => {
+      await ready;
+      if (fastModeEnabled) await activateFastWorkspace();
+      await chrome.runtime.sendMessage({
+        type: PANEL_LIFECYCLE_MESSAGE,
+        state: "opened",
+      }).catch(() => {});
+      notifyTargetChanged();
+    });
+  }
   port.onDisconnect.addListener(() => {
     sidePanelPorts.delete(port);
     if (sidePanelPorts.size > 0) return;
-    void chrome.runtime.sendMessage({ type: PANEL_LIFECYCLE_MESSAGE, state: "closed" }).catch(() => {});
-    void releaseTranslationCapture().catch(() => {});
+    sidePanelLifecycleWork = sidePanelLifecycleWork.catch(() => {}).then(async () => {
+      await ready;
+      await chrome.runtime.sendMessage({
+        type: PANEL_LIFECYCLE_MESSAGE,
+        state: "closed",
+      }).catch(() => {});
+      await releaseTranslationCapture().catch(() => {});
+      if (fastModeEnabled) {
+        fastPromptTargetTabId = null;
+        fastLastActiveWorkspaceTabId = null;
+      }
+      await fastWorkspace.release();
+      if (fastModeEnabled) await setConnectedTab(null);
+      notifyTargetChanged();
+    });
   });
 });
 
@@ -251,7 +279,7 @@ async function getVisualPreferences() {
   ]);
   return normalizeVisualPreferences({
     showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
-    fastMode: stored[FAST_MODE_STORAGE_KEY] === true,
+    fastMode: stored[FAST_MODE_STORAGE_KEY],
   });
 }
 
@@ -337,9 +365,23 @@ async function activateFastWorkspace(preferredTabId = null) {
   return { tab: await chrome.tabs.get(tab.id), controllerReady };
 }
 
-async function applyFastModeEnabled(enabled, { preferredTabId = null } = {}) {
+async function applyFastModeEnabled(
+  enabled,
+  {
+    preferredTabId = null,
+    activateWorkspace = sidePanelPorts.size > 0,
+  } = {},
+) {
   fastModeEnabled = enabled === true;
   if (fastModeEnabled) {
+    if (!activateWorkspace) {
+      fastPromptTargetTabId = null;
+      fastLastActiveWorkspaceTabId = null;
+      await fastWorkspace.release();
+      await setConnectedTab(null);
+      notifyTargetChanged();
+      return { target: null, workspace: fastWorkspace.state() };
+    }
     const target = await activateFastWorkspace(preferredTabId);
     notifyTargetChanged();
     return { target, workspace: fastWorkspace.state() };
@@ -1713,7 +1755,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   const visualPreferenceChanged = areaName === "local"
     && (changes[ELEMENT_HIGHLIGHTS_STORAGE_KEY] || changes[FAST_MODE_STORAGE_KEY]);
   if (!visualPreferenceChanged) return;
-  const nextFastMode = changes[FAST_MODE_STORAGE_KEY]?.newValue === true;
+  const nextFastMode = normalizeVisualPreferences({
+    fastMode: changes[FAST_MODE_STORAGE_KEY]?.newValue,
+  }).fastMode;
   if (changes[FAST_MODE_STORAGE_KEY] && nextFastMode !== fastModeEnabled) {
     void applyFastModeEnabled(nextFastMode).then(() => {
       if (connectedTabId) return applyControllerVisualPreferences(connectedTabId);
@@ -1726,8 +1770,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
 void ready.then(async () => {
   if (fastModeEnabled) {
-    const restoredTarget = await resolveFastWorkspaceTarget();
-    if (!restoredTarget) await activateFastWorkspace();
+    if (sidePanelPorts.size === 0) await fastWorkspace.release();
     return;
   }
   await followActiveTab();

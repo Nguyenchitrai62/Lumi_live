@@ -3140,6 +3140,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
   }
 
   // extensions/lumi-live/core/ui-config.js
+  var DEFAULT_FAST_MODE_ENABLED = false;
   var DEFAULT_SHOW_ELEMENT_HIGHLIGHTS = false;
   var BROWSER_CLICK_RIPPLE_DURATION_MS = 300;
   var BROWSER_ACTION_CLEANUP_DELAY_MS = 420;
@@ -3807,13 +3808,13 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
 
   // extensions/lumi-live/core/visual-preferences.js
   var DEFAULT_VISUAL_PREFERENCES = Object.freeze({
-    fastMode: false,
+    fastMode: DEFAULT_FAST_MODE_ENABLED,
     showElementHighlights: DEFAULT_SHOW_ELEMENT_HIGHLIGHTS,
     scrollDurationMs: PAGE_SCROLL_DURATION_MS,
     typingDurationMs: FORM_INPUT_REVEAL_DURATION_MS
   });
   function normalizeVisualPreferences(value = {}) {
-    const fastMode = value.fastMode === true;
+    const fastMode = typeof value.fastMode === "boolean" ? value.fastMode : DEFAULT_VISUAL_PREFERENCES.fastMode;
     return {
       fastMode,
       showElementHighlights: fastMode ? false : typeof value.showElementHighlights === "boolean" ? value.showElementHighlights : DEFAULT_VISUAL_PREFERENCES.showElementHighlights,

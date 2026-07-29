@@ -480,8 +480,33 @@ export function createTaskStepView({
     roots.clear();
   };
 
+  const hydrate = (history = []) => {
+    clearTimeout(expansionSettleTimerId);
+    expansionSettleTimerId = null;
+    expansionSettling = false;
+    pendingHistory = null;
+    disposeDisclosures();
+    expansionPreferences.clear();
+    roots.clear();
+    for (const root of container?.querySelectorAll(
+      ".agent-task-view[data-task-id]",
+    ) || []) {
+      roots.set(root.dataset.taskId, root);
+      for (const step of root.querySelectorAll(
+        ".agent-step-card[data-step-id]",
+      )) {
+        expansionPreferences.set(
+          step.dataset.stepId,
+          step.open || step.dataset.expanded === "true",
+        );
+      }
+    }
+    render(history, { force: true });
+  };
+
   return {
     clear,
+    hydrate,
     render,
     get isReviewing() {
       return hasManuallyExpandedStep() || expansionSettling;

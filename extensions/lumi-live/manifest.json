@@ -4,7 +4,7 @@
   "version": "0.1.3",
   "minimum_chrome_version": "120",
   "description": "A Gemini Live voice agent with live video translation, reactive avatars, PageAgent browser controls, and MCP tools.",
-  "permissions": ["activeTab", "debugger", "identity", "offscreen", "scripting", "sidePanel", "storage", "tabGroups", "tabs"],
+  "permissions": ["activeTab", "debugger", "identity", "offscreen", "scripting", "sidePanel", "storage", "tabGroups", "tabs", "unlimitedStorage"],
   "host_permissions": [
     "<all_urls>"
   ],

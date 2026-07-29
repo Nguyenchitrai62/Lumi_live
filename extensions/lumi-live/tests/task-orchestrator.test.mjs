@@ -160,6 +160,27 @@ test("marks only consecutive failures of the same action as retries", () => {
   assert.equal(laterClick.retryAttempt, 0);
 });
 
+test("restores persisted task events and continues with collision-free IDs", () => {
+  const source = createTaskOrchestrator({ now: () => 1000 });
+  const originalTaskId = source.startTask("Preserve every visible step.");
+  source.cancelTask("The side panel closed.");
+  const storedHistory = JSON.parse(JSON.stringify(source.history));
+  const changes = [];
+  const restored = createTaskOrchestrator({
+    now: () => 2000,
+    onHistoryChange: (_history, _event, change) => changes.push(change),
+  });
+  restored.restore(storedHistory);
+  assert.deepEqual(restored.history, storedHistory);
+  assert.equal(restored.history[0].taskId, originalTaskId);
+  assert.equal(restored.activeTask, null);
+  assert.equal(restored.history.at(-1).reason, "cancelled");
+  assert.equal(changes.at(-1), "restore");
+  const nextTaskId = restored.startTask("Continue in the restored session.");
+  assert.equal(nextTaskId, "task-2");
+  assert.equal(restored.history.at(-1).id, `event-${storedHistory.length + 1}`);
+});
+
 test("treats an explicit success=false result as a failed harness step", () => {
   const orchestrator = createTaskOrchestrator({ maxSteps: 6 });
   const taskId = orchestrator.startTask("Run one tool and preserve its failure.");

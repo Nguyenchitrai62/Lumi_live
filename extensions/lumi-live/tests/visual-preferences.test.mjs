@@ -5,21 +5,33 @@ import {
   DEFAULT_VISUAL_PREFERENCES,
   normalizeVisualPreferences,
 } from "../core/visual-preferences.js";
+import { DEFAULT_FAST_MODE_ENABLED } from "../core/ui-config.js";
 
-test("uses visible browser effects by default", () => {
+test("uses the central Fast mode default when no preference is stored", () => {
   assert.deepEqual(normalizeVisualPreferences(), DEFAULT_VISUAL_PREFERENCES);
+  assert.equal(
+    DEFAULT_VISUAL_PREFERENCES.fastMode,
+    DEFAULT_FAST_MODE_ENABLED,
+  );
 });
 
 test("keeps gradual typing fixed at half a second", () => {
-  assert.equal(normalizeVisualPreferences({ typingDurationMs: 1000 }).typingDurationMs, 500);
+  assert.equal(normalizeVisualPreferences({
+    fastMode: false,
+    typingDurationMs: 1000,
+  }).typingDurationMs, 500);
 });
 
 test("keeps animated scrolling fixed at one second", () => {
-  assert.equal(normalizeVisualPreferences({ scrollDurationMs: 20 }).scrollDurationMs, 1000);
+  assert.equal(normalizeVisualPreferences({
+    fastMode: false,
+    scrollDurationMs: 20,
+  }).scrollDurationMs, 1000);
 });
 
 test("normalizes stored visual settings", () => {
   assert.deepEqual(normalizeVisualPreferences({
+    fastMode: false,
     showElementHighlights: true,
     scrollDurationMs: 20,
     typingDurationMs: 1000,
