@@ -151,6 +151,26 @@
       </dialog>
 
       <footer class="composer-area">
+        <section
+          id="liveTranslationPanel"
+          class="live-translation-panel"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          hidden
+        >
+          <span class="live-translation-panel-icon" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </span>
+          <div class="live-translation-panel-copy">
+            <small>LIVE TRANSLATE</small>
+            <strong id="liveTranslationPanelTitle">Translating video audio</strong>
+            <span id="liveTranslationPanelDetail">Chat and voice input are paused while translation is active.</span>
+          </div>
+          <button id="stopLiveTranslationButton" type="button">Stop translation</button>
+        </section>
         <div id="messageQueue" class="message-queue" aria-live="polite" hidden>
           <span class="message-queue-mark" aria-hidden="true"></span>
           <p id="messageQueuePreview" class="message-queue-preview"></p>

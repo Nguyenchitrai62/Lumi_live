@@ -115,6 +115,12 @@ const TURN_CANCELLATION_WATCHDOG_MS = 80;
 const TURN_CANCELLATION_BOUNDARY_MS = 1500;
 const TARGET_REFRESH_INTERVAL_MS = 2800;
 const VISUAL_CONTEXT_SETTLE_MS = 650;
+const LIVE_TRANSLATION_CHAT_LOCK_STATES = new Set([
+  "connecting",
+  "active",
+  "reconnecting",
+  "stopping",
+]);
 applyUiConfig();
 const sidePanelLifecyclePort = chrome.runtime.connect({ name: "lumi_live_side_panel" });
 const chatHistoryStore = createLocalChatHistoryStore({
@@ -179,6 +185,10 @@ const elements = {
   messageQueueCount: document.querySelector("#messageQueueCount"),
   messageQueueSteer: document.querySelector("#messageQueueSteer"),
   messageQueueRemove: document.querySelector("#messageQueueRemove"),
+  liveTranslationPanel: document.querySelector("#liveTranslationPanel"),
+  liveTranslationPanelTitle: document.querySelector("#liveTranslationPanelTitle"),
+  liveTranslationPanelDetail: document.querySelector("#liveTranslationPanelDetail"),
+  stopLiveTranslationButton: document.querySelector("#stopLiveTranslationButton"),
   messageForm: document.querySelector("#messageForm"),
   imageAttachmentButton: document.querySelector("#imageAttachmentButton"),
   imageAttachmentInput: document.querySelector("#imageAttachmentInput"),
@@ -222,6 +232,11 @@ let websocket = null;
 let activeApiKey = "";
 let pendingLiveTranslationStart = false;
 let liveTranslationTargetLanguageCode = "";
+let liveTranslationState = "off";
+let liveTranslationStopPending = false;
+let liveTranslationChatLocked = false;
+let resumeMicrophoneAfterTranslation = false;
+let liveTranslationStopError = "";
 let cancelPendingSharedTabAudioPrompt = null;
 let thinkingLevel = DEFAULT_THINKING_LEVEL;
 let pendingThinkingReconnect = false;
@@ -544,6 +559,10 @@ function clearPendingImageAttachment() {
 async function attachImageFiles(files) {
   const selectedFiles = Array.from(files || []);
   const file = selectedFiles[0];
+  if (isLiveTranslationChatLocked()) {
+    elements.statusLine.textContent = "Stop Live Translate before attaching or sending a message.";
+    return false;
+  }
   if (!file || imageAttachmentPending) {
     if (!file) elements.statusLine.textContent = "Drop or paste a JPEG, PNG, WebP, or GIF image.";
     return false;
@@ -575,14 +594,24 @@ async function attachImageFiles(files) {
 function syncMessageComposer() {
   const ready = sessionStatus === "ready";
   const transportReady = isGeminiTransportReady();
+  const translationLocked = isLiveTranslationChatLocked();
   const hasText = Boolean(elements.messageInput.value.trim());
   const hasContent = hasText || Boolean(pendingImageAttachment);
-  const cancelMode = ready && agentTurnActive && !turnCancellationPending && !hasContent;
+  const cancelMode = !translationLocked
+    && ready
+    && agentTurnActive
+    && !turnCancellationPending
+    && !hasContent;
   const queueMode = ready
+    && !translationLocked
     && (agentTurnActive || turnCancellationPending || !transportReady)
     && hasContent;
-  elements.messageInput.disabled = textSendPending;
-  elements.messageInput.placeholder = textSendPending
+  elements.messageForm.classList.toggle("is-translation-locked", translationLocked);
+  elements.messageForm.setAttribute("aria-busy", String(translationLocked));
+  elements.messageInput.disabled = textSendPending || translationLocked;
+  elements.messageInput.placeholder = translationLocked
+    ? "Stop Live Translate to continue chatting…"
+    : textSendPending
     ? "Preparing your message…"
     : ready
     ? turnCancellationPending
@@ -597,11 +626,16 @@ function syncMessageComposer() {
     : queueMode ? "Add message to queue" : "Send message";
   elements.messageSubmit.setAttribute("aria-label", submitLabel);
   elements.messageSubmit.title = submitLabel;
-  elements.imageAttachmentButton.disabled = textSendPending || imageAttachmentPending;
+  elements.imageAttachmentButton.disabled =
+    translationLocked
+    || textSendPending
+    || imageAttachmentPending;
   elements.messageSubmit.disabled =
-    textSendPending
+    translationLocked
+    || textSendPending
     || imageAttachmentPending
     || (!hasContent && !cancelMode);
+  elements.muteButton.disabled = translationLocked || sessionStatus !== "ready";
 }
 
 function syncQueuedMessagePanel() {
@@ -612,8 +646,14 @@ function syncQueuedMessagePanel() {
   elements.messageQueuePreview.textContent = preview;
   elements.messageQueuePreview.title = preview;
   elements.messageQueueCount.textContent = count > 1 ? `+${count - 1}` : "";
-  elements.messageQueueSteer.disabled = turnCancellationPending || !isGeminiTransportReady();
-  elements.messageQueueSteer.title = isGeminiTransportReady()
+  const translationLocked = isLiveTranslationChatLocked();
+  elements.messageQueueSteer.disabled =
+    translationLocked
+    || turnCancellationPending
+    || !isGeminiTransportReady();
+  elements.messageQueueSteer.title = translationLocked
+    ? "Stop Live Translate before sending a queued message"
+    : isGeminiTransportReady()
     ? "Interrupt the current turn and send this now"
     : "Send this as soon as Lumi reconnects";
 }
@@ -772,13 +812,14 @@ function setSessionStatus(nextStatus, message) {
   elements.liveBadge.className = `badge badge-${nextStatus === "ready" ? "live" : nextStatus === "connecting" ? "joining" : nextStatus === "error" ? "error" : "offline"}`;
   elements.liveBadge.textContent = nextStatus === "ready" ? "Live" : nextStatus === "connecting" ? "Joining" : nextStatus === "error" ? "Retry" : "Offline";
   elements.statusLine.textContent = message;
-  elements.muteButton.disabled = nextStatus !== "ready";
-  elements.thinkingButton.disabled = false;
+  elements.muteButton.disabled = nextStatus !== "ready" || isLiveTranslationChatLocked();
+  elements.thinkingButton.disabled = isLiveTranslationChatLocked();
   elements.thinkingButton.title = nextStatus === "ready" || nextStatus === "connecting"
     ? "Change thinking level; Lumi will reconnect without losing this conversation"
     : "Choose how deeply Gemini reasons";
   syncMessageComposer();
   syncQueuedMessagePanel();
+  syncTranslationSensitiveControls();
   avatarController.syncState();
 }
 
@@ -1074,7 +1115,7 @@ function renderChatSessionList() {
     openButton.className = "chat-session-open";
     openButton.type = "button";
     openButton.dataset.chatSessionId = session.id;
-    openButton.disabled = chatSessionMutationPending;
+    openButton.disabled = chatSessionMutationPending || isLiveTranslationChatLocked();
     openButton.setAttribute(
       "aria-current",
       session.id === activeSession.id ? "true" : "false",
@@ -1096,7 +1137,7 @@ function renderChatSessionList() {
     deleteButton.className = "chat-session-delete";
     deleteButton.type = "button";
     deleteButton.dataset.deleteChatSessionId = session.id;
-    deleteButton.disabled = chatSessionMutationPending;
+    deleteButton.disabled = chatSessionMutationPending || isLiveTranslationChatLocked();
     deleteButton.setAttribute("aria-label", `Delete ${session.title}`);
     deleteButton.title = "Delete chat";
     deleteButton.innerHTML = `
@@ -1112,9 +1153,7 @@ function renderChatSessionList() {
 
 function setChatSessionMutationPending(pending) {
   chatSessionMutationPending = pending === true;
-  elements.chatHistoryButton.disabled = chatSessionMutationPending;
-  elements.newChatButton.disabled = chatSessionMutationPending;
-  elements.historyNewChatButton.disabled = chatSessionMutationPending;
+  syncTranslationSensitiveControls();
   elements.clearHistoryButton.disabled = chatSessionMutationPending;
   renderChatSessionList();
 }
@@ -1265,6 +1304,10 @@ async function runChatSessionMutation(operation) {
 }
 
 async function startNewChatSession() {
+  if (isLiveTranslationChatLocked()) {
+    elements.statusLine.textContent = "Stop Live Translate before starting another chat.";
+    return false;
+  }
   return runChatSessionMutation(async () => {
     let currentSession = getActiveChatSession();
     const currentSessionIsReusable = currentSession?.turns.length === 0
@@ -1330,6 +1373,10 @@ async function startNewChatSession() {
 }
 
 async function activateChatSession(sessionId) {
+  if (isLiveTranslationChatLocked()) {
+    elements.statusLine.textContent = "Stop Live Translate before switching chats.";
+    return false;
+  }
   const requestedSessionId = String(sessionId || "");
   if (!requestedSessionId || requestedSessionId === chatHistoryState.activeSessionId) {
     closeChatHistory();
@@ -1854,6 +1901,7 @@ function sessionHasInFlightWork() {
     || browserToolRunning
     || pendingToolCallIds.size
     || pendingLiveTranslationStart
+    || liveTranslationStopPending
     || textSendPending
   );
 }
@@ -1959,21 +2007,179 @@ function resetSessionRecoveryState() {
   backgroundSessionReconnectPending = false;
 }
 
+function normalizeLiveTranslationUiState(state) {
+  const normalized = String(state || "").trim().toLowerCase();
+  return [
+    "off",
+    "connecting",
+    "active",
+    "reconnecting",
+    "stopping",
+    "error",
+  ].includes(normalized)
+    ? normalized
+    : "off";
+}
+
+function isLiveTranslationChatLocked() {
+  return Boolean(
+    pendingLiveTranslationStart
+    || liveTranslationStopPending
+    || LIVE_TRANSLATION_CHAT_LOCK_STATES.has(liveTranslationState),
+  );
+}
+
+function syncTranslationSensitiveControls() {
+  const translationLocked = isLiveTranslationChatLocked();
+  const chatNavigationLocked = chatSessionMutationPending || translationLocked;
+  elements.chatHistoryButton.disabled = chatNavigationLocked;
+  elements.newChatButton.disabled = chatNavigationLocked;
+  elements.historyNewChatButton.disabled = chatNavigationLocked;
+  elements.fastModeButton.disabled = translationLocked;
+  elements.thinkingButton.disabled = translationLocked;
+  if (translationLocked) setThinkingMenuOpen(false);
+}
+
+function syncLiveTranslationUi() {
+  const wasLocked = liveTranslationChatLocked;
+  const translationLocked = isLiveTranslationChatLocked();
+  const visibleState = liveTranslationStopPending
+    ? "stopping"
+    : pendingLiveTranslationStart && liveTranslationState === "off"
+      ? "connecting"
+      : liveTranslationState;
+  liveTranslationChatLocked = translationLocked;
+  document.body.classList.toggle("translation-locked", translationLocked);
+
+  if (translationLocked && !wasLocked) {
+    resumeMicrophoneAfterTranslation = Boolean(
+      sessionStatus === "ready"
+      && microphoneEnabled
+      && !isMuted,
+    );
+    if (!isMuted) {
+      isMuted = true;
+      panelAudio.stopMicrophone();
+      sendJson({ realtimeInput: { audioStreamEnd: true } });
+      syncMuteButton();
+    }
+    if (elements.chatHistoryDialog.open) closeChatHistory();
+  } else if (!translationLocked && wasLocked) {
+    const shouldResumeMicrophone = resumeMicrophoneAfterTranslation;
+    resumeMicrophoneAfterTranslation = false;
+    if (shouldResumeMicrophone) {
+      queueMicrotask(() => {
+        if (
+          !isLiveTranslationChatLocked()
+          && sessionStatus === "ready"
+          && microphoneEnabled
+          && isMuted
+        ) {
+          void enableMicrophone({ persistPreference: false, announce: false });
+        }
+      });
+    }
+  }
+
+  const languageLabel = liveTranslationTargetLanguageCode
+    ? getLiveTranslationLanguageLabel(liveTranslationTargetLanguageCode)
+    : "the requested language";
+  elements.liveTranslationPanel.hidden = !translationLocked;
+  elements.liveTranslationPanel.dataset.state = visibleState;
+  elements.liveTranslationPanel.dataset.stopError = String(Boolean(liveTranslationStopError));
+  elements.liveTranslationPanelTitle.textContent = visibleState === "active"
+    ? `Translating video audio to ${languageLabel}`
+    : visibleState === "reconnecting"
+      ? "Reconnecting Live Translate"
+      : visibleState === "stopping"
+        ? "Stopping Live Translate"
+        : "Starting Live Translate";
+  elements.liveTranslationPanelDetail.textContent = liveTranslationStopError
+    ? `${liveTranslationStopError} Translation may still be active; retry Stop translation.`
+    : visibleState === "stopping"
+      ? "Please wait. Chat will unlock only after translation has fully stopped."
+      : "Chat and voice input are paused. Stop translation when you want to talk to Lumi again.";
+  elements.stopLiveTranslationButton.disabled = liveTranslationStopPending;
+  elements.stopLiveTranslationButton.textContent = liveTranslationStopPending
+    ? "Stopping…"
+    : "Stop translation";
+
+  syncTranslationSensitiveControls();
+  syncMessageComposer();
+  syncQueuedMessagePanel();
+}
+
 function setLiveTranslationBadge(state, detail = "") {
+  liveTranslationState = normalizeLiveTranslationUiState(state);
+  if (liveTranslationState === "off" || liveTranslationState === "error") {
+    liveTranslationStopError = "";
+  }
   const languageCode = normalizeLiveTranslationLanguageCode(detail)
     || liveTranslationTargetLanguageCode
     || "";
   if (languageCode) liveTranslationTargetLanguageCode = languageCode;
-  if (state === "off") liveTranslationTargetLanguageCode = "";
-  elements.translateBadge.hidden = state === "off";
-  elements.translateBadge.className = `badge badge-translate translate-${state}`;
-  elements.translateBadge.textContent = state === "active"
+  if (liveTranslationState === "off") liveTranslationTargetLanguageCode = "";
+  elements.translateBadge.hidden = liveTranslationState === "off";
+  elements.translateBadge.className = `badge badge-translate translate-${liveTranslationState}`;
+  elements.translateBadge.textContent = liveTranslationState === "active"
     ? `Translate · ${languageCode}`
-    : state === "reconnecting"
-      ? `Translate · reconnecting`
-      : state === "error"
-        ? "Translate · error"
-        : "Translate · joining";
+    : liveTranslationState === "reconnecting"
+      ? "Translate · reconnecting"
+      : liveTranslationState === "stopping"
+        ? "Translate · stopping"
+        : liveTranslationState === "error"
+          ? "Translate · error"
+          : "Translate · joining";
+  syncLiveTranslationUi();
+}
+
+async function stopLiveTranslationSession({ announce = true } = {}) {
+  if (liveTranslationStopPending) {
+    return { success: true, state: "stopping", alreadyStopping: true };
+  }
+
+  const stateBeforeStop = LIVE_TRANSLATION_CHAT_LOCK_STATES.has(liveTranslationState)
+    ? liveTranslationState
+    : "active";
+  liveTranslationStopError = "";
+  liveTranslationStopPending = true;
+  pendingLiveTranslationStart = false;
+  cancelPendingSharedTabAudioPrompt?.();
+  setLiveTranslationBadge("stopping");
+  let result;
+  try {
+    result = await sendRuntime("stop_live_translation");
+    setLiveTranslationBadge("off");
+    if (announce) {
+      elements.statusLine.textContent = result.wasActive
+        ? "Live translation stopped. You can chat with Lumi again."
+        : "Live translation was already off. Chat is ready.";
+    }
+    return { success: true, ...result };
+  } catch (error) {
+    const detail = error instanceof Error
+      ? `Could not stop Live Translate: ${error.message}`
+      : "Could not stop Live Translate.";
+    liveTranslationStopError = detail;
+    setLiveTranslationBadge(stateBeforeStop);
+    elements.statusLine.textContent = detail;
+    throw error;
+  } finally {
+    sharedTabAudio.stop();
+    liveTranslationStopPending = false;
+    syncLiveTranslationUi();
+  }
+}
+
+async function stopLiveTranslationFromUi() {
+  try {
+    if (sessionStatus === "ready" && agentTurnActive) {
+      cancelCurrentTurn();
+    }
+    await stopLiveTranslationSession();
+  } catch {
+    avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
+  }
 }
 
 async function runLiveTranslationTool(args = {}) {
@@ -1985,17 +2191,7 @@ async function runLiveTranslationTool(args = {}) {
     return sendRuntime("live_translation_status");
   }
   if (action === "stop") {
-    let result;
-    try {
-      result = await sendRuntime("stop_live_translation");
-    } finally {
-      sharedTabAudio.stop();
-    }
-    setLiveTranslationBadge("off");
-    elements.statusLine.textContent = result.wasActive
-      ? "Live translation stopped. Lumi is still listening."
-      : "Live translation was already off.";
-    return { success: true, ...result };
+    return stopLiveTranslationSession();
   }
   if (action !== "start") {
     throw new Error("Live Translate action must be start, stop, or status.");
@@ -2006,6 +2202,7 @@ async function runLiveTranslationTool(args = {}) {
   }
   avatarController.transitionState("tool_call");
   pendingLiveTranslationStart = true;
+  setLiveTranslationBadge("connecting", targetLanguageCode);
   let result;
   try {
     result = await sendRuntime("start_live_translation", {
@@ -2021,12 +2218,18 @@ async function runLiveTranslationTool(args = {}) {
       throw new DOMException("Live translation was cancelled.", "AbortError");
     }
   } catch (error) {
-    avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
+    const cancelled = error instanceof DOMException && error.name === "AbortError";
+    setLiveTranslationBadge(cancelled ? "off" : "error");
+    if (!cancelled) {
+      avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
+    }
     throw error;
   } finally {
     pendingLiveTranslationStart = false;
+    syncLiveTranslationUi();
   }
   liveTranslationTargetLanguageCode = targetLanguageCode;
+  setLiveTranslationBadge("active", targetLanguageCode);
   const languageLabel = result.languageLabel || getLiveTranslationLanguageLabel(targetLanguageCode);
   const captureLabel = result.captureMode === "mediaElement"
     ? "direct video audio"
@@ -2259,7 +2462,7 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
       }
     }
     if (completedInBackground) {
-      elements.muteButton.disabled = false;
+      elements.muteButton.disabled = isLiveTranslationChatLocked();
       syncMessageComposer();
       syncQueuedMessagePanel();
     } else {
@@ -2402,6 +2605,15 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
         );
         const actionName = protocolStep.action.name;
         const actionArgs = protocolStep.action.input;
+        if (
+          isLiveTranslationChatLocked()
+          && actionName !== LIVE_TRANSLATE_TOOL_NAME
+          && actionName !== AGENT_DONE_ACTION_NAME
+        ) {
+          throw new Error(
+            "Live Translate is active. Stop translation before running another browser or MCP action.",
+          );
+        }
         pendingToolActionNames.set(callId, actionName);
         orchestration = taskOrchestrator.beginStep({
           taskId,
@@ -3032,6 +3244,9 @@ function cleanupMedia({ cancelActiveTask = true } = {}) {
   }
   activeApiKey = "";
   pendingLiveTranslationStart = false;
+  liveTranslationStopPending = false;
+  resumeMicrophoneAfterTranslation = false;
+  liveTranslationStopError = "";
   liveTranslationTargetLanguageCode = "";
   setLiveTranslationBadge("off");
   panelAudio.closeSession();
@@ -3073,14 +3288,14 @@ async function restartSessionWithContext(message) {
   await startSession();
 }
 
-async function enableMicrophone({ persistPreference = true } = {}) {
-  if (sessionStatus !== "ready" || !isMuted) return !isMuted;
+async function enableMicrophone({ persistPreference = true, announce = true } = {}) {
+  if (sessionStatus !== "ready" || !isMuted || isLiveTranslationChatLocked()) return !isMuted;
   microphoneEnabled = true;
   if (persistPreference) {
     await chrome.storage.local.set({ [MICROPHONE_ENABLED_STORAGE_KEY]: true });
   }
   elements.muteButton.disabled = true;
-  elements.statusLine.textContent = "Turning on microphone…";
+  if (announce) elements.statusLine.textContent = "Turning on microphone…";
 
   try {
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -3092,7 +3307,9 @@ async function enableMicrophone({ persistPreference = true } = {}) {
     microphoneWarning = "";
     microphonePermissionHelp = false;
     elements.microphoneHelpButton.hidden = true;
-    elements.statusLine.textContent = "Microphone is on. You can speak or continue typing.";
+    if (announce) {
+      elements.statusLine.textContent = "Microphone is on. You can speak or continue typing.";
+    }
     return true;
   } catch (error) {
     panelAudio.stopMicrophone();
@@ -3104,14 +3321,16 @@ async function enableMicrophone({ persistPreference = true } = {}) {
     elements.statusLine.textContent = microphoneWarning;
     return false;
   } finally {
-    elements.muteButton.disabled = sessionStatus !== "ready";
+    elements.muteButton.disabled =
+      sessionStatus !== "ready"
+      || isLiveTranslationChatLocked();
     syncMuteButton();
     avatarController.syncState();
   }
 }
 
 async function toggleMute() {
-  if (sessionStatus !== "ready") return;
+  if (sessionStatus !== "ready" || isLiveTranslationChatLocked()) return;
   if (isMuted) {
     await enableMicrophone();
     return;
@@ -3147,6 +3366,7 @@ async function sendText(
     || !isGeminiTransportReady()
     || agentTurnActive
     || turnCancellationPending
+    || isLiveTranslationChatLocked()
   ) return false;
   textSendPending = true;
   syncMessageComposer();
@@ -3163,7 +3383,12 @@ async function sendText(
   }
   const frame = selectedAttachment?.frame || null;
   textSendPending = false;
-  if (!isGeminiTransportReady() || agentTurnActive || turnCancellationPending) {
+  if (
+    !isGeminiTransportReady()
+    || agentTurnActive
+    || turnCancellationPending
+    || isLiveTranslationChatLocked()
+  ) {
     syncMessageComposer();
     return false;
   }
@@ -3226,6 +3451,7 @@ async function flushQueuedUserMessage() {
     || !isGeminiTransportReady()
     || agentTurnActive
     || turnCancellationPending
+    || isLiveTranslationChatLocked()
   ) {
     return false;
   }
@@ -3248,6 +3474,10 @@ async function flushQueuedUserMessage() {
 function queueUserMessage(text, attachment = null) {
   const clean = String(text || "").trim();
   const selectedAttachment = attachment?.frame?.data ? attachment : null;
+  if (isLiveTranslationChatLocked()) {
+    elements.statusLine.textContent = "Stop Live Translate before sending another message.";
+    return;
+  }
   if (!clean && !selectedAttachment) return;
   queuedUserMessages.push({ text: clean, attachment: selectedAttachment });
   syncQueuedMessagePanel();
@@ -3453,6 +3683,9 @@ elements.avatarModeButton.addEventListener("click", () => void toggleAvatarMode(
 elements.petalsButton.addEventListener("click", () => void togglePetals());
 elements.vtuberToggle.addEventListener("click", toggleVtuberSize);
 elements.muteButton.addEventListener("click", toggleMute);
+elements.stopLiveTranslationButton.addEventListener("click", () => {
+  void stopLiveTranslationFromUi();
+});
 elements.messageQueueSteer.addEventListener("click", steerQueuedUserMessage);
 elements.messageQueueRemove.addEventListener("click", removeQueuedUserMessage);
 elements.microphoneHelpButton.addEventListener("click", () => void openMicrophonePermissionPage());
@@ -3522,12 +3755,14 @@ elements.messageInput.addEventListener("paste", (event) => {
   void attachImageFiles(files);
 });
 elements.messageForm.addEventListener("dragenter", (event) => {
+  if (isLiveTranslationChatLocked()) return;
   if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
   event.preventDefault();
   imageDragDepth += 1;
   elements.messageForm.classList.add("is-image-dragging");
 });
 elements.messageForm.addEventListener("dragover", (event) => {
+  if (isLiveTranslationChatLocked()) return;
   if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
   event.preventDefault();
   event.dataTransfer.dropEffect = "copy";
@@ -3541,6 +3776,10 @@ elements.messageForm.addEventListener("dragleave", (event) => {
 elements.messageForm.addEventListener("drop", (event) => {
   if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
   event.preventDefault();
+  if (isLiveTranslationChatLocked()) {
+    elements.statusLine.textContent = "Stop Live Translate before attaching an image.";
+    return;
+  }
   imageDragDepth = 0;
   elements.messageForm.classList.remove("is-image-dragging");
   void attachImageFiles(imageFilesFromDrop(event.dataTransfer));
@@ -3556,6 +3795,10 @@ elements.messageInput.addEventListener("keydown", (event) => {
 });
 elements.messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (isLiveTranslationChatLocked()) {
+    elements.statusLine.textContent = "Stop Live Translate before continuing the chat.";
+    return;
+  }
   const message = elements.messageInput.value.trim();
   const attachment = pendingImageAttachment;
   const hasContent = Boolean(message || attachment);

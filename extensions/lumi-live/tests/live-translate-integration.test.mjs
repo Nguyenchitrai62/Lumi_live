@@ -74,6 +74,27 @@ test("live translation ducks captured source audio and restores it on stop", asy
   assert.match(webPage, /setSharedAudioVolume\(1\)/);
 });
 
+test("side panel gates chat behind a persistent Stop translation control", async () => {
+  const app = await readFile(new URL("../side-panel/index.js", import.meta.url), "utf8");
+  const html = await readFile(new URL("../side-panel/index.html", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../side-panel/styles.css", import.meta.url), "utf8");
+
+  assert.match(html, /id="liveTranslationPanel"/);
+  assert.match(html, /id="stopLiveTranslationButton"[^>]*>Stop translation<\/button>/);
+  assert.match(app, /LIVE_TRANSLATION_CHAT_LOCK_STATES = new Set/);
+  assert.match(app, /function isLiveTranslationChatLocked\(\)/);
+  assert.match(app, /elements\.messageInput\.disabled = textSendPending \|\| translationLocked/);
+  assert.match(app, /elements\.muteButton\.disabled = translationLocked \|\| sessionStatus !== "ready"/);
+  assert.match(app, /panelAudio\.stopMicrophone\(\)[^]*audioStreamEnd: true/);
+  assert.match(app, /async function stopLiveTranslationFromUi\(\)[^]*cancelCurrentTurn\(\)[^]*await stopLiveTranslationSession\(\)/);
+  assert.match(app, /setLiveTranslationBadge\("off"\)[^]*You can chat with Lumi again/);
+  assert.match(app, /Translation may still be active; retry Stop translation/);
+  assert.match(app, /Stop translation before running another browser or MCP action/);
+  assert.match(styles, /\.live-translation-panel\s*\{/);
+  assert.match(styles, /\.live-translation-panel\[hidden\]\s*\{\s*display:\s*none;/);
+  assert.match(styles, /body\.fast-mode \.live-translation-panel/);
+});
+
 test("live translation uses jitter-buffered low-latency streaming without changing playback speed", async () => {
   const controller = await readFile(new URL("../live/translate.js", import.meta.url), "utf8");
   const worklet = await readFile(new URL("../live/pcm-capture-worklet.js", import.meta.url), "utf8");
