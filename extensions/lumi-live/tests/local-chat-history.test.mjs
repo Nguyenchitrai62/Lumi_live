@@ -7,6 +7,7 @@ import {
   createLocalChatHistoryStore,
   createLocalChatSession,
   deriveLocalChatSessionTitle,
+  findReusableBlankChatSession,
   LOCAL_CHAT_HISTORY_VERSION,
   MAX_LOCAL_CHAT_HISTORY_CHARS,
   MAX_LOCAL_CHAT_HISTORY_TURNS,
@@ -112,6 +113,34 @@ test("keeps multiple sessions sorted and derives compact titles", () => {
   );
 });
 
+test("reuses an existing blank chat instead of creating duplicates", () => {
+  const blank = createLocalChatSession({
+    id: "blank",
+    createdAt: 10,
+    turns: [],
+  });
+  const activeBlank = createLocalChatSession({
+    id: "active-blank",
+    createdAt: 20,
+    turns: [],
+  });
+  const populated = createLocalChatSession({
+    id: "populated",
+    createdAt: 30,
+    turns: [{ role: "user", text: "Keep this chat" }],
+  });
+
+  assert.equal(
+    findReusableBlankChatSession([blank, populated], populated.id)?.id,
+    blank.id,
+  );
+  assert.equal(
+    findReusableBlankChatSession([blank, activeBlank], activeBlank.id)?.id,
+    activeBlank.id,
+  );
+  assert.equal(findReusableBlankChatSession([populated]), null);
+});
+
 test("saves, restores, and clears session history in write order", async () => {
   const storageArea = createMemoryStorage();
   const store = createLocalChatHistoryStore({
@@ -160,14 +189,27 @@ test("wires New chat, the saved-session dialog, switching, deletion, and clearin
   ]);
   assert.match(panelHtml, /id="newChatButton"/);
   assert.match(panelHtml, /id="chatHistoryDialog"/);
+  assert.match(panelHtml, /id="chatConfirmationDialog"/);
+  assert.match(panelHtml, /id="chatConfirmationConfirm"/);
   assert.match(panelHtml, /id="chatSessionList"/);
   assert.match(panelHtml, /id="clearHistoryButton"/);
   assert.match(panelController, /chatHistoryStore\.save\(chatHistoryState\)/);
   assert.match(panelController, /async function startNewChatSession\(\)/);
   assert.match(panelController, /async function activateChatSession\(sessionId\)/);
   assert.match(panelController, /async function deleteChatSession\(sessionId\)/);
+  assert.match(panelController, /findReusableBlankChatSession/);
+  assert.match(panelController, /Lumi will connect when you send a message/);
+  assert.doesNotMatch(panelController, /window\.confirm/);
+  assert.doesNotMatch(panelController, /reconnectAfterChatSessionChange/);
+  const newChatSource = panelController.slice(
+    panelController.indexOf("async function startNewChatSession"),
+    panelController.indexOf("async function activateChatSession"),
+  );
+  assert.match(newChatSource, /findReusableBlankChatSession/);
+  assert.doesNotMatch(newChatSource, /autoStartSessionIfReady|startSession\(\)/);
   assert.match(panelController, /await restoreLocalChatHistory\(\)/);
   assert.match(panelController, /await chatHistoryStore\.clear\(\)/);
   assert.match(panelStyles, /\.chat-history-dialog/);
+  assert.match(panelStyles, /\.chat-confirmation-dialog/);
   assert.match(panelStyles, /\.chat-session-row\.is-active/);
 });

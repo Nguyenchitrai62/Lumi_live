@@ -122,7 +122,14 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /response\.sessionResumptionUpdate/);
   assert.match(controller, /response\.goAway/);
   assert.match(controller, /scheduleAutomaticSessionReconnect/);
-  assert.match(controller, /armSessionRotation/);
+  assert.doesNotMatch(controller, /armSessionRotation|SESSION_CONNECTION_ROTATION_MS/);
+  assert.match(controller, /reconnectRequiredForUserWork/);
+  assert.match(controller, /Gemini Live disconnected while idle/);
+  assert.match(controller, /!userTurnAuthorized && hasTurnPayload/);
+  assert.match(
+    controller,
+    /!resumedExistingSession && conversationHistory\.length/,
+  );
   const reconnectSource = controller.slice(
     controller.indexOf("function scheduleAutomaticSessionReconnect"),
     controller.indexOf("function resetSessionRecoveryState"),
@@ -269,6 +276,9 @@ test("captures visual context only when the agent requests it and renders rich c
   assert.ok(speechStartCallback);
   assert.doesNotMatch(speechStartCallback, /captureAndSend/);
   assert.match(audioController, /onUserSpeechStart\?\.\(\)/);
+  assert.match(audioController, /MICROPHONE_SPEECH_CONFIRMATION_MS/);
+  assert.match(audioController, /retainPreRollFrame\(mono\)/);
+  assert.match(audioController, /if \(!inputState\.canSendAudio\)[^]*resetMicrophoneGate\(\)/);
   assert.match(controller, /showCapturedScreenshot:\s*createCapturedTabMessage/);
   assert.match(browserToolRunner, /showCapturedScreenshot\(result\)/);
   assert.match(controller, /renderMarkdown\(message\.content,\s*message\.text\)/);

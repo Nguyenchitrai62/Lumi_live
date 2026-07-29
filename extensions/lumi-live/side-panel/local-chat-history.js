@@ -64,6 +64,17 @@ export function deriveLocalChatSessionTitle(
   return `${title.slice(0, MAX_LOCAL_CHAT_SESSION_TITLE_CHARS - 1).trimEnd()}…`;
 }
 
+export function findReusableBlankChatSession(sessions = [], preferredId = "") {
+  const blanks = (Array.isArray(sessions) ? sessions : []).filter(
+    (session) => session
+      && typeof session === "object"
+      && normalizeLocalChatHistory(session.turns).length === 0,
+  );
+  return blanks.find((session) => session.id === preferredId)
+    || blanks[0]
+    || null;
+}
+
 export function createLocalChatSession({
   id,
   title = DEFAULT_LOCAL_CHAT_SESSION_TITLE,

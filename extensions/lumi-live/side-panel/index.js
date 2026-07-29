@@ -24,8 +24,6 @@ import {
   MAX_MCP_TOOL_RESPONSE_CHARS,
   MODEL,
   normalizeThinkingLevel,
-  SESSION_CONNECTION_ROTATION_MS,
-  SESSION_ROTATION_RETRY_MS,
   shouldRefreshLiveContext,
   trimConversationHistory,
   WS_ENDPOINT,
@@ -91,6 +89,7 @@ import {
   createLocalChatSession,
   createLocalChatHistoryStore,
   deriveLocalChatSessionTitle,
+  findReusableBlankChatSession,
   normalizeLocalChatHistory,
   normalizeLocalChatHistoryState,
 } from "./local-chat-history.js";
@@ -131,6 +130,11 @@ const elements = {
   chatHistoryButton: document.querySelector("#chatHistoryButton"),
   chatHistoryCloseButton: document.querySelector("#chatHistoryCloseButton"),
   chatHistoryDialog: document.querySelector("#chatHistoryDialog"),
+  chatConfirmationDialog: document.querySelector("#chatConfirmationDialog"),
+  chatConfirmationTitle: document.querySelector("#chatConfirmationTitle"),
+  chatConfirmationMessage: document.querySelector("#chatConfirmationMessage"),
+  chatConfirmationCancel: document.querySelector("#chatConfirmationCancel"),
+  chatConfirmationConfirm: document.querySelector("#chatConfirmationConfirm"),
   chatSessionEmpty: document.querySelector("#chatSessionEmpty"),
   chatSessionList: document.querySelector("#chatSessionList"),
   clearHistoryButton: document.querySelector("#clearHistoryButton"),
@@ -202,6 +206,7 @@ let isMuted = true;
 let agentTurnActive = false;
 let turnCancellationPending = false;
 let turnExecutionSequence = 0;
+let userTurnAuthorized = false;
 let turnCancellationDrainTimeoutId = null;
 let turnCancellationWatchdogTimeoutId = null;
 let turnCancellationBoundaryTimeoutId = null;
@@ -231,7 +236,6 @@ let sessionConnectionOptions = null;
 let sessionResumptionHandle = "";
 let automaticSessionReconnectAttempt = 0;
 let automaticSessionReconnectTimerId = null;
-let sessionRotationTimerId = null;
 let serverRotationPending = false;
 let contextRefreshPending = false;
 let backgroundSessionReconnectPending = false;
@@ -241,6 +245,7 @@ const conversationHistory = [];
 const localChatHistory = [];
 let chatHistoryState = normalizeLocalChatHistoryState(null);
 let chatSessionMutationPending = false;
+let pendingChatConfirmationResolve = null;
 let chatSnapshotPersistTimerId = null;
 let chatSnapshotPersistenceSuspended = false;
 const queuedUserMessages = [];
@@ -289,18 +294,19 @@ const panelAudio = createPanelAudioController({
     suppressServerOutputUntilNextUserTurn,
   }),
   onFreshUserInput: () => {
-    turnExecutionSequence += 1;
-    taskOrchestrator.cancelTask("The task was interrupted by a new voice request.");
-    activeTurnUserRequest = "";
     markFreshUserInputStarted();
-    finalizeTranscript("user");
-    finalizeTranscript("lumi");
-    finalizeTranscript("thinking");
   },
   onInputLevel: (level) => {
     syncMicrophoneLevel(level);
   },
   onUserSpeechStart: () => {
+    userTurnAuthorized = true;
+    turnExecutionSequence += 1;
+    taskOrchestrator.cancelTask("The task was interrupted by a new voice request.");
+    activeTurnUserRequest = "";
+    finalizeTranscript("user");
+    finalizeTranscript("lumi");
+    finalizeTranscript("thinking");
     void sendRuntime("prepare_browser_prompt").catch((error) => {
       elements.statusLine.textContent = error instanceof Error
         ? error.message
@@ -1245,10 +1251,31 @@ function closeChatHistory() {
   elements.chatHistoryButton.setAttribute("aria-expanded", "false");
 }
 
-async function reconnectAfterChatSessionChange(shouldReconnect) {
-  if (shouldReconnect && DEFAULT_AUTO_CONNECT_ENABLED) {
-    await autoStartSessionIfReady();
+function resolveChatConfirmation(confirmed) {
+  const resolve = pendingChatConfirmationResolve;
+  pendingChatConfirmationResolve = null;
+  if (elements.chatConfirmationDialog.open) {
+    elements.chatConfirmationDialog.close();
   }
+  resolve?.(confirmed === true);
+}
+
+function requestChatConfirmation({
+  title,
+  message,
+  confirmLabel = "Delete",
+} = {}) {
+  if (pendingChatConfirmationResolve) return Promise.resolve(false);
+  elements.chatConfirmationTitle.textContent = String(title || "Confirm deletion");
+  elements.chatConfirmationMessage.textContent = String(
+    message || "This action cannot be undone.",
+  );
+  elements.chatConfirmationConfirm.textContent = String(confirmLabel || "Delete");
+  elements.chatConfirmationDialog.showModal();
+  requestAnimationFrame(() => elements.chatConfirmationCancel.focus());
+  return new Promise((resolve) => {
+    pendingChatConfirmationResolve = resolve;
+  });
 }
 
 async function runChatSessionMutation(operation) {
@@ -1263,33 +1290,64 @@ async function runChatSessionMutation(operation) {
 
 async function startNewChatSession() {
   return runChatSessionMutation(async () => {
-    const shouldReconnect = sessionStatus === "ready" || sessionStatus === "connecting";
-    if (shouldReconnect) stopSession();
-    await flushActiveChatSnapshotPersist();
-    const currentSession = getActiveChatSession();
-    const nextSession = currentSession?.turns.length
-      ? createBlankChatSession()
-      : currentSession || createBlankChatSession();
-    if (nextSession.id === currentSession?.id) {
-      await chatSnapshotStore.delete(nextSession.id);
+    let currentSession = getActiveChatSession();
+    const currentSessionIsReusable = currentSession?.turns.length === 0
+      && !sessionHasInFlightWork()
+      && !partialMessages.user
+      && !partialMessages.lumi
+      && !partialMessages.thinking
+      && queuedUserMessages.length === 0;
+    if (currentSessionIsReusable) {
+      const previousSessions = chatHistoryState.sessions;
+      chatHistoryState = normalizeLocalChatHistoryState({
+        ...chatHistoryState,
+        sessions: previousSessions.filter(
+          (session) => session.id === currentSession.id || session.turns.length,
+        ),
+      });
+      removeSnapshotsForDroppedSessions(previousSessions, chatHistoryState.sessions);
+      await chatHistoryStore.save(chatHistoryState);
+      closeChatHistory();
+      elements.statusLine.textContent = "This New chat is already empty.";
+      elements.messageInput.focus();
+      return true;
     }
+    if (
+      sessionStatus === "ready"
+      || sessionStatus === "connecting"
+      || websocket
+      || pendingSessionHandoffSocket
+    ) {
+      stopSession();
+    }
+    await flushActiveChatSnapshotPersist();
+    currentSession = getActiveChatSession();
+    const reusableBlank = findReusableBlankChatSession(
+      chatHistoryState.sessions,
+      currentSession?.turns.length ? "" : currentSession?.id,
+    );
+    const nextSession = reusableBlank
+      ? { ...reusableBlank, updatedAt: Date.now() }
+      : createBlankChatSession();
+    await chatSnapshotStore.delete(nextSession.id);
     clearConversationContext();
     const previousSessions = chatHistoryState.sessions;
     chatHistoryState = normalizeLocalChatHistoryState({
       ...chatHistoryState,
       activeSessionId: nextSession.id,
-      sessions: chatHistoryState.sessions.some(
-        (session) => session.id === nextSession.id,
-      )
-        ? chatHistoryState.sessions
-        : [nextSession, ...chatHistoryState.sessions],
+      sessions: [
+        nextSession,
+        ...chatHistoryState.sessions.filter(
+          (session) => session.id !== nextSession.id && session.turns.length,
+        ),
+      ],
     });
     removeSnapshotsForDroppedSessions(previousSessions, chatHistoryState.sessions);
     await renderActiveChatSession();
     await chatHistoryStore.save(chatHistoryState);
     closeChatHistory();
-    elements.statusLine.textContent = "New chat started.";
-    await reconnectAfterChatSessionChange(shouldReconnect);
+    elements.statusLine.textContent =
+      "New chat is ready. Lumi will connect when you send a message.";
     elements.messageInput.focus();
     return true;
   });
@@ -1306,8 +1364,14 @@ async function activateChatSession(sessionId) {
       (session) => session.id === requestedSessionId,
     );
     if (!selectedSession) return false;
-    const shouldReconnect = sessionStatus === "ready" || sessionStatus === "connecting";
-    if (shouldReconnect) stopSession();
+    if (
+      sessionStatus === "ready"
+      || sessionStatus === "connecting"
+      || websocket
+      || pendingSessionHandoffSocket
+    ) {
+      stopSession();
+    }
     await flushActiveChatSnapshotPersist();
     clearConversationContext();
     chatHistoryState = normalizeLocalChatHistoryState({
@@ -1317,8 +1381,8 @@ async function activateChatSession(sessionId) {
     await renderActiveChatSession();
     await chatHistoryStore.save(chatHistoryState);
     closeChatHistory();
-    elements.statusLine.textContent = `Opened “${selectedSession.title}”.`;
-    await reconnectAfterChatSessionChange(shouldReconnect);
+    elements.statusLine.textContent =
+      `Opened “${selectedSession.title}”. Lumi will connect when you send a message.`;
     return true;
   });
 }
@@ -1328,13 +1392,25 @@ async function deleteChatSession(sessionId) {
     (session) => session.id === sessionId,
   );
   if (!selectedSession) return false;
-  const confirmed = window.confirm(`Delete “${selectedSession.title}” from this device?`);
+  const confirmed = await requestChatConfirmation({
+    title: "Delete chat?",
+    message: `Delete “${selectedSession.title}” from this device?`,
+    confirmLabel: "Delete chat",
+  });
   if (!confirmed) return false;
   return runChatSessionMutation(async () => {
     const deletingActiveSession = selectedSession.id === chatHistoryState.activeSessionId;
-    const shouldReconnect = deletingActiveSession
-      && (sessionStatus === "ready" || sessionStatus === "connecting");
-    if (shouldReconnect) stopSession();
+    if (
+      deletingActiveSession
+      && (
+        sessionStatus === "ready"
+        || sessionStatus === "connecting"
+        || websocket
+        || pendingSessionHandoffSocket
+      )
+    ) {
+      stopSession();
+    }
     if (deletingActiveSession) await flushActiveChatSnapshotPersist();
     const remainingSessions = chatHistoryState.sessions.filter(
       (session) => session.id !== selectedSession.id,
@@ -1355,20 +1431,29 @@ async function deleteChatSession(sessionId) {
     }
     await chatSnapshotStore.delete(selectedSession.id);
     await chatHistoryStore.save(chatHistoryState);
-    elements.statusLine.textContent = "Chat deleted from this device.";
-    await reconnectAfterChatSessionChange(shouldReconnect);
+    elements.statusLine.textContent = deletingActiveSession
+      ? "Chat deleted. Lumi will connect when you send a message."
+      : "Chat deleted from this device.";
     return true;
   });
 }
 
 async function clearLocalChatHistory() {
-  const confirmed = window.confirm(
-    "Clear every saved Lumi chat on this device and start a new conversation?",
-  );
+  const confirmed = await requestChatConfirmation({
+    title: "Clear all chats?",
+    message: "Clear every saved Lumi chat on this device and start a new conversation?",
+    confirmLabel: "Clear all",
+  });
   if (!confirmed) return false;
   return runChatSessionMutation(async () => {
-    const shouldReconnect = sessionStatus === "ready" || sessionStatus === "connecting";
-    if (shouldReconnect) stopSession();
+    if (
+      sessionStatus === "ready"
+      || sessionStatus === "connecting"
+      || websocket
+      || pendingSessionHandoffSocket
+    ) {
+      stopSession();
+    }
     clearConversationContext();
     const session = createBlankChatSession();
     chatHistoryState = normalizeLocalChatHistoryState({
@@ -1380,8 +1465,8 @@ async function clearLocalChatHistory() {
     await chatHistoryStore.clear();
     await chatHistoryStore.save(chatHistoryState);
     closeChatHistory();
-    elements.statusLine.textContent = "All local chat history cleared.";
-    await reconnectAfterChatSessionChange(shouldReconnect);
+    elements.statusLine.textContent =
+      "All chats cleared. Lumi will connect when you send a message.";
     return true;
   });
 }
@@ -1404,6 +1489,8 @@ function clearConversationContext() {
     conversationHistory.length = 0;
     localChatHistory.length = 0;
     queuedUserMessages.length = 0;
+    userTurnAuthorized = false;
+    activeTurnUserRequest = "";
     taskOrchestrator.clear();
     taskStepView.clear();
     clearTimeout(transcriptProgrammaticScrollTimerId);
@@ -1783,12 +1870,6 @@ function clearAutomaticSessionReconnectTimer() {
   automaticSessionReconnectTimerId = null;
 }
 
-function clearSessionRotationTimer() {
-  if (sessionRotationTimerId === null) return;
-  clearTimeout(sessionRotationTimerId);
-  sessionRotationTimerId = null;
-}
-
 function sessionHasInFlightWork() {
   return Boolean(
     agentTurnActive
@@ -1799,30 +1880,6 @@ function sessionHasInFlightWork() {
     || pendingLiveTranslationStart
     || textSendPending
   );
-}
-
-function armSessionRotation(delayMs = SESSION_CONNECTION_ROTATION_MS) {
-  clearSessionRotationTimer();
-  if (!shouldMaintainGeminiSession) return;
-  sessionRotationTimerId = setTimeout(() => {
-    sessionRotationTimerId = null;
-    if (
-      sessionStatus !== "ready"
-      || websocket?.readyState !== WebSocket.OPEN
-      || pendingSessionHandoffSocket
-      || sessionHasInFlightWork()
-      || (!sessionResumptionHandle && !contextRefreshPending)
-    ) {
-      armSessionRotation(SESSION_ROTATION_RETRY_MS);
-      return;
-    }
-    scheduleAutomaticSessionReconnect(
-      contextRefreshPending
-        ? "Refreshing Gemini Live with recent context only."
-        : "Refreshing Gemini Live before its connection limit.",
-      { discardOldContext: contextRefreshPending },
-    );
-  }, delayMs);
 }
 
 function scheduleAutomaticSessionReconnect(
@@ -1855,7 +1912,6 @@ function scheduleAutomaticSessionReconnect(
     && previousSocket?.readyState === WebSocket.OPEN
     && !canHandoffBeforeClosing
   ) {
-    armSessionRotation(SESSION_ROTATION_RETRY_MS);
     return false;
   }
 
@@ -1865,7 +1921,6 @@ function scheduleAutomaticSessionReconnect(
   const reconnectDelayMs = delayMs ?? automaticSessionReconnectDelayMs(
     automaticSessionReconnectAttempt,
   );
-  clearSessionRotationTimer();
   serverRotationPending = false;
 
   if (canHandoffBeforeClosing) {
@@ -1918,7 +1973,6 @@ function closePendingSessionHandoff(reason = "Ending Gemini Live handoff") {
 
 function resetSessionRecoveryState() {
   clearAutomaticSessionReconnectTimer();
-  clearSessionRotationTimer();
   closePendingSessionHandoff();
   shouldMaintainGeminiSession = false;
   sessionConnectionOptions = null;
@@ -2134,7 +2188,12 @@ function agentStepEnvelope(actionName, actionResult, orchestrationResult) {
 
 function requestStructuredTaskCompletion(sourceSocket) {
   const running = taskOrchestrator.activeTask;
-  if (!running || sourceSocket !== websocket) return false;
+  if (
+    !userTurnAuthorized
+    || !running
+    || running.turnSequence !== turnExecutionSequence
+    || sourceSocket !== websocket
+  ) return false;
   const recovery = taskOrchestrator.handleIncompleteTurn(running.taskId);
   if (!recovery.recover) return false;
   const checkpoint = recovery.checkpoint;
@@ -2198,7 +2257,6 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
     const completedInBackground = sourceSocket.lumiBackgroundReconnect === true;
     automaticSessionReconnectAttempt = 0;
     clearAutomaticSessionReconnectTimer();
-    armSessionRotation();
     sessionReadyAt = performance.now();
     hideConnectionNotice();
     clearSetupTimeout(sourceSocket);
@@ -2215,7 +2273,7 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
     }
     pendingThinkingReconnect = false;
     const resumedExistingSession = Boolean(sourceSocket.lumiResumptionHandle);
-    if (!resumedExistingSession) {
+    if (!resumedExistingSession && conversationHistory.length) {
       sendJson(buildInitialHistoryClientContent(conversationHistory), sourceSocket);
     }
     const readyMessage = microphoneWarning
@@ -2291,6 +2349,15 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
       markCancelledTurnBoundarySeen();
       if (suppressServerOutputUntilNextUserTurn) setAgentTurnActive(false);
     }
+    return;
+  }
+  if (!userTurnAuthorized && hasTurnPayload) {
+    for (const functionCall of functionCalls) {
+      rememberCancelledToolCall(functionCall.id);
+    }
+    panelAudio.stopPlayback();
+    if (serverContent?.turnComplete) setAgentTurnActive(false);
+    console.warn("Ignored a Gemini Live turn because no user input authorized it.");
     return;
   }
   if (
@@ -2565,6 +2632,8 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
       finalizeTranscript("lumi");
       finalizeTranscript("thinking");
       setAgentTurnActive(false);
+      userTurnAuthorized = false;
+      activeTurnUserRequest = "";
       if (wasUserCancellation) {
         elements.statusLine.textContent = "Current action cancelled. Lumi is ready for your next request.";
       }
@@ -2572,13 +2641,16 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
       responseAudioGate.reset();
     }
   }
-  if (contextRefreshPending && !sessionHasInFlightWork()) {
-    scheduleAutomaticSessionReconnect(
-      "Refreshing Gemini Live with recent context only.",
-      { discardOldContext: true },
-    );
-  } else if (serverRotationPending && !sessionHasInFlightWork()) {
-    scheduleAutomaticSessionReconnect("Gemini Live requested a connection rotation.");
+  if (
+    (contextRefreshPending || serverRotationPending)
+    && !sessionHasInFlightWork()
+  ) {
+    const idleMessage = contextRefreshPending
+      ? "Gemini context is full. Lumi will open a fresh connection with recent chat when you send the next message."
+      : "Gemini ended the idle connection. Lumi will reconnect when you send the next message.";
+    stopSession({ cancelActiveTask: false });
+    setSessionStatus("idle", idleMessage);
+    return;
   }
 }
 
@@ -2761,14 +2833,9 @@ function openGeminiSocket(
       if (sessionSocket.lumiDiscardOldContext) contextRefreshPending = true;
       websocket = handoffPredecessorSocket;
       backgroundSessionReconnectPending = false;
-      const retryDelay = automaticSessionReconnectAttempt
-        >= MAX_AUTOMATIC_SESSION_RECONNECT_ATTEMPTS
-        ? SESSION_ROTATION_RETRY_MS
-        : automaticSessionReconnectDelayMs(automaticSessionReconnectAttempt);
       if (automaticSessionReconnectAttempt >= MAX_AUTOMATIC_SESSION_RECONNECT_ATTEMPTS) {
         automaticSessionReconnectAttempt = 0;
       }
-      armSessionRotation(retryDelay);
       syncMessageComposer();
       syncQueuedMessagePanel();
       if (queuedUserMessages.length && !sessionHasInFlightWork()) {
@@ -2792,17 +2859,31 @@ function openGeminiSocket(
     ) {
       websocket = null;
     }
+    const reconnectRequiredForUserWork = Boolean(
+      queuedUserMessages.length
+      || userTurnAuthorized
+      || sessionHasInFlightWork()
+    );
     if (
       !expected
       && !isGeminiKeyIssue(reason)
+      && reconnectRequiredForUserWork
       && scheduleAutomaticSessionReconnect(
         reason || "Gemini Live closed the idle connection.",
         { allowInFlight: true },
       )
     ) return;
 
-    cleanupMedia();
+    cleanupMedia({ cancelActiveTask: reconnectRequiredForUserWork });
     if (!expected) {
+      if (!reconnectRequiredForUserWork && !isGeminiKeyIssue(reason)) {
+        hideConnectionNotice();
+        setSessionStatus(
+          "idle",
+          "Gemini Live disconnected while idle. Lumi will reconnect when you send the next message.",
+        );
+        return;
+      }
       const message = reason
         ? `Gemini Live closed (${event.code}): ${reason.slice(0, 140)}`
         : `Gemini Live closed with code ${event.code}. Reconnect to continue.`;
@@ -2961,7 +3042,7 @@ function syncMicrophoneLevel(level) {
   elements.muteButton.classList.toggle("is-hearing", visibleLevel >= .06);
 }
 
-function cleanupMedia() {
+function cleanupMedia({ cancelActiveTask = true } = {}) {
   resetSessionRecoveryState();
   sessionReadyAt = 0;
   clearSetupTimeout();
@@ -2976,7 +3057,11 @@ function cleanupMedia() {
   pendingToolCallIds.clear();
   pendingToolCallNames.clear();
   pendingToolActionNames.clear();
-  taskOrchestrator.cancelTask("The Gemini Live session ended before the task completed.");
+  if (cancelActiveTask) {
+    taskOrchestrator.cancelTask(
+      "The Gemini Live session ended before the task completed.",
+    );
+  }
   activeApiKey = "";
   pendingLiveTranslationStart = false;
   liveTranslationTargetLanguageCode = "";
@@ -2989,6 +3074,8 @@ function cleanupMedia() {
   microphonePermissionHelp = false;
   elements.microphoneHelpButton.hidden = true;
   agentTurnActive = false;
+  userTurnAuthorized = false;
+  activeTurnUserRequest = "";
   turnCancellationPending = false;
   suppressServerOutputUntilNextUserTurn = false;
   cancelledTurnBoundarySeen = false;
@@ -2999,12 +3086,12 @@ function cleanupMedia() {
   finalizeTranscript("thinking");
 }
 
-function stopSession() {
+function stopSession({ cancelActiveTask = true } = {}) {
   intentionalClose = true;
   const activeSocket = websocket;
   websocket = null;
   activeSocket?.close();
-  cleanupMedia();
+  cleanupMedia({ cancelActiveTask });
   setSessionStatus("idle", "Ready. PageAgent will follow whichever web tab you open.");
 }
 
@@ -3118,9 +3205,11 @@ async function sendText(
   const modelText = promptContext?.mode === "fast"
     ? `[Lumi runtime context — not part of the user's request] Fast mode is active. This turn is locked to workspace tabId ${Number.isInteger(targetTabId) ? targetTabId : "unknown"} inside Agent Space and must never read or operate on tabs outside that group. You may switch only among tabs returned from the workspace-only browser_list_tabs result, or open a necessary new tab with browser_open_tab so it joins the workspace. Use browser_set_selection or browser_batch_actions for large independent form edits.\n\n[User request]\n${userRequestText}`
     : userRequestText;
+  userTurnAuthorized = true;
   const videoSent = frame ? sendJson({ realtimeInput: { video: frame } }) : true;
   const textSent = videoSent && sendJson({ realtimeInput: { text: modelText } });
   if (!videoSent || !textSent) {
+    userTurnAuthorized = false;
     const failedSocket = websocket;
     if (failedSocket?.readyState < WebSocket.CLOSING) {
       try {
@@ -3247,6 +3336,7 @@ function cancelCurrentTurn() {
   clearTurnCancellationBoundaryTimeout();
   turnCancellationPending = true;
   suppressServerOutputUntilNextUserTurn = true;
+  userTurnAuthorized = false;
   cancelledTurnBoundarySeen = false;
   freshUserInputStarted = false;
   turnExecutionSequence += 1;
@@ -3345,6 +3435,16 @@ elements.chatHistoryDialog.addEventListener("close", () => {
 });
 elements.chatHistoryDialog.addEventListener("click", (event) => {
   if (event.target === elements.chatHistoryDialog) closeChatHistory();
+});
+elements.chatConfirmationCancel.addEventListener("click", () => {
+  resolveChatConfirmation(false);
+});
+elements.chatConfirmationConfirm.addEventListener("click", () => {
+  resolveChatConfirmation(true);
+});
+elements.chatConfirmationDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  resolveChatConfirmation(false);
 });
 elements.chatSessionList.addEventListener("click", (event) => {
   const deleteButton = event.target.closest?.("[data-delete-chat-session-id]");

@@ -15,6 +15,10 @@ const BLINK_CLOSED_JITTER_MS = 55;
 const BLINK_HALF_OUT_MS = 72;
 const BLINK_INTERVAL_MINIMUM_MS = 2600;
 const BLINK_INTERVAL_JITTER_MS = 4200;
+const MICROPHONE_SPEECH_RMS_THRESHOLD = 0.012;
+const MICROPHONE_SPEECH_CONFIRMATION_MS = 150;
+const MICROPHONE_SPEECH_RELEASE_MS = 800;
+const MICROPHONE_PRE_ROLL_CHUNKS = 3;
 
 export function createPanelAudioController({
   avatarController,
@@ -36,9 +40,34 @@ export function createPanelAudioController({
   let visualAnimationsEnabled = true;
   let userSpeechActive = false;
   let lastUserSpeechAt = 0;
+  let speechCandidateStartedAt = 0;
   let smoothedInputLevel = 0;
   let lastInputLevelUpdateAt = 0;
+  const pendingInputFrames = [];
   const playbackSources = new Set();
+
+  function resetMicrophoneGate() {
+    userSpeechActive = false;
+    lastUserSpeechAt = 0;
+    speechCandidateStartedAt = 0;
+    pendingInputFrames.length = 0;
+  }
+
+  function sendMicrophoneFrame(mono) {
+    const pcm = floatToPcm16(resampleTo16k(mono, audioContext.sampleRate));
+    return sendJson({
+      realtimeInput: {
+        audio: { data: bytesToBase64(pcm), mimeType: "audio/pcm;rate=16000" },
+      },
+    });
+  }
+
+  function retainPreRollFrame(mono) {
+    pendingInputFrames.push(mono);
+    while (pendingInputFrames.length > MICROPHONE_PRE_ROLL_CHUNKS) {
+      pendingInputFrames.shift();
+    }
+  }
 
   async function prepareOutput() {
     if (!audioContext) {
@@ -76,26 +105,41 @@ export function createPanelAudioController({
         lastInputLevelUpdateAt = now;
       }
       const inputState = getInputState();
-      if (!inputState.canSendAudio) return;
-      if (rms >= 0.012) {
-        lastUserSpeechAt = now;
-        if (!userSpeechActive) {
-          userSpeechActive = true;
-          onUserSpeechStart?.();
+      if (!inputState.canSendAudio) {
+        resetMicrophoneGate();
+        return;
+      }
+      const aboveSpeechThreshold = rms >= MICROPHONE_SPEECH_RMS_THRESHOLD;
+      if (!userSpeechActive) {
+        retainPreRollFrame(mono);
+        if (!aboveSpeechThreshold) {
+          speechCandidateStartedAt = 0;
+          return;
         }
-      } else if (userSpeechActive && now - lastUserSpeechAt >= 800) {
+        if (!speechCandidateStartedAt) speechCandidateStartedAt = now;
+        if (now - speechCandidateStartedAt < MICROPHONE_SPEECH_CONFIRMATION_MS) {
+          return;
+        }
+        userSpeechActive = true;
+        lastUserSpeechAt = now;
+        if (
+          inputState.suppressServerOutputUntilNextUserTurn
+          && !inputState.freshUserInputStarted
+        ) {
+          onFreshUserInput?.();
+        }
+        onUserSpeechStart?.();
+        for (const frame of pendingInputFrames) sendMicrophoneFrame(frame);
+        pendingInputFrames.length = 0;
+        return;
+      }
+      sendMicrophoneFrame(mono);
+      if (aboveSpeechThreshold) {
+        lastUserSpeechAt = now;
+      } else if (now - lastUserSpeechAt >= MICROPHONE_SPEECH_RELEASE_MS) {
         userSpeechActive = false;
+        speechCandidateStartedAt = 0;
       }
-      if (inputState.suppressServerOutputUntilNextUserTurn && !inputState.freshUserInputStarted) {
-        if (rms < 0.012) return;
-        onFreshUserInput();
-      }
-      const pcm = floatToPcm16(resampleTo16k(mono, audioContext.sampleRate));
-      sendJson({
-        realtimeInput: {
-          audio: { data: bytesToBase64(pcm), mimeType: "audio/pcm;rate=16000" },
-        },
-      });
     };
     micSource.connect(micProcessor);
   }
@@ -222,8 +266,7 @@ export function createPanelAudioController({
     micStream = null;
     micProcessor = null;
     micSource = null;
-    userSpeechActive = false;
-    lastUserSpeechAt = 0;
+    resetMicrophoneGate();
     smoothedInputLevel = 0;
     lastInputLevelUpdateAt = 0;
     onInputLevel?.(0);
