@@ -86,6 +86,7 @@ test("creates one named yellow workspace group and reuses it for more tabs", asy
   const firstState = await workspace.addTab(1);
   await workspace.addTab(2);
 
+  assert.equal(FAST_WORKSPACE_TITLE, "Agent Space");
   assert.equal(firstState.groupId, 20);
   assert.equal(fakes.storage.workspace, 20);
   assert.equal(fakes.groups.get(20).title, FAST_WORKSPACE_TITLE);

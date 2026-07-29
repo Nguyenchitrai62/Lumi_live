@@ -68,7 +68,7 @@ export function createFastModeController({
       });
       apply(preferences.fastMode === true, { animate: preferences.fastMode === true });
       setStatus(enabled
-        ? `${preferences.workspace?.title || "Fast workspace"} active · background tab control · bulk actions ready.`
+        ? `${preferences.workspace?.title || "Agent Space"} active · background tab control · bulk actions ready.`
         : "Normal mode active · standard tab following and visual feedback restored.");
       return preferences;
     } catch (error) {

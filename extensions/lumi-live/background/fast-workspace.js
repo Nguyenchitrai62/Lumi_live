@@ -1,4 +1,4 @@
-export const FAST_WORKSPACE_TITLE = "⚡ Lumi Fast";
+export const FAST_WORKSPACE_TITLE = "Agent Space";
 export const FAST_WORKSPACE_COLOR = "yellow";
 
 function validId(value) {

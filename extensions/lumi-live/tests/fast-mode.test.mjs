@@ -64,7 +64,7 @@ test("wires Fast mode through settings, the side panel, the workspace, and the p
   assert.match(worker, /message\.command === "prepare_browser_prompt"/);
   assert.match(worker, /restriction: "workspace_tabs_only"/);
   assert.match(worker, /\? \{ groupId: workspaceGroup\.id \}/);
-  assert.match(worker, /Fast mode can switch only to tabs already inside the Lumi Fast workspace/);
+  assert.match(worker, /Fast mode can switch only to tabs already inside Agent Space/);
   assert.match(panelController, /await sendRuntime\("prepare_browser_prompt"\)/);
   assert.match(panelController, /onUserSpeechStart:[^]*sendRuntime\("prepare_browser_prompt"\)/);
   assert.match(panelController, /This turn is locked to workspace tabId/);

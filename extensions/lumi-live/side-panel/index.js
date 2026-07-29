@@ -221,7 +221,6 @@ let liveTranslationTargetLanguageCode = "";
 let cancelPendingSharedTabAudioPrompt = null;
 let thinkingLevel = DEFAULT_THINKING_LEVEL;
 let pendingThinkingReconnect = false;
-let hasConnectedInPanelLifetime = false;
 let activeTabFrameCapture = null;
 let textSendPending = false;
 let imageAttachmentPending = false;
@@ -1411,7 +1410,6 @@ function clearConversationContext() {
     transcriptProgrammaticScrollTimerId = null;
     transcriptProgrammaticScroll = false;
     transcriptAutoFollow = true;
-    hasConnectedInPanelLifetime = false;
     pendingThinkingReconnect = false;
     for (const role of Object.keys(partialMessages)) {
       partialMessages[role]?.disclosure?.dispose();
@@ -2217,11 +2215,9 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
     }
     pendingThinkingReconnect = false;
     const resumedExistingSession = Boolean(sourceSocket.lumiResumptionHandle);
-    const reconnectingExistingConversation = hasConnectedInPanelLifetime;
     if (!resumedExistingSession) {
       sendJson(buildInitialHistoryClientContent(conversationHistory), sourceSocket);
     }
-    hasConnectedInPanelLifetime = true;
     const readyMessage = microphoneWarning
       || (isMuted
         ? "Chat is ready. Microphone is off; turn it on whenever you want to speak."
@@ -2244,9 +2240,6 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
     elements.microphoneHelpButton.hidden = !microphonePermissionHelp;
     if (queuedUserMessages.length) {
       flushQueuedUserMessage();
-    } else if (!reconnectingExistingConversation && !conversationHistory.length) {
-      setAgentTurnActive(true);
-      sendJson({ realtimeInput: { text: "Greet the user warmly in one short sentence and say you are ready." } }, sourceSocket);
     }
   }
 
@@ -3123,7 +3116,7 @@ async function sendText(
   const userRequestText = clean || "Please inspect the attached image and respond with the most helpful relevant analysis.";
   const targetTabId = Number(promptContext?.target?.tabId);
   const modelText = promptContext?.mode === "fast"
-    ? `[Lumi runtime context — not part of the user's request] Fast mode is active. This turn is locked to workspace tabId ${Number.isInteger(targetTabId) ? targetTabId : "unknown"} inside the Lumi Fast group and must never read or operate on tabs outside that group. You may switch only among tabs returned from the workspace-only browser_list_tabs result, or open a necessary new tab with browser_open_tab so it joins the workspace. Use browser_set_selection or browser_batch_actions for large independent form edits.\n\n[User request]\n${userRequestText}`
+    ? `[Lumi runtime context — not part of the user's request] Fast mode is active. This turn is locked to workspace tabId ${Number.isInteger(targetTabId) ? targetTabId : "unknown"} inside Agent Space and must never read or operate on tabs outside that group. You may switch only among tabs returned from the workspace-only browser_list_tabs result, or open a necessary new tab with browser_open_tab so it joins the workspace. Use browser_set_selection or browser_batch_actions for large independent form edits.\n\n[User request]\n${userRequestText}`
     : userRequestText;
   const videoSent = frame ? sendJson({ realtimeInput: { video: frame } }) : true;
   const textSent = videoSent && sendJson({ realtimeInput: { text: modelText } });

@@ -148,7 +148,7 @@ async function saveFastModePreference() {
   applyVisualPreferenceControls(preferences);
   elements.saveNote.dataset.state = "saved";
   elements.saveNote.textContent = preferences.fastMode
-    ? `${preferences.workspace?.title || "Fast workspace"} enabled. Background tab control and bulk browser actions are ready.`
+    ? `${preferences.workspace?.title || "Agent Space"} enabled. Background tab control and bulk browser actions are ready.`
     : "Fast mode disabled. Normal active-tab following and standard visual feedback are restored.";
 }
 

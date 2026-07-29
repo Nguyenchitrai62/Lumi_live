@@ -117,7 +117,7 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /attachAnimatedDisclosure/);
   assert.match(controller, /scrollTranscriptToLatest\(\)/);
   assert.match(controller, /revealTranscriptText\(message,\s*message\.text\)/);
-  assert.match(controller, /!reconnectingExistingConversation\s*&&\s*!conversationHistory\.length/);
+  assert.doesNotMatch(controller, /Greet the user warmly/);
   assert.match(controller, /buildSessionHandshakeConfig\(resumptionHandle\)/);
   assert.match(controller, /response\.sessionResumptionUpdate/);
   assert.match(controller, /response\.goAway/);

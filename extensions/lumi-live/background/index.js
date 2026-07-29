@@ -1436,7 +1436,7 @@ async function switchBrowserTab(args = {}, action) {
       throw new Error("Fast workspace can control only http, https, or permitted file tabs.");
     }
     if (!await fastWorkspace.containsTab(tabId)) {
-      throw new Error("Fast mode can switch only to tabs already inside the Lumi Fast workspace. Use browser_open_tab when a new workspace tab is required.");
+      throw new Error("Fast mode can switch only to tabs already inside Agent Space. Use browser_open_tab when a new workspace tab is required.");
     }
     trackBrowserActionTab(action, tabId);
     const controllerReady = await ensureController(tabId, 5);
