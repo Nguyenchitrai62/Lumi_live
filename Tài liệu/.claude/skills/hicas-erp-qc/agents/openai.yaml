@@ -1,0 +1,5 @@
+interface:
+  display_name: "HICAS ERP QC"
+  short_description: "Bản đồ thao tác và dữ liệu HICAS ERP"
+  default_prompt: "Use $hicas-erp-qc to navigate and verify HICAS ERP safely."
+

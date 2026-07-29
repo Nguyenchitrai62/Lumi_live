@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "redmine": {
+      "command": "node",
+      "args": ["mcp-servers/redmine/server.mjs"],
+      "env": {
+        "REDMINE_URL": "https://redmine.anybim.vn",
+        "REDMINE_API_KEY": "${REDMINE_API_KEY}"
+      }
+    }
+  }
+}
