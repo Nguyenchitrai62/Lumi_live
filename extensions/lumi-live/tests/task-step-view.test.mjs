@@ -21,14 +21,6 @@ test("step summaries use readable action labels instead of raw tool identifiers"
     "Observe page",
   );
   assert.equal(
-    formatStepActionLabel({ name: "browser_apply_stage", input: {} }),
-    "Apply verified form stage",
-  );
-  assert.equal(
-    formatStepActionLabel({ name: "browser_get_stage_ledger", input: {} }),
-    "Inspect stage ledger",
-  );
-  assert.equal(
     formatStepActionLabel({ name: "notion_search_pages", input: {} }),
     "Notion search pages",
   );

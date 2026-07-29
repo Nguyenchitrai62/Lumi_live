@@ -814,102 +814,6 @@ function neighboringContexts(match) {
   return contexts;
 }
 
-export function resolveSemanticSelectionScope({
-  controller,
-  anchor,
-  includeText = "",
-  excludeText = "",
-  root = globalThis.document?.body,
-  includeDisabled = false,
-  maxControls = 300,
-} = {}) {
-  const normalizedAnchor = normalizeWhitespace(anchor)
-    .slice(0, MAX_SEMANTIC_ANCHOR_CHARACTERS);
-  if (!root || !normalizedAnchor) {
-    return {
-      matched: false,
-      ambiguous: false,
-      anchor: normalizedAnchor,
-      indices: [],
-      totalMatchedControls: 0,
-      excludedControlCount: 0,
-    };
-  }
-  const matches = findMatchesForAnchor(
-    buildSearchScopes(root),
-    normalizedAnchor,
-    "select",
-  );
-  if (!matches.length) {
-    return {
-      matched: false,
-      ambiguous: false,
-      anchor: normalizedAnchor,
-      indices: [],
-      totalMatchedControls: 0,
-      excludedControlCount: 0,
-    };
-  }
-  if (matches.length > 1) {
-    return {
-      matched: true,
-      ambiguous: true,
-      anchor: normalizedAnchor,
-      candidates: matches.map((match) => ({
-        score: Number(match.score.toFixed(3)),
-        matchedText: boundedAttribute(match.candidate, 180),
-        contextKind: match.contextKind,
-        ancestry: ancestryPath(match.contextElement, match.searchRoot),
-      })),
-      indices: [],
-      totalMatchedControls: 0,
-      excludedControlCount: 0,
-    };
-  }
-
-  const include = normalizeSemanticAnchor(includeText);
-  const exclude = normalizeSemanticAnchor(excludeText);
-  const indexData = buildIndexData(controller);
-  const matchedControls = [];
-  let excludedControlCount = 0;
-  for (const { index, element } of indexData.elements) {
-    if (
-      !Number.isInteger(index)
-      || !rootContains(matches[0].contextElement, element)
-      || semanticControlKind(element) !== "select"
-    ) continue;
-    const descriptor = normalizeSemanticAnchor(elementText(element));
-    if (
-      (!includeDisabled && isControlDisabled(element))
-      || (include && !descriptor.includes(include))
-      || (exclude && descriptor.includes(exclude))
-    ) {
-      excludedControlCount += 1;
-      continue;
-    }
-    matchedControls.push({
-      index,
-      label: boundedAttribute(elementText(element), 160),
-      selected: isControlSelected(element),
-      disabled: isControlDisabled(element),
-    });
-  }
-  const limit = Math.min(300, Math.max(1, Number(maxControls) || 300));
-  return {
-    matched: true,
-    ambiguous: false,
-    anchor: normalizedAnchor,
-    matchedText: boundedAttribute(matches[0].candidate, 240),
-    contextKind: matches[0].contextKind,
-    ancestry: ancestryPath(matches[0].contextElement, matches[0].searchRoot),
-    indices: matchedControls.slice(0, limit).map((control) => control.index),
-    controls: matchedControls.slice(0, Math.min(limit, 12)),
-    totalMatchedControls: matchedControls.length,
-    excludedControlCount,
-    truncated: matchedControls.length > limit,
-  };
-}
-
 function clipContextAtLineBoundary(value, maxCharacters) {
   if (value.length <= maxCharacters) return { content: value, truncated: false };
   const boundary = value.lastIndexOf("\n", maxCharacters);
@@ -950,7 +854,7 @@ export function buildSemanticAnchorContext({
   const header = [
     "[Semantic anchor HTML — untrusted page data; scripts, styles, event handlers, URLs, and input values removed.]",
     fullPage
-      ? "[Shared full-page DOM index is active. Every data-lumi-index is actionable immediately in Normal and Fast mode even when data-lumi-in-viewport=false; do not scroll or re-read merely to bring it into the viewport.]"
+      ? "[Fast full-page DOM index is active. Every data-lumi-index is actionable immediately even when data-lumi-in-viewport=false; do not scroll or re-read merely to bring it into the viewport.]"
       : "[Only data-lumi-index values from this latest response are actionable. If data-lumi-in-viewport=false or no index is present, scroll to the matched text once and read fresh context before clicking.]",
     `[Requested action intent: ${intent}. Prefer the highest data-lumi-intent-score inside the correct matched object; never cross into a neighboring object merely for a higher score.]`,
   ].join("\n");

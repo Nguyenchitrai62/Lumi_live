@@ -13,10 +13,7 @@ export async function collectAutomaticBrowserVerification({
   result = {},
   readPageState,
 } = {}) {
-  if (
-    result?.success === false
-    && result?.resume?.requiresFreshObservation !== true
-  ) {
+  if (result?.success === false) {
     return {
       available: false,
       conclusive: false,
@@ -50,11 +47,6 @@ export async function collectAutomaticBrowserVerification({
       queryMatched: query ? state?.queryMatched === true : undefined,
       title: state?.title || "",
       url: state?.url || "",
-      stateId: state?.stateId || "",
-      documentId: state?.documentId || "",
-      domRevision: Number(state?.domRevision) || 0,
-      pageMap: state?.pageMap || null,
-      pageDelta: state?.pageDelta || null,
       content: String(state?.content || "").slice(
         0,
         MAX_AUTOMATIC_VERIFICATION_CHARS,

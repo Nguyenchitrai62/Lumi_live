@@ -86,38 +86,3 @@ test("keeps upload assignment inconclusive until the page proves completion", as
   assert.equal(verification.available, true);
   assert.equal(verification.conclusive, false);
 });
-
-test("preserves a partial stage checkpoint while collecting fresh resume state", async () => {
-  let observed = 0;
-  const verification = await collectAutomaticBrowserVerification({
-    tool: "browser_apply_stage",
-    result: {
-      success: false,
-      status: "partial",
-      error: "Control 18 was replaced.",
-      resume: {
-        nextActionNumber: 4,
-        completedActionCount: 3,
-        remainingActionCount: 7,
-        requiresFreshObservation: true,
-      },
-      requiresPageVerification: true,
-    },
-    readPageState: async () => {
-      observed += 1;
-      return {
-        stateId: "doc:2:9",
-        documentId: "doc",
-        domRevision: 9,
-        pageDelta: { kind: "delta", changedControls: [{ index: 18 }] },
-        content: "Fresh form state",
-      };
-    },
-  });
-
-  assert.equal(observed, 1);
-  assert.equal(verification.available, true);
-  assert.equal(verification.conclusive, false);
-  assert.equal(verification.stateId, "doc:2:9");
-  assert.deepEqual(verification.pageDelta.changedControls, [{ index: 18 }]);
-});

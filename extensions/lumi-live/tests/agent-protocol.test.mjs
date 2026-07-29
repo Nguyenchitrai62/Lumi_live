@@ -42,11 +42,18 @@ test("exposes one macro tool with reflection, one action, and done", () => {
   );
   assert.deepEqual(declaration.parameters.required, [
     "evaluationPreviousGoal",
+    "previousGoalStatus",
     "memory",
     "nextGoal",
+    "remainingGoals",
     "actionName",
     "actionArgumentsJson",
   ]);
+  assert.deepEqual(
+    declaration.parameters.properties.previousGoalStatus.enum,
+    ["not_applicable", "success", "failure", "uncertain"],
+  );
+  assert.equal(declaration.parameters.properties.remainingGoals.maxItems, 24);
   assert.match(declaration.description, /exactly one structured agent step/i);
 });
 
@@ -56,6 +63,8 @@ test("builds a compact action catalog and strict completion contract", () => {
   assert.match(catalog, /done \{success:boolean, result:string/);
   const instruction = buildAgentProtocolInstruction(actions);
   assert.match(instruction, /reflection-before-action/i);
+  assert.match(instruction, /ordered unfinished outcomes/i);
+  assert.match(instruction, /rebuild the approach from remainingGoals/i);
   assert.match(instruction, /Never substitute a plain-text final answer for done/i);
   assert.match(instruction, /Do not emit parallel step calls/i);
 });
@@ -66,8 +75,13 @@ test("parses one structured action and validates JSON arguments", () => {
     name: AGENT_STEP_TOOL_NAME,
     args: {
       evaluationPreviousGoal: "No previous action exists.",
+      previousGoalStatus: "not_applicable",
       memory: "Target row is 333.pdf.",
       nextGoal: "Select the matching checkbox.",
+      remainingGoals: [
+        "Select the matching checkbox",
+        "Start the requested analysis",
+      ],
       actionName: "browser_click",
       actionArgumentsJson: '{"index":17,"confirmed":false}',
     },
@@ -75,6 +89,11 @@ test("parses one structured action and validates JSON arguments", () => {
   assert.equal(step.callId, "call-1");
   assert.equal(step.action.name, "browser_click");
   assert.deepEqual(step.action.input, { index: 17, confirmed: false });
+  assert.equal(step.reflection.previousGoalStatus, "not_applicable");
+  assert.deepEqual(step.reflection.remainingGoals, [
+    "Select the matching checkbox",
+    "Start the requested analysis",
+  ]);
   assert.throws(
     () => parseAgentStepCall({
       name: AGENT_STEP_TOOL_NAME,
@@ -154,6 +173,7 @@ test("requires a typed done payload", () => {
       evaluationPreviousGoal: "The requested page change is visible.",
       memory: "All checklist items are complete.",
       nextGoal: "Finish.",
+      remainingGoals: [],
       actionName: "done",
       actionArgumentsJson: '{"success":true,"result":"Finished","evidence":"Visible success state","completedGoals":[{"goal":"Finish the requested change","evidence":"Visible success state"}]}',
     },
@@ -173,4 +193,37 @@ test("requires a typed done payload", () => {
     }, actions),
     /completedGoals/i,
   );
+});
+
+test("blocks successful completion while requested outcomes remain", () => {
+  assert.throws(
+    () => parseAgentStepCall({
+      name: AGENT_STEP_TOOL_NAME,
+      args: {
+        evaluationPreviousGoal: "The upload completed, but analysis has not started.",
+        previousGoalStatus: "success",
+        memory: "demo.pdf is uploaded.",
+        nextGoal: "Finish.",
+        remainingGoals: ["Start analysis for demo.pdf"],
+        actionName: "done",
+        actionArgumentsJson: '{"success":true,"result":"Finished","evidence":"Upload complete","completedGoals":[{"goal":"Upload demo.pdf","evidence":"Upload complete"}]}',
+      },
+    }, actions),
+    /requested outcome.*remain unfinished/i,
+  );
+
+  const partial = parseAgentStepCall({
+    name: AGENT_STEP_TOOL_NAME,
+    args: {
+      evaluationPreviousGoal: "The upload completed, but analysis is blocked.",
+      previousGoalStatus: "uncertain",
+      memory: "demo.pdf is uploaded.",
+      nextGoal: "Report the concrete blocker.",
+      remainingGoals: ["Start analysis for demo.pdf"],
+      actionName: "done",
+      actionArgumentsJson: '{"success":false,"result":"Analysis is blocked","evidence":"The Start button remains disabled"}',
+    },
+  }, actions);
+  assert.equal(partial.action.input.success, false);
+  assert.deepEqual(partial.reflection.remainingGoals, ["Start analysis for demo.pdf"]);
 });

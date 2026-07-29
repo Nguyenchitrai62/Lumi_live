@@ -1,6 +1,13 @@
 export const AGENT_STEP_TOOL_NAME = "lumi_agent_step";
 export const AGENT_DONE_ACTION_NAME = "done";
 export const MAX_AGENT_ACTION_CATALOG_CHARS = 28000;
+const MAX_REMAINING_GOALS = 24;
+const PREVIOUS_GOAL_STATUSES = [
+  "not_applicable",
+  "success",
+  "failure",
+  "uncertain",
+];
 
 const BROWSER_OBSERVATION_ACTIONS = new Set([
   "browser_get_active_context",
@@ -8,7 +15,6 @@ const BROWSER_OBSERVATION_ACTIONS = new Set([
   "browser_inspect_screenshot",
   "browser_get_page_state",
   "browser_find_semantic_context",
-  "browser_get_stage_ledger",
   "browser_wait_for_page_state",
   "browser_list_tabs",
 ]);
@@ -86,6 +92,11 @@ export function buildAgentStepDeclaration(actionDeclarations = []) {
           type: "STRING",
           description: "One concise sentence evaluating the previous action against its intended visible or tool result. On the first step say that no previous action exists.",
         },
+        previousGoalStatus: {
+          type: "STRING",
+          enum: PREVIOUS_GOAL_STATUSES,
+          description: "Evidence verdict for the previous goal: not_applicable only on the first step, otherwise success, failure, or uncertain.",
+        },
         memory: {
           type: "STRING",
           description: 'Only durable facts, exact identifiers, successful discoveries, and blockers needed by later steps. Keep this short. If none exist, use "No durable facts yet." instead of an empty value.',
@@ -93,6 +104,12 @@ export function buildAgentStepDeclaration(actionDeclarations = []) {
         nextGoal: {
           type: "STRING",
           description: "The single immediate goal for this action, or finishing the task when actionName is done.",
+        },
+        remainingGoals: {
+          type: "ARRAY",
+          maxItems: MAX_REMAINING_GOALS,
+          items: { type: "STRING" },
+          description: "Ordered unfinished outcomes from the original request after accounting for observed evidence. Keep each item concise. Use [] only when every requested outcome is verified.",
         },
         actionName: {
           type: "STRING",
@@ -106,8 +123,10 @@ export function buildAgentStepDeclaration(actionDeclarations = []) {
       },
       required: [
         "evaluationPreviousGoal",
+        "previousGoalStatus",
         "memory",
         "nextGoal",
+        "remainingGoals",
         "actionName",
         "actionArgumentsJson",
       ],
@@ -122,13 +141,15 @@ For ordinary conversation that needs no tool, answer normally. Once a request ne
 
 Each ${AGENT_STEP_TOOL_NAME} call is exactly one reflection-before-action step and must contain:
 1. evaluationPreviousGoal: evidence-based evaluation of the previous action;
-2. memory: short durable facts and exact identifiers only;
-3. nextGoal: one immediate goal;
-4. exactly one actionName and one JSON object in actionArgumentsJson.
+2. previousGoalStatus: not_applicable on the first step, then success, failure, or uncertain;
+3. memory: short durable facts and exact identifiers only;
+4. nextGoal: one immediate goal;
+5. remainingGoals: the ordered unfinished outcomes from the original request;
+6. exactly one actionName and one JSON object in actionArgumentsJson.
 
-Do not emit parallel step calls. After every action result, evaluate it before choosing the next action. Browser actions normally include controllerVerification from an automatic fresh post-action page read. When it is available and conclusive, use that evidence immediately and do not spend another step on a redundant observation. When it is unavailable or conclusive=false, the next step must be browser_get_page_state, browser_find_semantic_context, or browser_wait_for_page_state before another browser action or successful done. Change tactics when the controller reports a retry or repeated-state fingerprint. Respect remainingSteps warnings. Do not narrate intermediate progress unless the user needs to make a decision.
+Build remainingGoals from every explicit outcome in the complete original request. Preserve their order and never silently drop an item because an intermediate action succeeded. Remove an item only after a tool result or fresh browser observation proves that outcome. Do not emit parallel step calls. After every action result, evaluate it before choosing the next action. Browser actions normally include controllerVerification from an automatic fresh post-action page read. When it is available and conclusive, use that evidence immediately and do not spend another step on a redundant observation. When it is unavailable or conclusive=false, the next step must be browser_get_page_state, browser_find_semantic_context, or browser_wait_for_page_state before another browser action or successful done. Change tactics when the controller reports a retry or repeated-state fingerprint. When the checkpoint reports repeated failures or a stall, rebuild the approach from remainingGoals instead of retrying the same interaction path. Respect remainingSteps warnings. Do not narrate intermediate progress unless the user needs to make a decision.
 
-Completion is a strict contract: every tool task must end with another ${AGENT_STEP_TOOL_NAME} call whose actionName is done. For success use JSON {"success":true,"result":"concise final result","evidence":"observed proof","completedGoals":[{"goal":"one requested outcome","evidence":"fresh observation proving it"}]}. For a concrete blocker or partial result use success=false. Never substitute a plain-text final answer for done. Never call done immediately after an unverified browser action. After done is recorded, give the user one concise final response and take no more actions.
+Completion is a strict contract: every tool task must end with another ${AGENT_STEP_TOOL_NAME} call whose actionName is done. A successful done requires remainingGoals=[] and JSON {"success":true,"result":"concise final result","evidence":"observed proof","completedGoals":[{"goal":"one requested outcome","evidence":"fresh observation proving it"}]}. For a concrete blocker or partial result use success=false and retain the unfinished outcomes in remainingGoals. Never substitute a plain-text final answer for done. Never call done immediately after an unverified browser action. After done is recorded, give the user one concise final response and take no more actions.
 
 AVAILABLE ACTIONS
 ${buildAgentActionCatalog(actionDeclarations)}`;
@@ -143,6 +164,19 @@ function requireShortText(value, field) {
 function optionalShortText(value, fallback, maxLength = 1600) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength)
     || fallback;
+}
+
+function normalizePreviousGoalStatus(value) {
+  const status = String(value || "").trim().toLowerCase();
+  return PREVIOUS_GOAL_STATUSES.includes(status) ? status : "not_applicable";
+}
+
+function normalizeRemainingGoals(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((goal) => String(goal || "").replace(/\s+/g, " ").trim().slice(0, 500))
+    .filter(Boolean)
+    .slice(0, MAX_REMAINING_GOALS);
 }
 
 function schemaNumber(value, path, integer = false) {
@@ -326,16 +360,35 @@ export function parseAgentStepCall(functionCall, availableActions = []) {
       );
     }
   }
+  const reflection = {
+    evaluationPreviousGoal: requireShortText(
+      input.evaluationPreviousGoal,
+      "evaluationPreviousGoal",
+    ),
+    previousGoalStatus: normalizePreviousGoalStatus(input.previousGoalStatus),
+    memory: optionalShortText(input.memory, "No durable facts yet."),
+    nextGoal: requireShortText(input.nextGoal, "nextGoal"),
+    remainingGoals: normalizeRemainingGoals(input.remainingGoals),
+  };
+  if (
+    actionName === AGENT_DONE_ACTION_NAME
+    && actionArguments.success === true
+    && !Array.isArray(input.remainingGoals)
+  ) {
+    throw new Error("done success=true requires an explicit remainingGoals=[] ledger.");
+  }
+  if (
+    actionName === AGENT_DONE_ACTION_NAME
+    && actionArguments.success === true
+    && reflection.remainingGoals.length
+  ) {
+    throw new Error(
+      `done success=true is blocked while ${reflection.remainingGoals.length} requested outcome(s) remain unfinished.`,
+    );
+  }
   return {
     callId: String(functionCall.id || "").trim(),
-    reflection: {
-      evaluationPreviousGoal: requireShortText(
-        input.evaluationPreviousGoal,
-        "evaluationPreviousGoal",
-      ),
-      memory: optionalShortText(input.memory, "No durable facts yet."),
-      nextGoal: requireShortText(input.nextGoal, "nextGoal"),
-    },
+    reflection,
     action: {
       name: actionName,
       input: actionArguments,

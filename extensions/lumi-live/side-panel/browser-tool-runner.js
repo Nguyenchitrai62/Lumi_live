@@ -29,14 +29,10 @@ export function createBrowserToolRunner({
           ...result,
           controllerVerification: await collectVerification({ tool, args, result }),
         };
-        if (result?.success === false) {
-          avatarController.transitionState("error", { forMs: errorStateDurationMs });
-        } else {
-          avatarController.transitionState("success", {
-            forMs: successStateDurationMs,
-            resumeState: "thinking",
-          });
-        }
+        avatarController.transitionState("success", {
+          forMs: successStateDurationMs,
+          resumeState: "thinking",
+        });
       } else {
         avatarController.transitionState("thinking");
       }

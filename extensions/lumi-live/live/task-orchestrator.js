@@ -53,19 +53,6 @@ export function fingerprintValue(value) {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
-function stablePageDelta(delta) {
-  if (!delta || typeof delta !== "object") return null;
-  return {
-    kind: delta.kind,
-    urlChanged: delta.urlChanged,
-    titleChanged: delta.titleChanged,
-    contentChanged: delta.contentChanged,
-    controlCountDelta: delta.controlCountDelta,
-    changedControls: delta.changedControls,
-    truncated: delta.truncated,
-  };
-}
-
 export function fingerprintObservation(value) {
   const verification = value?.controllerVerification;
   if (verification?.available) {
@@ -73,9 +60,6 @@ export function fingerprintObservation(value) {
       source: verification.source,
       url: verification.url,
       title: verification.title,
-      documentId: verification.documentId,
-      domRevision: verification.domRevision,
-      pageDelta: stablePageDelta(verification.pageDelta),
       query: verification.query,
       queryMatched: verification.queryMatched,
       content: verification.content,
@@ -91,9 +75,6 @@ export function fingerprintObservation(value) {
     return fingerprintValue({
       url: value.url,
       title: value.title,
-      documentId: value.documentId,
-      domRevision: value.domRevision,
-      pageDelta: stablePageDelta(value.pageDelta),
       content: value.content,
       query: value.query,
       queryMatched: value.queryMatched,
@@ -211,6 +192,25 @@ export function createTaskOrchestrator({
       (event) => event.type === "step" && event.action.status === "completed",
     );
 
+  const consecutiveFailureCount = (taskId) => {
+    let count = 0;
+    const steps = taskEvents(history, taskId)
+      .filter((event) => event.type === "step")
+      .reverse();
+    for (const step of steps) {
+      if (
+        step.action.kind === "browser_observation"
+        && step.action.status === "completed"
+      ) continue;
+      if (step.action.status === "failed") {
+        count += 1;
+        continue;
+      }
+      break;
+    }
+    return count;
+  };
+
   const latestUnverifiedBrowserAction = (taskId) =>
     [...taskEvents(history, taskId)].reverse().find(
       (event) => event.type === "step"
@@ -245,7 +245,10 @@ export function createTaskOrchestrator({
       0,
       (started?.maxSteps || defaultMaxSteps) - usedSteps,
     );
-    const warning = remainingSteps === 5
+    const consecutiveFailures = consecutiveFailureCount(taskId);
+    const warning = consecutiveFailures >= 3 && !done
+      ? `${consecutiveFailures} consecutive actions failed. Re-plan from the ordered remaining goals and choose a different supported interaction path.`
+      : remainingSteps === 5
       ? "Only 5 action steps remain; converge on the requested outcome."
       : remainingSteps <= 2 && !done
         ? `Critical: only ${remainingSteps} action step${remainingSteps === 1 ? "" : "s"} remain. Finish or call done with a partial result.`
@@ -256,6 +259,7 @@ export function createTaskOrchestrator({
       usedSteps,
       maxSteps: started?.maxSteps || defaultMaxSteps,
       remainingSteps,
+      consecutiveFailures,
       warning,
     };
   };
@@ -513,9 +517,18 @@ export function createTaskOrchestrator({
   const finishStep = (stepId, { result, error = "", durationMs = 0 } = {}) => {
     const step = history.find((event) => event.id === stepId && event.type === "step");
     if (!step) throw new Error(`Unknown Lumi step: ${stepId}`);
-    const failed = Boolean(error || result?.error);
+    const failed = Boolean(error || result?.error || result?.success === false);
+    const failureDetail = failed
+      ? cleanText(
+          error
+          || result?.error
+          || result?.message
+          || "The action returned success=false.",
+          2400,
+        )
+      : "";
     const observationValue = failed
-      ? { error: cleanText(error || result?.error, 2400), result }
+      ? { error: failureDetail, result }
       : result;
     const controllerVerification = result?.controllerVerification;
     const verification = step.action.kind === "browser_action"
@@ -544,7 +557,7 @@ export function createTaskOrchestrator({
         ...step.action,
         status: failed ? "failed" : "completed",
         output: failed ? null : result,
-        error: failed ? cleanText(error || result?.error, 2400) : "",
+        error: failureDetail,
         durationMs: Math.max(0, Math.round(Number(durationMs) || 0)),
       },
       observation: {

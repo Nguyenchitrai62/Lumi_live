@@ -32,36 +32,21 @@ import {
 } from "./file-upload-target.js";
 import { selectPageStateContent } from "./page-state-content.js";
 import {
-  buildObservationSnapshot,
-  diffObservationSnapshots,
-} from "./page-context.js";
-import { createPageStateTracker } from "./page-state-identity.js";
-import {
   buildSemanticAnchorContext,
   MAX_SEMANTIC_ANCHORS,
-  resolveSemanticSelectionScope,
 } from "./semantic-anchor-context.js";
 
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
 const GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
 const HIGHLIGHT_STYLE_ID = "lumi-page-agent-highlight-preference";
 const CLICK_EFFECT_STYLE_ID = "lumi-page-agent-click-effect-preference";
-const SHARED_PAGE_STATE_MAX_CHARACTERS = 48000;
-const MAX_STAGE_ACTIONS = 300;
-const MAX_LEGACY_BATCH_ACTIONS = 200;
-const MAX_SELECTION_INDICES = 300;
-const FAST_STAGE_CHUNK_SIZE = 40;
-const NORMAL_STAGE_CHUNK_SIZE = 20;
-const MAX_STAGE_LEDGERS = 10;
-const STAGE_PROGRESS_STYLE_ID = "lumi-stage-progress-style";
+const FAST_PAGE_STATE_MAX_CHARACTERS = 48000;
+const MAX_FAST_BATCH_ACTIONS = 200;
+const MAX_FAST_SELECTION_INDICES = 300;
 if (!globalThis[GLOBAL_KEY]) {
   const runtime = {
     controller: null,
     stateIndexed: false,
-    stateTracker: createPageStateTracker(),
-    lastObservationSnapshot: null,
-    stageLedgers: new Map(),
-    stageLedgerSequence: 0,
     visualPreferences: { ...DEFAULT_VISUAL_PREFERENCES },
     activeVisualActionController: null,
     fileUploadTarget: null,
@@ -73,9 +58,9 @@ if (!globalThis[GLOBAL_KEY]) {
   function getController() {
     if (!runtime.controller) {
       runtime.controller = new PageController({
-        enableMask: true,
-        viewportExpansion: -1,
-        keepSemanticTags: true,
+        enableMask: !runtime.visualPreferences.fastMode,
+        viewportExpansion: runtime.visualPreferences.fastMode ? -1 : 0,
+        keepSemanticTags: runtime.visualPreferences.fastMode,
         highlightOpacity: 0.08,
         highlightLabelOpacity: 0.82,
         includeAttributes: [
@@ -132,7 +117,6 @@ if (!globalThis[GLOBAL_KEY]) {
     if (!runtime.stateIndexed) {
       throw new Error("Read browser_get_page_state before using an element index.");
     }
-    if (args?.stateId) runtime.stateTracker.assertFresh(args.stateId);
     return index;
   }
 
@@ -165,7 +149,7 @@ if (!globalThis[GLOBAL_KEY]) {
     element.click();
     return {
       success: true,
-      message: "Clicked instantly without viewport scrolling.",
+      message: "Clicked instantly in Fast mode without viewport scrolling.",
       viewportChanged: false,
     };
   }
@@ -180,7 +164,7 @@ if (!globalThis[GLOBAL_KEY]) {
     const eventWindow = element.ownerDocument.defaultView || window;
     element.dispatchEvent(new eventWindow.Event("input", { bubbles: true }));
     element.dispatchEvent(new eventWindow.Event("change", { bubbles: true }));
-    return { success: true, message: `Selected "${optionText}" instantly.` };
+    return { success: true, message: `Selected "${optionText}" instantly in Fast mode.` };
   }
 
   function selectedControlState(element) {
@@ -194,97 +178,7 @@ if (!globalThis[GLOBAL_KEY]) {
     return null;
   }
 
-  function ensureStageProgressStyle() {
-    if (document.getElementById(STAGE_PROGRESS_STYLE_ID)) return;
-    const style = document.createElement("style");
-    style.id = STAGE_PROGRESS_STYLE_ID;
-    style.textContent = `
-      #lumi-stage-progress {
-        position: fixed;
-        inset: 18px 18px auto auto;
-        z-index: 2147483647;
-        width: min(320px, calc(100vw - 36px));
-        padding: 12px 14px;
-        border: 1px solid rgba(124, 92, 214, .28);
-        border-radius: 16px;
-        color: #2f2450;
-        background: rgba(255, 255, 255, .94);
-        box-shadow: 0 16px 42px rgba(52, 37, 92, .2);
-        font: 600 13px/1.4 system-ui, sans-serif;
-        backdrop-filter: blur(14px);
-        pointer-events: none;
-      }
-      #lumi-stage-progress [data-lumi-stage-label] {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        margin-bottom: 8px;
-      }
-      #lumi-stage-progress [data-lumi-stage-track] {
-        height: 6px;
-        overflow: hidden;
-        border-radius: 99px;
-        background: rgba(124, 92, 214, .12);
-      }
-      #lumi-stage-progress [data-lumi-stage-bar] {
-        height: 100%;
-        width: 0;
-        border-radius: inherit;
-        background: linear-gradient(90deg, #8a6be6, #d99bd7);
-        transition: width 160ms ease;
-      }
-      [data-lumi-stage-active="true"] {
-        outline: 3px solid rgba(138, 107, 230, .54) !important;
-        outline-offset: 4px !important;
-      }
-    `;
-    (document.head || document.documentElement).appendChild(style);
-  }
-
-  function createStageProgress(totalActions, fastMode) {
-    if (fastMode) {
-      return Object.freeze({ update() {}, dispose() {} });
-    }
-    ensureStageProgressStyle();
-    document.getElementById("lumi-stage-progress")?.remove();
-    const progress = document.createElement("div");
-    progress.id = "lumi-stage-progress";
-    progress.setAttribute("role", "status");
-    progress.innerHTML = `
-      <div data-lumi-stage-label>
-        <span>Applying verified form changes</span>
-        <span data-lumi-stage-count>0/${totalActions}</span>
-      </div>
-      <div data-lumi-stage-track><div data-lumi-stage-bar></div></div>
-    `;
-    (document.body || document.documentElement).appendChild(progress);
-    let activeElement = null;
-    return Object.freeze({
-      update(completed, element) {
-        activeElement?.removeAttribute?.("data-lumi-stage-active");
-        activeElement = element?.isConnected ? element : null;
-        activeElement?.setAttribute?.("data-lumi-stage-active", "true");
-        const count = progress.querySelector("[data-lumi-stage-count]");
-        const bar = progress.querySelector("[data-lumi-stage-bar]");
-        if (count) count.textContent = `${completed}/${totalActions}`;
-        if (bar) bar.style.width = `${Math.min(100, completed / Math.max(1, totalActions) * 100)}%`;
-      },
-      dispose() {
-        activeElement?.removeAttribute?.("data-lumi-stage-active");
-        progress.remove();
-      },
-    });
-  }
-
-  function shouldAnimateStageAction(actionIndex, totalActions, fastMode) {
-    if (fastMode) return false;
-    if (totalActions <= 12) return true;
-    return actionIndex < 3
-      || actionIndex === totalActions - 1
-      || (actionIndex + 1) % 25 === 0;
-  }
-
-  function prepareStageActions(rawActions, confirmed, { selectionOnly = false } = {}) {
+  function prepareFastBatchActions(rawActions, confirmed, { selectionOnly = false } = {}) {
     const seenIndices = new Set();
     const enabledNativeRadioGroups = new Map();
     return rawActions.map((action, actionIndex) => {
@@ -365,7 +259,7 @@ if (!globalThis[GLOBAL_KEY]) {
     return selectedText === action.optionText;
   }
 
-  async function verifyStageAction(action, signal) {
+  async function verifyFastBatchAction(action, signal) {
     const eventWindow = action.element.ownerDocument.defaultView || window;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (signal?.aborted) throw new DOMException("The page action was cancelled by the user.", "AbortError");
@@ -377,126 +271,44 @@ if (!globalThis[GLOBAL_KEY]) {
       if (attempt === 0) await Promise.resolve();
       else await new Promise((resolve) => eventWindow.requestAnimationFrame(resolve));
     }
-    throw new Error("The control did not reach its requested value after the stage action.");
+    throw new Error("The control did not reach its requested value after the Fast mode action.");
   }
 
-  async function executePreparedStageAction(
-    action,
-    activeController,
-    signal,
-    { animate = false, typingDurationMs = 0 } = {},
-  ) {
-    if (action.type === "click") {
-      if (selectedControlState(action.element) === action.desiredState) {
-        return "skipped";
-      }
-      if (animate) await activeController.clickElement(action.index);
-      else instantClickElement(action.element);
-    } else if (action.type === "input") {
-      if (animate) {
-        const clickResult = await activeController.clickElement(action.index);
-        if (clickResult?.success === false) throw new Error(clickResult.message);
-      }
-      await typeTextGradually(
-        action.element,
-        action.text,
-        animate ? typingDurationMs : 0,
-        signal,
-      );
-    } else if (animate) {
-      await activeController.selectOption(action.index, action.optionText);
-    } else {
-      instantSelectOption(action.element, action.optionText);
-    }
-    await verifyStageAction(action, signal);
-    return "executed";
-  }
-
-  function storeStageLedger(ledger) {
-    const ledgerId = `stage-${Date.now().toString(36)}-${++runtime.stageLedgerSequence}`;
-    runtime.stageLedgers.set(ledgerId, Object.freeze(ledger));
-    while (runtime.stageLedgers.size > MAX_STAGE_LEDGERS) {
-      runtime.stageLedgers.delete(runtime.stageLedgers.keys().next().value);
-    }
-    return ledgerId;
-  }
-
-  function compactStageSamples(results) {
-    if (results.length <= 8) return results;
-    return [
-      ...results.slice(0, 4),
-      { status: "omitted", count: results.length - 7 },
-      ...results.slice(-3),
-    ];
-  }
-
-  async function executeStage(preparedActions, args, signal, activeController, scopePreviews = []) {
-    const startedAt = performance.now();
-    const startState = runtime.stateTracker.assertFresh(args.stateId, {
-      required: args.requireStateId === true,
-    });
-    if (!startState) {
-      throw new Error("Observe fresh page state before applying a stage.");
-    }
+  async function executeFastBatch(preparedActions, args, signal) {
     const results = [];
     let failedAt = null;
     let finalVerificationFailure = false;
-    let failure = null;
-    let status = "complete";
-    const fastExecution = runtime.visualPreferences.fastMode;
-    const typingDurationMs = runtime.visualPreferences.typingDurationMs;
-    const executionMode = fastExecution ? "fast" : "normal";
-    const chunkSize = fastExecution
-      ? FAST_STAGE_CHUNK_SIZE
-      : NORMAL_STAGE_CHUNK_SIZE;
-    const progress = createStageProgress(preparedActions.length, fastExecution);
     for (const [actionIndex, action] of preparedActions.entries()) {
       try {
-        if (signal?.aborted) {
-          throw new DOMException("The stage was cancelled by the user.", "AbortError");
+        if (!action.element.isConnected) {
+          throw new Error("The page replaced this control while the batch was running.");
         }
-        runtime.stateTracker.assertDocumentStable(
-          startState,
-          preparedActions.slice(actionIndex).map((candidate) => candidate.element),
-        );
-        const actionStatus = await executePreparedStageAction(
-          action,
-          activeController,
-          signal,
-          {
-            animate: shouldAnimateStageAction(
-              actionIndex,
-              preparedActions.length,
-              fastExecution,
-            ),
-            typingDurationMs,
-          },
-        );
+        if (action.type === "click") {
+          if (selectedControlState(action.element) === action.desiredState) {
+            results.push({
+              action: actionIndex + 1,
+              index: action.index,
+              status: "skipped",
+              reason: "already_in_desired_state",
+              stateVerified: true,
+            });
+            continue;
+          }
+          instantClickElement(action.element);
+        } else if (action.type === "input") {
+          await typeTextGradually(action.element, action.text, 0, signal);
+        } else {
+          instantSelectOption(action.element, action.optionText);
+        }
+        await verifyFastBatchAction(action, signal);
         results.push({
           action: actionIndex + 1,
           index: action.index,
-          status: actionStatus,
-          ...(actionStatus === "skipped"
-            ? { reason: "already_in_desired_state" }
-            : {}),
+          status: "executed",
           stateVerified: true,
         });
-        progress.update(actionIndex + 1, action.element);
-        runtime.stateTracker.assertDocumentStable(
-          startState,
-          preparedActions.slice(actionIndex + 1).map((candidate) => candidate.element),
-        );
-        if ((actionIndex + 1) % chunkSize === 0 && actionIndex < preparedActions.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
       } catch (error) {
         failedAt = actionIndex + 1;
-        failure = error;
-        status = error?.name === "AbortError"
-          ? "cancelled"
-          : /page changed|replaced a remaining control|stale page state/i.test(String(error?.message || ""))
-            ? "stale"
-            : results.length ? "partial" : "failed";
         results.push({
           action: actionIndex + 1,
           index: action.index,
@@ -507,130 +319,38 @@ if (!globalThis[GLOBAL_KEY]) {
         break;
       }
     }
-    try {
-      if (failedAt === null) {
-        runtime.stateTracker.assertDocumentStable(startState);
-        const invalidFinalIndex = preparedActions.findIndex(
-          (action) => !batchActionMatchesExpectedState(action),
-        );
-        if (invalidFinalIndex >= 0) {
-          failedAt = invalidFinalIndex + 1;
-          finalVerificationFailure = true;
-          status = "partial";
-          failure = new Error(
-            "A later stage action changed this control after its initial verification.",
-          );
-          const result = results[invalidFinalIndex];
-          result.status = "failed";
-          result.stateVerified = false;
-          result.error = failure.message;
-        }
+    if (failedAt === null) {
+      const invalidFinalIndex = preparedActions.findIndex(
+        (action) => !batchActionMatchesExpectedState(action),
+      );
+      if (invalidFinalIndex >= 0) {
+        failedAt = invalidFinalIndex + 1;
+        finalVerificationFailure = true;
+        const result = results[invalidFinalIndex];
+        result.status = "failed";
+        result.stateVerified = false;
+        result.error = "A later batch action changed this control after its initial verification.";
       }
-    } catch (error) {
-      failedAt = failedAt ?? Math.max(1, results.length);
-      failure = error;
-      status = "stale";
-    } finally {
-      progress.dispose();
     }
     const executedActionCount = results.filter((result) => result.status === "executed").length;
     const skippedActionCount = results.filter((result) => result.status === "skipped").length;
-    const verifiedActionCount = results.filter((result) => result.stateVerified).length;
-    const completed = status === "complete";
-    const ledgerId = storeStageLedger({
-      executionMode,
-      stateBefore: startState,
-      scopePreviews,
-      results,
-      completed,
-      status,
-      failedAt,
-    });
-    const errorMessage = failure instanceof Error ? failure.message : String(failure || "");
     return {
-      success: completed,
-      completed,
-      status,
-      executionMode,
+      success: true,
+      completed: failedAt === null,
       requestedActionCount: preparedActions.length,
       executedActionCount,
       skippedActionCount,
-      verifiedActionCount,
+      verifiedActionCount: results.filter((result) => result.stateVerified).length,
       failedAt,
-      ledgerId,
-      resultSamples: compactStageSamples(results),
-      exceptions: results.filter((result) => result.status === "failed").slice(0, 12),
-      scopePreviews,
-      stateBefore: startState,
-      resume: completed ? null : {
-        nextActionNumber: failedAt || results.length + 1,
-        completedActionCount: results.filter((result) =>
-          result.status === "executed" || result.status === "skipped").length,
-        remainingActionCount: Math.max(0, preparedActions.length - results.length),
-        requiresFreshObservation: true,
-      },
+      results,
       nextPageStateQuery: String(args.verificationQuery || "").trim().slice(0, 500),
-      requiresPageVerification: !completed,
-      ...(completed ? {} : { error: errorMessage || "The stage did not complete." }),
-      diagnostics: {
-        durationMs: Math.round(performance.now() - startedAt),
-        chunkSize,
-        chunkCount: Math.ceil(Math.max(1, results.length) / chunkSize),
-      },
-      message: completed
-        ? `Completed and locally verified ${executedActionCount} ${executionMode} stage action(s); skipped ${skippedActionCount} already-satisfied action(s).`
+      requiresPageVerification: failedAt !== null,
+      message: failedAt === null
+        ? `Completed and locally verified ${executedActionCount} Fast mode action(s); skipped ${skippedActionCount} already-satisfied action(s).`
         : finalVerificationFailure
-          ? `The ${executionMode} stage ran, but final verification failed at action ${failedAt}.`
-          : `The ${executionMode} stage stopped with status ${status} at action ${failedAt} after ${verifiedActionCount} verified action(s).`,
+          ? `Fast mode executed the batch, but final verification failed at action ${failedAt}.`
+          : `Fast mode stopped at action ${failedAt} after ${executedActionCount} verified action(s).`,
     };
-  }
-
-  function expandSelectionScopes(selectionScopes = []) {
-    const actions = [];
-    const previews = [];
-    for (const [scopeIndex, scope] of selectionScopes.entries()) {
-      const resolved = resolveSemanticSelectionScope({
-        controller: getController(),
-        anchor: scope.anchor,
-        includeText: scope.includeText,
-        excludeText: scope.excludeText,
-        includeDisabled: scope.includeDisabled === true,
-        maxControls: MAX_SELECTION_INDICES,
-      });
-      if (!resolved.matched) {
-        throw new Error(`Selection scope ${scopeIndex + 1} did not match "${scope.anchor}".`);
-      }
-      if (resolved.ambiguous) {
-        throw new Error(
-          `Selection scope ${scopeIndex + 1} is ambiguous. Refine "${scope.anchor}" or use explicit indices.`,
-        );
-      }
-      if (resolved.truncated) {
-        throw new Error(
-          `Selection scope ${scopeIndex + 1} matched more than ${MAX_SELECTION_INDICES} controls. Refine the scope before changing anything.`,
-        );
-      }
-      if (!resolved.indices.length) {
-        throw new Error(`Selection scope ${scopeIndex + 1} contains no eligible controls.`);
-      }
-      previews.push({
-        anchor: resolved.anchor,
-        matchedText: resolved.matchedText,
-        contextKind: resolved.contextKind,
-        ancestry: resolved.ancestry,
-        matchedControlCount: resolved.totalMatchedControls,
-        excludedControlCount: resolved.excludedControlCount,
-        examples: resolved.controls?.slice(0, 6) || [],
-      });
-      for (const index of resolved.indices) {
-        actions.push({
-          type: "click",
-          index,
-          desiredState: scope.desiredState,
-        });
-      }
-    }
-    return { actions, previews };
   }
 
   function collectFileInputs(root = document, inputs = [], visitedRoots = new Set()) {
@@ -688,58 +408,28 @@ if (!globalThis[GLOBAL_KEY]) {
     }
   }
 
-  function recordSharedObservation(pageController, fullContent) {
-    const stateIdentity = runtime.stateTracker.observe();
-    const snapshot = buildObservationSnapshot({
-      controller: pageController,
-      content: fullContent,
-      state: stateIdentity,
-      documentRef: document,
-    });
-    const pageDelta = diffObservationSnapshots(
-      runtime.lastObservationSnapshot,
-      snapshot,
-    );
-    runtime.lastObservationSnapshot = snapshot;
-    runtime.stateIndexed = true;
-    return {
-      stateId: stateIdentity.stateId,
-      documentId: stateIdentity.documentId,
-      domRevision: stateIdentity.domRevision,
-      observationSequence: stateIdentity.observationSequence,
-      pageMap: snapshot.pageMap,
-      pageDelta,
-    };
-  }
-
   async function readPageState(query = "") {
     applyVisualPreferences();
     const pageController = getController();
     const state = await pageController.getBrowserState();
+    runtime.stateIndexed = true;
     if (!runtime.visualPreferences.showElementHighlights) {
       await pageController.cleanUpHighlights();
     }
+    const fullPageIndexed = runtime.visualPreferences.fastMode;
     const selectedContent = selectPageStateContent(
       state.content,
       query,
-      SHARED_PAGE_STATE_MAX_CHARACTERS,
+      fullPageIndexed ? FAST_PAGE_STATE_MAX_CHARACTERS : undefined,
     );
-    const sharedContext = recordSharedObservation(pageController, state.content);
     return {
       success: true,
       ...state,
       ...selectedContent,
-      ...sharedContext,
       fastMode: runtime.visualPreferences.fastMode,
       interactionMode: runtime.visualPreferences.fastMode ? "fast" : "standard",
-      contextMode: "shared_full_page",
-      fullPageIndexed: true,
-      viewportPolicy: "full_page_dom",
-      contextDiagnostics: {
-        deliveredCharacters: selectedContent.content.length,
-        originalCharacters: selectedContent.originalContentLength,
-        queryTargeted: Boolean(selectedContent.query),
-      },
+      fullPageIndexed,
+      viewportPolicy: fullPageIndexed ? "full_page_dom" : "visible_viewport",
     };
   }
 
@@ -755,6 +445,7 @@ if (!globalThis[GLOBAL_KEY]) {
     applyVisualPreferences();
     const pageController = getController();
     const state = await pageController.getBrowserState();
+    runtime.stateIndexed = true;
     if (!runtime.visualPreferences.showElementHighlights) {
       await pageController.cleanUpHighlights();
     }
@@ -762,10 +453,9 @@ if (!globalThis[GLOBAL_KEY]) {
       controller: pageController,
       targets: normalizedTargets,
       intent,
-      maxCharacters: 32000,
-      fullPage: true,
+      maxCharacters: runtime.visualPreferences.fastMode ? 32000 : 12000,
+      fullPage: runtime.visualPreferences.fastMode,
     });
-    const sharedContext = recordSharedObservation(pageController, state.content);
     const compactAnchors = semanticContext.anchors.map((anchor) => ({
       target: anchor.target,
       matched: anchor.matched,
@@ -783,14 +473,14 @@ if (!globalThis[GLOBAL_KEY]) {
           disabled: control.disabled,
           selected: control.selected,
           inViewport: control.inViewport,
-          actionableWithoutScroll: Number.isInteger(control.index),
+          actionableWithoutScroll: runtime.visualPreferences.fastMode
+            && Number.isInteger(control.index),
         })),
       })),
     }));
     return {
       success: true,
       ...state,
-      ...sharedContext,
       content: semanticContext.content,
       semanticIntent: semanticContext.intent,
       semanticAnchors: compactAnchors,
@@ -799,15 +489,9 @@ if (!globalThis[GLOBAL_KEY]) {
       semanticContextTruncated: semanticContext.truncated,
       fastMode: runtime.visualPreferences.fastMode,
       interactionMode: runtime.visualPreferences.fastMode ? "fast" : "standard",
-      contextMode: "shared_full_page",
-      fullPageIndexed: true,
-      viewportPolicy: "full_page_dom",
+      fullPageIndexed: runtime.visualPreferences.fastMode,
+      viewportPolicy: runtime.visualPreferences.fastMode ? "full_page_dom" : "visible_viewport",
       requiresScrollForIndexedActions: false,
-      contextDiagnostics: {
-        deliveredCharacters: semanticContext.content.length,
-        originalCharacters: String(state.content || "").length,
-        targetCount: normalizedTargets.length,
-      },
     };
   }
 
@@ -858,7 +542,6 @@ if (!globalThis[GLOBAL_KEY]) {
       if (showVisuals) await pageController.hideMask();
       await pageController.cleanUpHighlights();
       runtime.stateIndexed = false;
-      runtime.stateTracker.invalidate();
       if (runtime.activeVisualActionController === actionController) {
         runtime.activeVisualActionController = null;
       }
@@ -888,7 +571,15 @@ if (!globalThis[GLOBAL_KEY]) {
     }
 
     if (tool === "bridge_set_visual_preferences") {
+      const previousFastMode = runtime.visualPreferences.fastMode;
       runtime.visualPreferences = normalizeVisualPreferences(args);
+      if (previousFastMode !== runtime.visualPreferences.fastMode && runtime.controller) {
+        runtime.activeVisualActionController?.abort();
+        runtime.activeVisualActionController = null;
+        runtime.controller.dispose();
+        runtime.controller = null;
+        runtime.stateIndexed = false;
+      }
       const pageController = getController();
       applyVisualPreferences();
       if (!runtime.visualPreferences.showElementHighlights) {
@@ -907,7 +598,6 @@ if (!globalThis[GLOBAL_KEY]) {
       await pageController.hideMask().catch(() => {});
       await pageController.cleanUpHighlights().catch(() => {});
       runtime.stateIndexed = false;
-      runtime.stateTracker.invalidate();
       return { success: true, cancelled: true };
     }
 
@@ -1022,7 +712,6 @@ if (!globalThis[GLOBAL_KEY]) {
         await new Promise((resolve) => setTimeout(resolve, 350));
       }
       runtime.stateIndexed = false;
-      runtime.stateTracker.invalidate();
       throw new Error(
         `Timed out waiting for "${query}" to become ${condition} in the semantic DOM.`,
       );
@@ -1084,74 +773,38 @@ if (!globalThis[GLOBAL_KEY]) {
         : activeController.selectOption(index, optionText));
     }
 
-    if (tool === "browser_apply_stage") {
-      const explicitActions = Array.isArray(args.actions) ? args.actions : [];
-      const selectionScopes = Array.isArray(args.selectionScopes) ? args.selectionScopes : [];
-      runtime.stateTracker.assertFresh(args.stateId, { required: true });
-      const expanded = expandSelectionScopes(selectionScopes);
-      const actions = [...explicitActions, ...expanded.actions];
-      if (!actions.length || actions.length > MAX_STAGE_ACTIONS) {
-        throw new Error(`browser_apply_stage requires between 1 and ${MAX_STAGE_ACTIONS} resolved actions.`);
-      }
-      const preparedActions = prepareStageActions(actions, args.confirmed === true);
-      return withVisualAction((activeController, signal) =>
-        executeStage(
-          preparedActions,
-          { ...args, requireStateId: true },
-          signal,
-          activeController,
-          expanded.previews,
-        ));
-    }
-
-    if (tool === "browser_get_stage_ledger") {
-      const ledgerId = String(args.ledgerId || "").trim();
-      const ledger = runtime.stageLedgers.get(ledgerId);
-      if (!ledger) throw new Error("The requested stage ledger is unavailable or expired.");
-      const offset = Math.max(0, Math.trunc(Number(args.offset) || 0));
-      const limit = Math.min(100, Math.max(1, Math.trunc(Number(args.limit) || 40)));
-      return {
-        success: true,
-        ledgerId,
-        status: ledger.status,
-        completed: ledger.completed,
-        executionMode: ledger.executionMode,
-        stateBefore: ledger.stateBefore,
-        scopePreviews: ledger.scopePreviews,
-        offset,
-        limit,
-        totalResults: ledger.results.length,
-        results: ledger.results.slice(offset, offset + limit),
-        hasMore: offset + limit < ledger.results.length,
-      };
-    }
-
     if (tool === "browser_batch_actions") {
-      const actions = Array.isArray(args.actions) ? args.actions : [];
-      if (!actions.length || actions.length > MAX_LEGACY_BATCH_ACTIONS) {
-        throw new Error(`browser_batch_actions requires between 1 and ${MAX_LEGACY_BATCH_ACTIONS} actions.`);
+      if (!runtime.visualPreferences.fastMode) {
+        throw new Error("browser_batch_actions requires Fast mode. Enable it from the side panel or Lumi Settings.");
       }
-      const preparedActions = prepareStageActions(actions, args.confirmed === true);
-      return withVisualAction((activeController, signal) =>
-        executeStage(preparedActions, args, signal, activeController));
+      const actions = Array.isArray(args.actions) ? args.actions : [];
+      if (!actions.length || actions.length > MAX_FAST_BATCH_ACTIONS) {
+        throw new Error(`browser_batch_actions requires between 1 and ${MAX_FAST_BATCH_ACTIONS} actions.`);
+      }
+      const preparedActions = prepareFastBatchActions(actions, args.confirmed === true);
+      return withVisualAction((_activeController, signal) =>
+        executeFastBatch(preparedActions, args, signal));
     }
 
     if (tool === "browser_set_selection") {
+      if (!runtime.visualPreferences.fastMode) {
+        throw new Error("browser_set_selection requires Fast mode. Enable it from the side panel or Lumi Settings.");
+      }
       const indices = Array.isArray(args.indices) ? args.indices : [];
-      if (!indices.length || indices.length > MAX_SELECTION_INDICES) {
-        throw new Error(`browser_set_selection requires between 1 and ${MAX_SELECTION_INDICES} indices.`);
+      if (!indices.length || indices.length > MAX_FAST_SELECTION_INDICES) {
+        throw new Error(`browser_set_selection requires between 1 and ${MAX_FAST_SELECTION_INDICES} indices.`);
       }
       const desiredState = args.desiredState === "on"
         ? "on"
         : args.desiredState === "off" ? "off" : null;
       if (!desiredState) throw new Error("browser_set_selection requires desiredState=on/off.");
-      const preparedActions = prepareStageActions(indices.map((index) => ({
+      const preparedActions = prepareFastBatchActions(indices.map((index) => ({
         type: "click",
         index,
         desiredState,
       })), args.confirmed === true, { selectionOnly: true });
-      return withVisualAction((activeController, signal) =>
-        executeStage(preparedActions, args, signal, activeController));
+      return withVisualAction((_activeController, signal) =>
+        executeFastBatch(preparedActions, args, signal));
     }
 
     if (tool === "browser_scroll") {

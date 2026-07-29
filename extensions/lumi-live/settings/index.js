@@ -145,8 +145,8 @@ async function saveFastModePreference() {
   applyVisualPreferenceControls(preferences);
   elements.saveNote.dataset.state = "saved";
   elements.saveNote.textContent = preferences.fastMode
-    ? `${preferences.workspace?.title || "Lumi Fast workspace"} enabled. Lumi is restricted to that tab group and continues working there in the background.`
-    : "Normal execution enabled. Lumi follows the active tab and verified stages use representative visual progress.";
+    ? `${preferences.workspace?.title || "Fast workspace"} enabled. Background tab control and bulk browser actions are ready.`
+    : "Fast mode disabled. Normal active-tab following and standard visual feedback are restored.";
 }
 
 elements.toggleKeyButton.addEventListener("click", () => {
@@ -211,19 +211,14 @@ async function initialize() {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local"
-    || (
-      !changes[FAST_MODE_STORAGE_KEY]
-      && !changes[ELEMENT_HIGHLIGHTS_STORAGE_KEY]
-    )) return;
+    || (!changes[FAST_MODE_STORAGE_KEY] && !changes[ELEMENT_HIGHLIGHTS_STORAGE_KEY])) return;
   void chrome.storage.local.get([
     FAST_MODE_STORAGE_KEY,
     ELEMENT_HIGHLIGHTS_STORAGE_KEY,
-  ]).then((stored) => {
-    applyVisualPreferenceControls({
-      fastMode: stored[FAST_MODE_STORAGE_KEY] === true,
-      showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
-    });
-  });
+  ]).then((stored) => applyVisualPreferenceControls({
+    fastMode: stored[FAST_MODE_STORAGE_KEY] === true,
+    showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
+  }));
 });
 
 void initialize();

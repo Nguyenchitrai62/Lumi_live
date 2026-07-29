@@ -160,6 +160,69 @@ test("marks only consecutive failures of the same action as retries", () => {
   assert.equal(laterClick.retryAttempt, 0);
 });
 
+test("treats an explicit success=false result as a failed harness step", () => {
+  const orchestrator = createTaskOrchestrator({ maxSteps: 6 });
+  const taskId = orchestrator.startTask("Run one tool and preserve its failure.");
+  const step = orchestrator.beginStep({
+    taskId,
+    reflection,
+    action: {
+      name: "mcp__demo__run",
+      kind: "tool_action",
+      input: { target: "demo" },
+    },
+  });
+  const finished = orchestrator.finishStep(step.stepId, {
+    result: {
+      success: false,
+      message: "The target rejected the operation.",
+    },
+  });
+  assert.equal(finished.step.action.status, "failed");
+  assert.equal(finished.step.action.error, "The target rejected the operation.");
+  assert.equal(finished.checkpoint.consecutiveFailures, 1);
+});
+
+test("asks Gemini Live to re-plan after three failed approaches", () => {
+  const orchestrator = createTaskOrchestrator({ maxSteps: 8 });
+  const taskId = orchestrator.startTask("Complete a recoverable multi-step workflow.");
+  for (const attempt of [1, 2, 3]) {
+    const step = orchestrator.beginStep({
+      taskId,
+      reflection,
+      action: {
+        name: "mcp__demo__run",
+        kind: "tool_action",
+        input: { attempt },
+      },
+    });
+    const finished = orchestrator.finishStep(step.stepId, {
+      result: {
+        success: false,
+        message: `Approach ${attempt} failed.`,
+      },
+    });
+    if (attempt === 3) {
+      assert.equal(finished.checkpoint.consecutiveFailures, 3);
+      assert.match(finished.checkpoint.warning, /Re-plan from the ordered remaining goals/i);
+    }
+  }
+
+  const recovery = orchestrator.beginStep({
+    taskId,
+    reflection,
+    action: {
+      name: "mcp__demo__alternative",
+      kind: "tool_action",
+      input: {},
+    },
+  });
+  const recovered = orchestrator.finishStep(recovery.stepId, {
+    result: { success: true, message: "Alternative succeeded." },
+  });
+  assert.equal(recovered.checkpoint.consecutiveFailures, 0);
+});
+
 test("enforces observe-act-verify while accepting automatic post-action evidence", () => {
   const orchestrator = createTaskOrchestrator({ maxSteps: 6 });
   const taskId = orchestrator.startTask("Click Save and verify the result.");
@@ -355,54 +418,6 @@ test("fingerprints stable observations while ignoring volatile timing fields", (
         source: "automatic_post_action_page_state",
         url: "https://example.com",
         content: "Saved",
-      },
-    }),
-  );
-  assert.equal(
-    fingerprintObservation({
-      stateId: "doc:4:8",
-      documentId: "doc",
-      domRevision: 8,
-      url: "https://example.com",
-      content: "Saved",
-      pageDelta: {
-        kind: "delta",
-        fromStateId: "doc:3:8",
-        contentChanged: false,
-        changedControls: [],
-      },
-    }),
-    fingerprintObservation({
-      stateId: "doc:5:8",
-      documentId: "doc",
-      domRevision: 8,
-      url: "https://example.com",
-      content: "Saved",
-      pageDelta: {
-        kind: "delta",
-        fromStateId: "doc:4:8",
-        contentChanged: false,
-        changedControls: [],
-      },
-    }),
-  );
-  assert.notEqual(
-    fingerprintObservation({
-      stateId: "doc:5:8",
-      documentId: "doc",
-      domRevision: 8,
-      content: "Saved",
-      pageDelta: { kind: "delta", contentChanged: false, changedControls: [] },
-    }),
-    fingerprintObservation({
-      stateId: "doc:6:9",
-      documentId: "doc",
-      domRevision: 9,
-      content: "Changed",
-      pageDelta: {
-        kind: "delta",
-        contentChanged: true,
-        changedControls: [{ index: 4, change: "updated" }],
       },
     }),
   );
