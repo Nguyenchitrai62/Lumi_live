@@ -10,7 +10,7 @@ export const DEFAULT_FALLING_PETALS_ENABLED = true;
 // Tự kết nối khi side panel mở và đã có key/microphone. Options: true, false.
 export const DEFAULT_AUTO_CONNECT_ENABLED = true;
 // Fast mode default when no user preference has been stored. Options: true, false.
-export const DEFAULT_FAST_MODE_ENABLED = false;
+export const DEFAULT_FAST_MODE_ENABLED = true;
 // Hiển thị highlight phần tử PageAgent mặc định. Options: true, false.
 export const DEFAULT_SHOW_ELEMENT_HIGHLIGHTS = false;
 
