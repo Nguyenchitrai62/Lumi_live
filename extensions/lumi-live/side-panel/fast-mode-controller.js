@@ -39,7 +39,7 @@ export function createFastModeController({
     body.classList.toggle("petals-off", !getPetalsEnabled() || enabled);
     button.setAttribute("aria-pressed", String(enabled));
     button.setAttribute("aria-label", enabled ? "Disable Fast mode" : "Enable Fast mode");
-    button.title = enabled ? "Fast workspace active — click to return to Normal mode" : "Enable Fast workspace";
+    button.title = enabled ? "Fast execution active — click to return to Normal execution" : "Enable Fast execution";
     if (label) label.textContent = enabled ? "Fast on" : "Fast";
     panelAudio.setVisualAnimationsEnabled(!enabled);
     void avatarController.setEnabled(!enabled);
@@ -68,8 +68,8 @@ export function createFastModeController({
       });
       apply(preferences.fastMode === true, { animate: preferences.fastMode === true });
       setStatus(enabled
-        ? `${preferences.workspace?.title || "Fast workspace"} active · background tab control · bulk actions ready.`
-        : "Normal mode active · standard tab following and visual feedback restored.");
+        ? "Fast execution active · shared context · verified bulk stages · visual delays removed."
+        : "Normal execution active · shared context · verified stages with visual progress.");
       return preferences;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error || "Chrome rejected the workspace change.");

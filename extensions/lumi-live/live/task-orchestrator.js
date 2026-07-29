@@ -53,6 +53,19 @@ export function fingerprintValue(value) {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
+function stablePageDelta(delta) {
+  if (!delta || typeof delta !== "object") return null;
+  return {
+    kind: delta.kind,
+    urlChanged: delta.urlChanged,
+    titleChanged: delta.titleChanged,
+    contentChanged: delta.contentChanged,
+    controlCountDelta: delta.controlCountDelta,
+    changedControls: delta.changedControls,
+    truncated: delta.truncated,
+  };
+}
+
 export function fingerprintObservation(value) {
   const verification = value?.controllerVerification;
   if (verification?.available) {
@@ -60,6 +73,9 @@ export function fingerprintObservation(value) {
       source: verification.source,
       url: verification.url,
       title: verification.title,
+      documentId: verification.documentId,
+      domRevision: verification.domRevision,
+      pageDelta: stablePageDelta(verification.pageDelta),
       query: verification.query,
       queryMatched: verification.queryMatched,
       content: verification.content,
@@ -75,6 +91,9 @@ export function fingerprintObservation(value) {
     return fingerprintValue({
       url: value.url,
       title: value.title,
+      documentId: value.documentId,
+      domRevision: value.domRevision,
+      pageDelta: stablePageDelta(value.pageDelta),
       content: value.content,
       query: value.query,
       queryMatched: value.queryMatched,

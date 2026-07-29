@@ -11,6 +11,7 @@ const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
 const VOICE_STORAGE_KEY = STORAGE_KEYS.voice;
 const ELEMENT_HIGHLIGHTS_STORAGE_KEY = STORAGE_KEYS.elementHighlights;
 const FAST_MODE_STORAGE_KEY = STORAGE_KEYS.fastMode;
+const WORKSPACE_ENABLED_STORAGE_KEY = STORAGE_KEYS.backgroundWorkspace;
 const MCP_DISABLED_TOOLS_STORAGE_KEY = STORAGE_KEYS.mcpDisabledTools;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
 const elements = {
@@ -25,6 +26,7 @@ const elements = {
   enableMicrophoneButton: document.querySelector("#enableMicrophoneButton"),
   showElementHighlightsInput: document.querySelector("#showElementHighlightsInput"),
   fastModeInput: document.querySelector("#fastModeInput"),
+  backgroundWorkspaceInput: document.querySelector("#backgroundWorkspaceInput"),
   showAddMcpButton: document.querySelector("#showAddMcpButton"),
   mcpAddModal: document.querySelector("#mcpAddModal"),
   cancelAddMcpButton: document.querySelector("#cancelAddMcpButton"),
@@ -145,8 +147,19 @@ async function saveFastModePreference() {
   applyVisualPreferenceControls(preferences);
   elements.saveNote.dataset.state = "saved";
   elements.saveNote.textContent = preferences.fastMode
-    ? `${preferences.workspace?.title || "Fast workspace"} enabled. Background tab control and bulk browser actions are ready.`
-    : "Fast mode disabled. Normal active-tab following and standard visual feedback are restored.";
+    ? "Fast execution enabled. Shared context and verification are unchanged; visual effects are removed and stage actions run in high-speed chunks."
+    : "Normal execution enabled. Shared context is unchanged and verified stage actions use representative visual progress.";
+}
+
+async function saveWorkspacePreference() {
+  const result = await sendRuntime("set_workspace_enabled", {
+    enabled: elements.backgroundWorkspaceInput.checked,
+  });
+  elements.backgroundWorkspaceInput.checked = result.enabled === true;
+  elements.saveNote.dataset.state = "saved";
+  elements.saveNote.textContent = result.enabled
+    ? `${result.workspace?.title || "Lumi workspace"} enabled. Target tabs can remain in the background in either execution mode.`
+    : "Background workspace disabled. Lumi now follows the active tab in either execution mode.";
 }
 
 elements.toggleKeyButton.addEventListener("click", () => {
@@ -178,6 +191,14 @@ elements.fastModeInput.addEventListener("change", () => {
     elements.saveNote.textContent = error instanceof Error ? error.message : "Could not update Fast mode.";
   });
 });
+elements.backgroundWorkspaceInput.addEventListener("change", () => {
+  void saveWorkspacePreference().catch((error) => {
+    elements.saveNote.dataset.state = "error";
+    elements.saveNote.textContent = error instanceof Error
+      ? error.message
+      : "Could not update Background workspace.";
+  });
+});
 window.addEventListener("focus", () => void refreshMicrophonePermission());
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void refreshMicrophonePermission();
@@ -191,6 +212,7 @@ async function initialize() {
     VOICE_STORAGE_KEY,
     ELEMENT_HIGHLIGHTS_STORAGE_KEY,
     FAST_MODE_STORAGE_KEY,
+    WORKSPACE_ENABLED_STORAGE_KEY,
   ]);
   elements.apiKeyInput.value = String(stored[API_KEY_STORAGE_KEY] || "");
   elements.voiceInput.value = String(stored[VOICE_STORAGE_KEY] || DEFAULT_VOICE_NAME);
@@ -199,6 +221,7 @@ async function initialize() {
     fastMode: stored[FAST_MODE_STORAGE_KEY] === true,
     showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
   });
+  elements.backgroundWorkspaceInput.checked = stored[WORKSPACE_ENABLED_STORAGE_KEY] === true;
   elements.connectMcpButton.disabled = true;
   await Promise.all([
     refreshMicrophonePermission(),
@@ -211,14 +234,23 @@ async function initialize() {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local"
-    || (!changes[FAST_MODE_STORAGE_KEY] && !changes[ELEMENT_HIGHLIGHTS_STORAGE_KEY])) return;
+    || (
+      !changes[FAST_MODE_STORAGE_KEY]
+      && !changes[ELEMENT_HIGHLIGHTS_STORAGE_KEY]
+      && !changes[WORKSPACE_ENABLED_STORAGE_KEY]
+    )) return;
   void chrome.storage.local.get([
     FAST_MODE_STORAGE_KEY,
     ELEMENT_HIGHLIGHTS_STORAGE_KEY,
-  ]).then((stored) => applyVisualPreferenceControls({
-    fastMode: stored[FAST_MODE_STORAGE_KEY] === true,
-    showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
-  }));
+    WORKSPACE_ENABLED_STORAGE_KEY,
+  ]).then((stored) => {
+    applyVisualPreferenceControls({
+      fastMode: stored[FAST_MODE_STORAGE_KEY] === true,
+      showElementHighlights: stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true,
+    });
+    elements.backgroundWorkspaceInput.checked =
+      stored[WORKSPACE_ENABLED_STORAGE_KEY] === true;
+  });
 });
 
 void initialize();

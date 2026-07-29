@@ -135,5 +135,5 @@ test("semantic resolver traversal is not limited to the first fixed number of DO
   assert.match(source, /GROUP_CONTAINER_SELECTOR/);
   assert.doesNotMatch(source, /MAX_CANDIDATE_ELEMENTS/);
   assert.match(source, /accessible label\/description relationships|aria-labelledby/);
-  assert.match(source, /Fast full-page DOM index is active/);
+  assert.match(source, /Shared full-page DOM index is active/);
 });

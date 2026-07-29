@@ -826,7 +826,7 @@ async function validateGeminiApiKey(apiKey) {
 
 function updateTarget(status) {
   const connected = Boolean(status?.connected);
-  const fastWorkspace = status?.mode === "fast";
+  const backgroundWorkspace = status?.targetPolicy === "background_workspace";
   const navigationReady = !connected && status?.navigationReady === true;
   elements.targetCard.classList.toggle("connected", connected);
   elements.targetTitle.textContent = connected
@@ -835,15 +835,15 @@ function updateTarget(status) {
   elements.targetHint.textContent = connected
     ? status.controllerReady === false
       ? "PageAgent is preparing this page..."
-      : fastWorkspace
-        ? "Fast workspace stays attached while you use other tabs."
+      : backgroundWorkspace
+        ? "Background workspace stays attached while you use other tabs."
         : "Auto-following the active Chrome tab."
     : status?.reason || "Lumi can open or switch to a website from this tab.";
   elements.connectTabButton.textContent = connected
-    ? fastWorkspace ? "Fast" : "Auto"
+    ? backgroundWorkspace ? "Work" : "Auto"
     : navigationReady ? "Ready" : "Waiting";
   elements.connectTabButton.title = connected
-    ? status.url || (fastWorkspace ? "Fast workspace target" : "Automatically follows the active tab")
+    ? status.url || (backgroundWorkspace ? "Background workspace target" : "Automatically follows the active tab")
     : navigationReady ? "Website navigation is available" : "Waiting for an http/https tab";
 }
 
@@ -2599,9 +2599,18 @@ async function sendText(
   const displayText = clean || `Image · ${selectedAttachment.name}`;
   const userRequestText = clean || "Please inspect the attached image and respond with the most helpful relevant analysis.";
   const targetTabId = Number(promptContext?.target?.tabId);
-  const modelText = promptContext?.mode === "fast"
-    ? `[Lumi runtime context — not part of the user's request] Fast mode is active. This turn is locked to workspace tabId ${Number.isInteger(targetTabId) ? targetTabId : "unknown"} inside the Lumi Fast group and must never read or operate on tabs outside that group. You may switch only among tabs returned from the workspace-only browser_list_tabs result, or open a necessary new tab with browser_open_tab so it joins the workspace. Use browser_set_selection or browser_batch_actions for large independent form edits.\n\n[User request]\n${userRequestText}`
-    : userRequestText;
+  const executionMode = promptContext?.executionMode || promptContext?.mode || "normal";
+  const targetPolicy = promptContext?.targetPolicy || "active_tab";
+  const runtimeContext = [
+    `Execution mode: ${executionMode}. Normal and Fast use identical semantic context, reasoning, safety, and verification.`,
+    executionMode === "fast"
+      ? "Use browser_apply_stage for independent form edits; it runs without decorative delays."
+      : "Use browser_apply_stage for independent form edits; it presents representative visual progress without extra Gemini turns.",
+    targetPolicy === "background_workspace"
+      ? `Target policy: Background workspace. This turn is locked to workspace tabId ${Number.isInteger(targetTabId) ? targetTabId : "unknown"}; use only tabs returned by browser_list_tabs or browser_open_tab.`
+      : "Target policy: active tab. Tab scope is independent from execution mode.",
+  ].join(" ");
+  const modelText = `[Lumi runtime context — not part of the user's request] ${runtimeContext}\n\n[User request]\n${userRequestText}`;
   const videoSent = frame ? sendJson({ realtimeInput: { video: frame } }) : true;
   const textSent = videoSent && sendJson({ realtimeInput: { text: modelText } });
   if (!videoSent || !textSent) {

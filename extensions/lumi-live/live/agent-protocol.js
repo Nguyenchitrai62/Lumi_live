@@ -8,6 +8,7 @@ const BROWSER_OBSERVATION_ACTIONS = new Set([
   "browser_inspect_screenshot",
   "browser_get_page_state",
   "browser_find_semantic_context",
+  "browser_get_stage_ledger",
   "browser_wait_for_page_state",
   "browser_list_tabs",
 ]);

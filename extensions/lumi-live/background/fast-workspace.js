@@ -1,5 +1,5 @@
-export const FAST_WORKSPACE_TITLE = "⚡ Lumi Fast";
-export const FAST_WORKSPACE_COLOR = "yellow";
+export const FAST_WORKSPACE_TITLE = "Lumi Workspace";
+export const FAST_WORKSPACE_COLOR = "purple";
 
 function validId(value) {
   return Number.isInteger(value) && value >= 0 ? value : null;
@@ -45,12 +45,12 @@ export function createFastWorkspace({
   async function addTab(tabId) {
     const tab = await tabsApi.get(tabId);
     if (!Number.isInteger(tab?.id) || !Number.isInteger(tab.windowId)) {
-      throw new Error("Fast workspace requires a valid Chrome tab.");
+      throw new Error("Background workspace requires a valid Chrome tab.");
     }
 
     let group = await getGroup();
     if (group && group.windowId !== tab.windowId) {
-      throw new Error("Fast workspace tabs must stay in the same Chrome window.");
+      throw new Error("Background workspace tabs must stay in the same Chrome window.");
     }
     if (!group) group = await findNamedGroup(tab.windowId);
 

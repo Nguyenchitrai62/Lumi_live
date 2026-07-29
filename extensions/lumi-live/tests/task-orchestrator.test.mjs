@@ -358,4 +358,52 @@ test("fingerprints stable observations while ignoring volatile timing fields", (
       },
     }),
   );
+  assert.equal(
+    fingerprintObservation({
+      stateId: "doc:4:8",
+      documentId: "doc",
+      domRevision: 8,
+      url: "https://example.com",
+      content: "Saved",
+      pageDelta: {
+        kind: "delta",
+        fromStateId: "doc:3:8",
+        contentChanged: false,
+        changedControls: [],
+      },
+    }),
+    fingerprintObservation({
+      stateId: "doc:5:8",
+      documentId: "doc",
+      domRevision: 8,
+      url: "https://example.com",
+      content: "Saved",
+      pageDelta: {
+        kind: "delta",
+        fromStateId: "doc:4:8",
+        contentChanged: false,
+        changedControls: [],
+      },
+    }),
+  );
+  assert.notEqual(
+    fingerprintObservation({
+      stateId: "doc:5:8",
+      documentId: "doc",
+      domRevision: 8,
+      content: "Saved",
+      pageDelta: { kind: "delta", contentChanged: false, changedControls: [] },
+    }),
+    fingerprintObservation({
+      stateId: "doc:6:9",
+      documentId: "doc",
+      domRevision: 9,
+      content: "Changed",
+      pageDelta: {
+        kind: "delta",
+        contentChanged: true,
+        changedControls: [{ index: 4, change: "updated" }],
+      },
+    }),
+  );
 });
