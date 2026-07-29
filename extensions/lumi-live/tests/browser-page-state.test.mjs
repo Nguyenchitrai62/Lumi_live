@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { selectPageStateContent } from "../browser/page-state-content.js";
+import {
+  MAX_PAGE_STATE_CHARACTERS,
+  selectPageStateContent,
+} from "../browser/page-state-content.js";
 import {
   normalizeSemanticActionIntent,
   normalizeSemanticAnchor,
@@ -15,7 +18,7 @@ import {
   buildSessionInstruction,
 } from "../live/session-config.js";
 
-test("browser page state supports targeted queries and dynamic waiting", () => {
+test("browser page state supports targeted queries and dynamic waiting", async () => {
   const tool = BROWSER_TOOLS.find(({ name }) => name === "browser_get_page_state");
   const semanticTool = BROWSER_TOOLS.find(
     ({ name }) => name === "browser_find_semantic_context",
@@ -55,6 +58,13 @@ test("browser page state supports targeted queries and dynamic waiting", () => {
   assert.match(instruction, /complete rendered DOM/i);
   assert.match(instruction, /supports up, down, left, and right/i);
   assert.doesNotMatch(instruction, /Hawee/i);
+  assert.equal(MAX_PAGE_STATE_CHARACTERS, 32000);
+  const controllerSource = await readFile(
+    new URL("../browser/controller.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(controllerSource, /FAST_PAGE_STATE_MAX_CHARACTERS\s*=\s*160000/);
+  assert.match(controllerSource, /FAST_SEMANTIC_CONTEXT_MAX_CHARACTERS\s*=\s*80000/);
 });
 
 test("centers a long page-state response on an exact filename", () => {

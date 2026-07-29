@@ -36,7 +36,9 @@ test("makes latest-request context discipline mandatory in the browser instructi
   assert.match(instruction, /minimal workflowContinuation metadata/i);
   assert.match(instruction, /newest user-authored request is always authoritative/i);
   assert.match(instruction, /thin, low-priority conversational background/i);
-  assert.match(instruction, /without a separate summarization step/i);
+  assert.match(instruction, /does not thin current tool results/i);
+  assert.match(instruction, /preserve every returned control, index, verification body, identifier, and goal/i);
+  assert.match(instruction, /Only completed prior conversation turns may be locally shortened/i);
   assert.match(instruction, /successful upload is never permission to stop/i);
   assert.match(instruction, /Do not restate the full history/i);
 });

@@ -4014,7 +4014,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
   }
 
   // extensions/lumi-live/browser/page-state-content.js
-  var MAX_PAGE_STATE_CHARACTERS = 16e3;
+  var MAX_PAGE_STATE_CHARACTERS = 32e3;
   var MAX_PAGE_STATE_QUERY_CHARACTERS = 240;
   function clipAtLineBoundary(content, start, end) {
     let boundedStart = Math.max(0, start);
@@ -4884,7 +4884,9 @@ ${clippedAnchor.content}`);
   var GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
   var HIGHLIGHT_STYLE_ID = "lumi-page-agent-highlight-preference";
   var CLICK_EFFECT_STYLE_ID = "lumi-page-agent-click-effect-preference";
-  var FAST_PAGE_STATE_MAX_CHARACTERS = 48e3;
+  var FAST_PAGE_STATE_MAX_CHARACTERS = 16e4;
+  var FAST_SEMANTIC_CONTEXT_MAX_CHARACTERS = 8e4;
+  var STANDARD_SEMANTIC_CONTEXT_MAX_CHARACTERS = 24e3;
   var MAX_FAST_BATCH_ACTIONS = 200;
   var MAX_FAST_SELECTION_INDICES = 300;
   if (!globalThis[GLOBAL_KEY]) {
@@ -5264,7 +5266,7 @@ ${clippedAnchor.content}`);
         controller: pageController,
         targets: normalizedTargets,
         intent,
-        maxCharacters: runtime.visualPreferences.fastMode ? 32e3 : 12e3,
+        maxCharacters: runtime.visualPreferences.fastMode ? FAST_SEMANTIC_CONTEXT_MAX_CHARACTERS : STANDARD_SEMANTIC_CONTEXT_MAX_CHARACTERS,
         fullPage: runtime.visualPreferences.fastMode
       });
       const compactAnchors = semanticContext.anchors.map((anchor) => ({

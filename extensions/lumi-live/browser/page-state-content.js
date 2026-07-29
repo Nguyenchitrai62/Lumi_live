@@ -1,4 +1,4 @@
-export const MAX_PAGE_STATE_CHARACTERS = 16000;
+export const MAX_PAGE_STATE_CHARACTERS = 32000;
 export const MAX_PAGE_STATE_QUERY_CHARACTERS = 240;
 
 function clipAtLineBoundary(content, start, end) {

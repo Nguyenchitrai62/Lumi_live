@@ -162,6 +162,7 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /EARLY_CONNECTION_DROP_MS\s*=\s*3000/);
   assert.match(controller, /performance\.now\(\) - sessionReadyAt <= EARLY_CONNECTION_DROP_MS/);
   assert.match(controller, /showReconnectNotice\(message,\s*\{ earlyDisconnect: disconnectedSoonAfterConnect \}\)/);
+  assert.match(controller, /!reconnectRequiredForUserWork\s*&&\s*sessionSocket\.lumiSetupComplete/);
   assert.match(controller, /earlyDisconnect \? "Check Settings" : "Open Settings"/);
   assert.match(controller, /connectionNoticeSettings[^]*openSettings\(\)/);
   assert.match(controller, /if \(savedKey && DEFAULT_AUTO_CONNECT_ENABLED\) await autoStartSessionIfReady\(\)/);
@@ -208,6 +209,7 @@ test("side panel connects chat without requiring a microphone and remembers mic 
   assert.match(html, /id="muteButton"[^>]+aria-label="Turn on microphone"[^>]+aria-pressed="true"/);
   assert.match(controller, /let isMuted = true/);
   assert.match(startSessionSource, /await panelAudio\.prepareOutput\(\)/);
+  assert.doesNotMatch(startSessionSource, /validateGeminiApiKey|v1beta\/models\?pageSize/);
   assert.match(startSessionSource, /if \(microphoneEnabled\)[^]*panelAudio\.requestMicrophone\(\)/);
   assert.match(startSessionSource, /microphoneWarning = `\$\{diagnosis\.message\} Chat is still connected\.`/);
   assert.doesNotMatch(autoStartSource, /refreshMicrophonePermission|openMicrophonePermissionPage/);
@@ -218,6 +220,8 @@ test("side panel connects chat without requiring a microphone and remembers mic 
   assert.match(audioController, /function isUserSpeechActive\(\)/);
   assert.match(audioController, /function stopMicrophone\(\)/);
   assert.match(controller, /sessionHasInFlightWork\(\)[^]*panelAudio\.isUserSpeechActive\(\)/);
+  assert.doesNotMatch(html, /id="startButton"/);
+  assert.doesNotMatch(controller, /elements\.startButton/);
 });
 
 test("captures visual context only when the agent requests it and renders rich conversation Markdown", async () => {
@@ -260,8 +264,8 @@ test("captures visual context only when the agent requests it and renders rich c
   assert.match(controller, /inspectScreenshot:\s*captureAndSendVisualInspectionFrame/);
   assert.match(browserToolRunner, /tool === "browser_inspect_screenshot"[^]*await inspectScreenshot\(\)/);
   assert.match(controller, /addBrowserWorkflowContext\(result/);
-  assert.match(controller, /boundAgentObservationForModel\(actionResult/);
-  assert.match(controller, /classifyAgentAction\(actionName\)/);
+  assert.match(controller, /observation:\s*actionResult/);
+  assert.doesNotMatch(controller, /boundAgentObservationForModel/);
   assert.match(controller, /activeTurnUserRequest = userRequestText/);
   assert.doesNotMatch(controller, /AUTOMATIC_TAB_CAPTURE_ORIGINS|screenshotAccessRequest/);
   assert.doesNotMatch(controller, /chrome\.permissions\.(?:request|contains)\(\{\s*origins:/);

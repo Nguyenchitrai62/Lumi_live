@@ -11,17 +11,20 @@ import {
   buildSessionInstruction,
   configureMcpTools,
   DEFAULT_THINKING_LEVEL,
+  MAX_INITIAL_CURRENT_USER_CHARS,
   MAX_INITIAL_HISTORY_CHARS,
   MAX_INITIAL_HISTORY_TURNS,
   normalizeThinkingLevel,
+  retainImportantTurnText,
   shouldRefreshLiveContext,
   THINKING_LEVELS,
   trimConversationHistory,
 } from "../live/session-config.js";
 
 test("builds bounded initial history without triggering a model turn", () => {
-  assert.equal(MAX_INITIAL_HISTORY_TURNS, 6);
-  assert.equal(MAX_INITIAL_HISTORY_CHARS, 6000);
+  assert.equal(MAX_INITIAL_HISTORY_TURNS, 10);
+  assert.equal(MAX_INITIAL_HISTORY_CHARS, 18000);
+  assert.equal(MAX_INITIAL_CURRENT_USER_CHARS, MAX_INITIAL_HISTORY_CHARS);
   assert.deepEqual(buildInitialHistoryClientContent([
     { role: "user", text: "  Xin   chào  " },
     { role: "model", text: "Chào bạn" },
@@ -59,6 +62,35 @@ test("keeps only recent history beginning at a user turn", () => {
     ], { maxTurns: 3, maxChars: 5 }),
     [{ role: "user", text: "56789" }],
   );
+});
+
+test("keeps the newest request whole while thinning older turns from both edges", () => {
+  const history = [
+    {
+      role: "user",
+      text: `A-start ${"old request detail ".repeat(300)} A-end`,
+    },
+    {
+      role: "model",
+      text: `A-result ${"old response detail ".repeat(300)} A-completed`,
+    },
+    {
+      role: "user",
+      text: "Perform request B with every current control and verification result.",
+    },
+  ];
+  const retained = trimConversationHistory(history);
+  assert.equal(retained.at(-1).text, history.at(-1).text);
+  assert.match(retained[0].text, /^A-start/);
+  assert.match(retained[0].text, /A-end$/);
+  assert.match(retained[1].text, /^A-result/);
+  assert.match(retained[1].text, /A-completed$/);
+  assert.match(retained[0].text, /older detail omitted/i);
+  assert.ok(
+    retained.reduce((total, turn) => total + turn.text.length, 0)
+      <= MAX_INITIAL_HISTORY_CHARS,
+  );
+  assert.equal(retainImportantTurnText("123456789", 5), "56789");
 });
 
 test("uses the configured Gemini Live thinking level and normalizes invalid values", () => {

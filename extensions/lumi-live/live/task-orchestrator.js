@@ -14,7 +14,7 @@ const VOLATILE_RESULT_KEYS = new Set([
   "completedAt",
   "previewDataUrl",
 ]);
-export const MAX_TASK_REQUEST_ANCHOR_CHARS = 1800;
+export const MAX_TASK_REQUEST_ANCHOR_CHARS = 6000;
 
 function cleanText(value, maxLength = 2400) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);

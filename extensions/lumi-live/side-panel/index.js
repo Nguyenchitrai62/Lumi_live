@@ -76,7 +76,6 @@ import {
   AGENT_DONE_ACTION_NAME,
   AGENT_STEP_TOOL_NAME,
   buildAgentStepDeclaration,
-  classifyAgentAction,
   parseAgentStepCall,
 } from "../live/agent-protocol.js";
 import { createTaskOrchestrator } from "../live/task-orchestrator.js";
@@ -95,7 +94,6 @@ import {
   normalizeLocalChatHistoryState,
 } from "./local-chat-history.js";
 import { createLocalChatSnapshotStore } from "./local-chat-snapshots.js";
-import { boundAgentObservationForModel } from "./agent-context-budget.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
@@ -175,7 +173,6 @@ const elements = {
   mouthSmall: document.querySelector("#mouthSmall"),
   mouthWide: document.querySelector("#mouthWide"),
   vtuberMood: document.querySelector("#vtuberMood"),
-  startButton: document.querySelector("#startButton"),
   muteButton: document.querySelector("#muteButton"),
   messageQueue: document.querySelector("#messageQueue"),
   messageQueuePreview: document.querySelector("#messageQueuePreview"),
@@ -775,11 +772,6 @@ function setSessionStatus(nextStatus, message) {
   elements.liveBadge.className = `badge badge-${nextStatus === "ready" ? "live" : nextStatus === "connecting" ? "joining" : nextStatus === "error" ? "error" : "offline"}`;
   elements.liveBadge.textContent = nextStatus === "ready" ? "Live" : nextStatus === "connecting" ? "Joining" : nextStatus === "error" ? "Retry" : "Offline";
   elements.statusLine.textContent = message;
-  elements.startButton.disabled = nextStatus === "connecting";
-  elements.startButton.classList.toggle("live", nextStatus === "ready");
-  elements.startButton.querySelector("span:last-child").textContent = nextStatus === "ready"
-    ? "Disconnect"
-    : nextStatus === "connecting" ? "Connecting…" : nextStatus === "error" ? "Retry" : "Connect";
   elements.muteButton.disabled = nextStatus !== "ready";
   elements.thinkingButton.disabled = false;
   elements.thinkingButton.title = nextStatus === "ready" || nextStatus === "connecting"
@@ -846,23 +838,6 @@ async function openMicrophonePermissionPage() {
     return;
   }
   setSessionStatus("idle", "A Lumi permission tab opened. Choose Allow there, then return; Lumi will connect automatically.");
-}
-
-async function validateGeminiApiKey(apiKey) {
-  let response;
-  try {
-    response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?pageSize=1&key=${encodeURIComponent(apiKey)}`,
-      { method: "GET", cache: "no-store" },
-    );
-  } catch {
-    throw new Error("Could not reach Google Gemini. Check the network connection and try again.");
-  }
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    const detail = data?.error?.message || `HTTP ${response.status}`;
-    throw new Error(`Gemini rejected this API key: ${detail}`);
-  }
 }
 
 function updateTarget(status) {
@@ -1213,12 +1188,9 @@ function rememberConversationTurn(role, text) {
   const normalizedRole = role === "model" || role === "lumi" ? "model" : role === "user" ? "user" : "";
   const clean = String(text || "").replace(/\s+/g, " ").trim();
   if (!normalizedRole || !clean) return;
-  const previous = conversationHistory.at(-1);
+  const previous = localChatHistory.at(-1);
   if (previous?.role === normalizedRole && previous.text === clean) return;
   const turn = { role: normalizedRole, text: clean };
-  conversationHistory.push(turn);
-  const recentHistory = trimConversationHistory(conversationHistory);
-  conversationHistory.splice(0, conversationHistory.length, ...recentHistory);
   localChatHistory.push(turn);
   const retainedLocalHistory = normalizeLocalChatHistory(localChatHistory);
   localChatHistory.splice(
@@ -1226,6 +1198,8 @@ function rememberConversationTurn(role, text) {
     localChatHistory.length,
     ...retainedLocalHistory,
   );
+  const recentHistory = trimConversationHistory(localChatHistory);
+  conversationHistory.splice(0, conversationHistory.length, ...recentHistory);
   syncActiveChatSessionFromMemory();
   void chatHistoryStore.save(chatHistoryState).catch(() => {});
   scheduleActiveChatSnapshotPersist();
@@ -2000,12 +1974,6 @@ function setLiveTranslationBadge(state, detail = "") {
       : state === "error"
         ? "Translate · error"
         : "Translate · joining";
-  if (sessionStatus === "ready") {
-    elements.startButton.querySelector("span:last-child").textContent =
-      state === "active" || state === "connecting" || state === "reconnecting"
-        ? "Disconnect + stop translate"
-        : "Disconnect";
-  }
 }
 
 async function runLiveTranslationTool(args = {}) {
@@ -2164,8 +2132,6 @@ function ensureActiveAgentTask() {
 
 function agentStepEnvelope(actionName, actionResult, orchestrationResult) {
   const checkpoint = orchestrationResult?.checkpoint || null;
-  const actionKind = orchestrationResult?.step?.action?.kind
-    || classifyAgentAction(actionName);
   const reasonGuidance = {
     loop_detected: "The repeated action was not executed. Use a distinct safe tactic or call done with a concrete blocker.",
     max_steps: "The controller exhausted the step budget and recorded a failed completion.",
@@ -2183,10 +2149,7 @@ function agentStepEnvelope(actionName, actionResult, orchestrationResult) {
         ?? orchestrationResult?.retryAttempt
         ?? 0,
     },
-    observation: boundAgentObservationForModel(actionResult, {
-      actionKind,
-      actionName,
-    }),
+    observation: actionResult,
     controllerGuidance: checkpoint?.warning
       || reasonGuidance[orchestrationResult?.reason]
       || "Evaluate this observation, update durable memory, and continue with exactly one next action or done.",
@@ -2881,7 +2844,11 @@ function openGeminiSocket(
 
     cleanupMedia({ cancelActiveTask: reconnectRequiredForUserWork });
     if (!expected) {
-      if (!reconnectRequiredForUserWork && !isGeminiKeyIssue(reason)) {
+      if (
+        !reconnectRequiredForUserWork
+        && sessionSocket.lumiSetupComplete
+        && !isGeminiKeyIssue(reason)
+      ) {
         hideConnectionNotice();
         setSessionStatus(
           "idle",
@@ -2900,10 +2867,7 @@ function openGeminiSocket(
 }
 
 async function startSession() {
-  if (sessionStatus === "ready") {
-    stopSession();
-    return;
-  }
+  if (sessionStatus === "ready") return;
   if (sessionStatus === "connecting" || sessionStartPending) return;
   sessionStartPending = true;
 
@@ -2946,7 +2910,6 @@ async function startSession() {
       const mcpInfo = await sendRuntime("mcp_get_tools");
       notifyInvalidMcpSchemas(mcpInfo);
       const mcpFunctionDeclarations = configureMcpTools(mcpInfo, activeMcpTools);
-      await validateGeminiApiKey(apiKey);
       await panelAudio.prepareOutput();
       if (microphoneEnabled) {
         try {
@@ -3489,7 +3452,6 @@ elements.fastModeButton.addEventListener("click", () => void fastModeController.
 elements.avatarModeButton.addEventListener("click", () => void toggleAvatarMode());
 elements.petalsButton.addEventListener("click", () => void togglePetals());
 elements.vtuberToggle.addEventListener("click", toggleVtuberSize);
-elements.startButton.addEventListener("click", () => void startSession());
 elements.muteButton.addEventListener("click", toggleMute);
 elements.messageQueueSteer.addEventListener("click", steerQueuedUserMessage);
 elements.messageQueueRemove.addEventListener("click", removeQueuedUserMessage);

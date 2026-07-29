@@ -90,7 +90,7 @@ export function buildAgentStepDeclaration(actionDeclarations = []) {
       properties: {
         evaluationPreviousGoal: {
           type: "STRING",
-          description: "One concise sentence, at most about 700 characters, evaluating the previous action against its intended visible or tool result. On the first step say that no previous action exists.",
+          description: "One concise sentence evaluating the previous action against its intended visible or tool result. On the first step say that no previous action exists.",
         },
         previousGoalStatus: {
           type: "STRING",
@@ -99,17 +99,17 @@ export function buildAgentStepDeclaration(actionDeclarations = []) {
         },
         memory: {
           type: "STRING",
-          description: 'At most about 900 characters containing only durable facts, exact identifiers, successful discoveries, and blockers needed by later steps. If none exist, use "No durable facts yet." instead of an empty value.',
+          description: 'Only durable facts, exact identifiers, successful discoveries, and blockers needed by later steps. Keep this short. If none exist, use "No durable facts yet." instead of an empty value.',
         },
         nextGoal: {
           type: "STRING",
-          description: "The single immediate goal for this action in at most about 600 characters, or finishing the task when actionName is done.",
+          description: "The single immediate goal for this action, or finishing the task when actionName is done.",
         },
         remainingGoals: {
           type: "ARRAY",
           maxItems: MAX_REMAINING_GOALS,
           items: { type: "STRING" },
-          description: "Optional ordered unfinished-outcome ledger for multi-goal requests. Keep each item under about 240 characters and use [] only when every requested outcome is verified.",
+          description: "Optional ordered unfinished-outcome ledger for multi-goal requests. Keep each item concise and use [] only when every requested outcome is verified.",
         },
         actionName: {
           type: "STRING",
@@ -145,7 +145,7 @@ Each ${AGENT_STEP_TOOL_NAME} call remains exactly one reflection-before-action s
 
 For a request with multiple explicit outcomes, supplement the existing reflection with previousGoalStatus and remainingGoals. Preserve the ledger order and never silently drop an item because an intermediate action succeeded. Remove an item only after a tool result or fresh browser observation proves that outcome. These fields add planning detail without replacing the original evaluationPreviousGoal, memory, nextGoal, or action contract. Do not emit parallel step calls. After every action result, evaluate it before choosing the next action. Browser actions normally include controllerVerification from an automatic fresh post-action page read. When it is available and conclusive, use that evidence immediately and do not spend another step on a redundant observation. When it is unavailable or conclusive=false, the next step must be browser_get_page_state, browser_find_semantic_context, or browser_wait_for_page_state before another browser action or successful done. Change tactics when the controller reports a retry or repeated-state fingerprint. When the checkpoint reports repeated failures or a stall, rebuild the approach from the original request and any available remainingGoals instead of retrying the same interaction path. Respect remainingSteps warnings. Do not narrate intermediate progress unless the user needs to make a decision.
 
-Context discipline is mandatory during long tasks. The latest task.requestAnchor, remainingGoals, memory, and newest observation are authoritative. Do not re-read, restate, or reason from older DOM snapshots or tool payloads after a newer observation arrives. Keep evaluationPreviousGoal, memory, nextGoal, and each remainingGoals item concise. If contextBudget.truncated=true, query only the exact missing object or label; never compensate with repeated full-page observations.
+Context discipline is mandatory during long tasks. The latest task.requestAnchor, remainingGoals, memory, and newest observation are authoritative. The controller returns the complete current tool result; never discard controls, verification evidence, identifiers, or goal items to save context. Do not re-read, restate, or reason from older DOM snapshots or tool payloads after a newer observation arrives. Keep evaluationPreviousGoal, memory, nextGoal, and each remainingGoals item concise.
 
 Completion keeps the existing strict contract: every tool task must end with another ${AGENT_STEP_TOOL_NAME} call whose actionName is done. For success use JSON {"success":true,"result":"concise final result","evidence":"observed proof","completedGoals":[{"goal":"one requested outcome","evidence":"fresh observation proving it"}]}. When remainingGoals is present, successful done requires it to be empty. For a concrete blocker or partial result use success=false and retain any unfinished outcomes in remainingGoals. Never substitute a plain-text final answer for done. Never call done immediately after an unverified browser action. After done is recorded, give the user one concise final response and take no more actions.
 
@@ -172,7 +172,7 @@ function normalizePreviousGoalStatus(value) {
 function normalizeRemainingGoals(value) {
   if (!Array.isArray(value)) return [];
   return value
-    .map((goal) => String(goal || "").replace(/\s+/g, " ").trim().slice(0, 240))
+    .map((goal) => String(goal || "").replace(/\s+/g, " ").trim().slice(0, 500))
     .filter(Boolean)
     .slice(0, MAX_REMAINING_GOALS);
 }
@@ -362,11 +362,10 @@ export function parseAgentStepCall(functionCall, availableActions = []) {
     evaluationPreviousGoal: requireShortText(
       input.evaluationPreviousGoal,
       "evaluationPreviousGoal",
-      700,
     ),
     previousGoalStatus: normalizePreviousGoalStatus(input.previousGoalStatus),
-    memory: optionalShortText(input.memory, "No durable facts yet.", 900),
-    nextGoal: requireShortText(input.nextGoal, "nextGoal", 600),
+    memory: optionalShortText(input.memory, "No durable facts yet."),
+    nextGoal: requireShortText(input.nextGoal, "nextGoal"),
     remainingGoals: normalizeRemainingGoals(input.remainingGoals),
   };
   if (

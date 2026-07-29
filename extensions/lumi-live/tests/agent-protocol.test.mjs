@@ -67,7 +67,8 @@ test("builds a compact action catalog and strict completion contract", () => {
   assert.match(instruction, /Do not emit parallel step calls/i);
   assert.match(instruction, /latest task\.requestAnchor/i);
   assert.match(instruction, /newest observation are authoritative/i);
-  assert.match(instruction, /never compensate with repeated full-page observations/i);
+  assert.match(instruction, /complete current tool result/i);
+  assert.match(instruction, /never discard controls, verification evidence, identifiers, or goal items/i);
 });
 
 test("parses one structured action and validates JSON arguments", () => {
@@ -125,22 +126,22 @@ test("uses a neutral memory fallback instead of blocking an otherwise valid step
   assert.equal(step.reflection.memory, "No durable facts yet.");
 });
 
-test("keeps per-step reflection fields thin and deterministic", () => {
+test("keeps full working reflection fields within the original safe limits", () => {
   const step = parseAgentStepCall({
     name: AGENT_STEP_TOOL_NAME,
     args: {
-      evaluationPreviousGoal: "e".repeat(1200),
-      memory: "m".repeat(1400),
-      nextGoal: "n".repeat(1000),
-      remainingGoals: ["g".repeat(500)],
+      evaluationPreviousGoal: "e".repeat(2000),
+      memory: "m".repeat(2000),
+      nextGoal: "n".repeat(2000),
+      remainingGoals: ["g".repeat(700)],
       actionName: "browser_get_page_state",
       actionArgumentsJson: "{}",
     },
   }, actions);
-  assert.equal(step.reflection.evaluationPreviousGoal.length, 700);
-  assert.equal(step.reflection.memory.length, 900);
-  assert.equal(step.reflection.nextGoal.length, 600);
-  assert.equal(step.reflection.remainingGoals[0].length, 240);
+  assert.equal(step.reflection.evaluationPreviousGoal.length, 1600);
+  assert.equal(step.reflection.memory.length, 1600);
+  assert.equal(step.reflection.nextGoal.length, 1600);
+  assert.equal(step.reflection.remainingGoals[0].length, 500);
 });
 
 test("validates and safely coerces action arguments using the selected tool schema", () => {

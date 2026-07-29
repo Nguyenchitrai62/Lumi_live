@@ -40,7 +40,9 @@ const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
 const GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
 const HIGHLIGHT_STYLE_ID = "lumi-page-agent-highlight-preference";
 const CLICK_EFFECT_STYLE_ID = "lumi-page-agent-click-effect-preference";
-const FAST_PAGE_STATE_MAX_CHARACTERS = 48000;
+export const FAST_PAGE_STATE_MAX_CHARACTERS = 160000;
+export const FAST_SEMANTIC_CONTEXT_MAX_CHARACTERS = 80000;
+export const STANDARD_SEMANTIC_CONTEXT_MAX_CHARACTERS = 24000;
 const MAX_FAST_BATCH_ACTIONS = 200;
 const MAX_FAST_SELECTION_INDICES = 300;
 if (!globalThis[GLOBAL_KEY]) {
@@ -453,7 +455,9 @@ if (!globalThis[GLOBAL_KEY]) {
       controller: pageController,
       targets: normalizedTargets,
       intent,
-      maxCharacters: runtime.visualPreferences.fastMode ? 32000 : 12000,
+      maxCharacters: runtime.visualPreferences.fastMode
+        ? FAST_SEMANTIC_CONTEXT_MAX_CHARACTERS
+        : STANDARD_SEMANTIC_CONTEXT_MAX_CHARACTERS,
       fullPage: runtime.visualPreferences.fastMode,
     });
     const compactAnchors = semanticContext.anchors.map((anchor) => ({
