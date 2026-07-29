@@ -96,6 +96,8 @@ class QcStep(BaseModel):
     writeback: WritebackTarget
     risk: Literal["none", "ordinary", "high"] = "none"
     entity_scope: Literal["none", "project_create", "owned_project"] = "none"
+    skill_record: str = Field(default="", max_length=500)
+    coverage_status: str = Field(default="", max_length=80)
     status: StepStatus = StepStatus.PENDING
     source_row: int
     retry_policy: dict[str, int] = Field(

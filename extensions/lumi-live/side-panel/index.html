@@ -74,7 +74,7 @@
         <button id="runAttentionAcknowledge" type="button">Reviewed</button>
       </section>
 
-      <details id="qcWorkspace" class="qc-workspace">
+      <details id="qcWorkspace" class="qc-workspace" hidden inert aria-hidden="true">
         <summary>
           <span class="qc-workspace-mark" aria-hidden="true">QC</span>
           <span>
@@ -292,7 +292,7 @@
           <input
             id="imageAttachmentInput"
             type="file"
-            accept="image/jpeg,image/png,image/webp,image/gif"
+            accept="image/jpeg,image/png,image/webp,image/gif,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             hidden
           />
           <div id="imageAttachmentTray" class="image-attachment-tray" aria-live="polite" hidden></div>
@@ -300,8 +300,8 @@
             id="imageAttachmentButton"
             class="image-attachment-button"
             type="button"
-            aria-label="Attach image"
-            title="Attach an image, or paste and drop one here"
+            aria-label="Attach image or Excel workbook"
+            title="Attach an image or Excel QC workbook"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M8.5 12.5l5.9-5.9a3.2 3.2 0 014.5 4.5l-7.8 7.8a5 5 0 01-7.1-7.1l8.1-8.1" />
@@ -321,8 +321,8 @@
             <span class="message-cancel-icon" aria-hidden="true"></span>
           </button>
           <div id="imageDropHint" class="image-drop-hint" aria-hidden="true">
-            <strong>Drop image here</strong>
-            <span>JPEG, PNG, WebP, or GIF up to 12 MB</span>
+            <strong>Drop a file here</strong>
+            <span>Image or Excel QC workbook (.xlsx)</span>
           </div>
         </form>
         <div class="status-row">

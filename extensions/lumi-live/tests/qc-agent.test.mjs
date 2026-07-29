@@ -49,7 +49,7 @@ test("allows only loopback HTTP endpoints for the local QC service", () => {
   assert.throws(() => normalizeQcServiceUrl("http://erp.example.com"), /must use http/);
 });
 
-test("side panel ships the complete Excel QC workspace and action gate", async () => {
+test("side panel keeps QC controls in chat while preserving the action gate", async () => {
   const html = await readFile(new URL("side-panel/index.html", extensionRoot), "utf8");
   const manifest = JSON.parse(await readFile(new URL("manifest.json", extensionRoot), "utf8"));
   const styles = await readFile(new URL("side-panel/styles.css", extensionRoot), "utf8");
@@ -76,11 +76,33 @@ test("side panel ships the complete Excel QC workspace and action gate", async (
   }
   assert.match(controller, /qcWorkspace\.authorizeBrowserAction/);
   assert.match(controller, /qcWorkspace\.recordAgentEvent/);
+  assert.match(controller, /function renderQcRunCard/);
+  assert.match(controller, /qcWorkspace\.compileWorkbook/);
+  assert.match(html, /id="qcWorkspace"[^>]*hidden[^>]*inert/);
+  assert.match(html, /id="imageAttachmentInput"[\s\S]*?\.xlsx/);
   assert.match(workspace, /QC policy requires qc_begin_step/);
   assert.match(workspace, /approval_token:\s*approvalToken/);
   assert.doesNotMatch(workspace, /approval_token:\s*args\./);
   assert.match(workspace, /chrome\.storage\.session/);
   assert.match(manifest.content_security_policy.extension_pages, /ws:\/\/127\.0\.0\.1:\*/);
   assert.match(styles, /grid-template-rows:\s*auto auto auto minmax\(0,\s*1fr\) auto/);
-  assert.match(styles, /\.qc-workspace\s*\{\s*grid-row:\s*3/);
+  assert.match(styles, /\.qc-workspace\[hidden\]\s*\{\s*display:\s*none\s*!important/);
+  assert.match(styles, /\.qc-chat-card/);
+});
+
+test("QC service configuration lives in Settings instead of the conversation chrome", async () => {
+  const settingsHtml = await readFile(new URL("settings/index.html", extensionRoot), "utf8");
+  const settingsController = await readFile(new URL("settings/index.js", extensionRoot), "utf8");
+  for (const id of [
+    "qcServiceUrlInput",
+    "qcServiceTokenInput",
+    "qcAllowedDomainsInput",
+    "qcDiscoveryModeInput",
+    "qcTestServiceButton",
+    "qcSaveSettingsButton",
+  ]) {
+    assert.match(settingsHtml, new RegExp(`id="${id}"`));
+  }
+  assert.match(settingsController, /STORAGE_KEYS\.qcServiceToken/);
+  assert.match(settingsController, /function normalizeQcServiceUrl/);
 });

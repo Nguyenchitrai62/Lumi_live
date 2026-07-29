@@ -16,17 +16,18 @@
 1. Observe the current URL and project chooser.
 2. If the URL has `/du-an/{project_id}`, resolve the visible project name.
 3. Mark `owned_sandbox` only if name and captured ID match the current run registry.
-4. Otherwise mark `existing_or_unknown`.
-5. For `existing_or_unknown`, permit only navigation, filtering, viewing, and non-confirming dialogs.
+4. Mark `user_authorized_test` when the user explicitly named this project for the current test workflow and the visible name plus captured ID match that target in the current run.
+5. Otherwise mark `existing_or_unknown`.
+6. For `existing_or_unknown`, permit only navigation, filtering, viewing, and non-confirming dialogs.
 
-Never infer ownership from a project name alone; both marker and run-captured ID are required.
+Never infer permission from a project name alone. `owned_sandbox` needs the marker and run-captured ID; `user_authorized_test` needs the user's current-conversation authorization plus the exact visible name and run-captured ID.
 
 ## Create the sandbox project
 
 1. Open `/du-an/them`.
 2. Verify `#button-save-create-update-project-page` is unique.
 3. Optionally submit empty once to record validation; expect only project name required.
-4. Fill `LUMI_DISCOVERY_<run-id>` into the name field.
+4. Fill `LUMI_DISCOVERY_<run-id>` into the name field, unless the user explicitly provides a different test-project name for the current workflow.
 5. Save once.
 6. Verify return to `/tong-quan?tab=du-an`.
 7. Locate the card containing the exact marker.
@@ -37,8 +38,8 @@ Never infer ownership from a project name alone; both marker and run-captured ID
 
 - Open project and route links for schema discovery.
 - Switch tabs, search, filter, sort, paginate, and view reports.
-- Open a create form only to inspect fields; do not fill/save if the record is shared or outside the sandbox.
-- Never click existing project-card edit, inline edit, save, state transition, import, upload, or delete.
+- Open a create form only to inspect fields; do not fill/save if the record is shared or outside the sandbox/user-authorized test project.
+- Never click existing project-card edit, inline edit, save, state transition, import, upload, or delete unless it is classified as `user_authorized_test` for the current workflow.
 - If a control may autosave, do not focus or change it.
 
 ## Warehouse CRUD smoke test
@@ -67,7 +68,7 @@ After every save, verify the list because the create/edit form may remain open a
 
 ### Import
 
-1. Ensure the target is project-scoped and owned.
+1. Ensure the target is project-scoped and classified as `owned_sandbox` or `user_authorized_test`.
 2. Open import dialog.
 3. Download the screen-specific template.
 4. Validate extension, sheet name, header row, column names, and sample rows offline.
@@ -110,4 +111,3 @@ For permissions, partners, policies, accounting, rounding, banners, global code 
 - Slow/large AG Grid: use a light structural read, reduce page size, or document `observed_partial`; never fall back to row-content scraping.
 - Save result unclear: check toast, route, and exact owned row before retrying. Do not repeat a possible side effect blindly.
 - Session expired: request sign-in in the existing Chrome session; never store credentials.
-

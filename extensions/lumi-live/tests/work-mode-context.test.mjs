@@ -30,8 +30,8 @@ test("builds a prompt-first work target from the active ERP tab", () => {
   assert.match(turn.modelText, /\[USER REQUEST\]\nTạo một dự án kiểm thử mới/);
   assert.match(turn.modelText, /Do not ask which website to use/);
   assert.equal(turn.creationMarker, "LUMI-WORK-2N9C-42");
-  assert.match(turn.modelText, /never modify or delete a pre-existing project/i);
-  assert.match(turn.modelText, /LUMI-WORK-2N9C-42/);
+  assert.match(turn.modelText, /do not reject a requested test-project name/i);
+  assert.match(turn.modelText, /must not be appended to the user-requested project name/i);
 });
 
 test("leaves ordinary chat unchanged when no controllable web tab is active", () => {

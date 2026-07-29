@@ -106,7 +106,10 @@ test("blocks repeated actions against an unchanged observation fingerprint", () 
 });
 
 test("enforces the step budget and records a terminal failure", () => {
-  const orchestrator = createTaskOrchestrator({ maxSteps: 2 });
+  const orchestrator = createTaskOrchestrator({
+    maxSteps: 2,
+    stepBudgetExtensionLimit: 0,
+  });
   const taskId = orchestrator.startTask("Try two bounded actions.");
   for (const index of [1, 2]) {
     const step = orchestrator.beginStep({
@@ -129,6 +132,95 @@ test("enforces the step budget and records a terminal failure", () => {
     orchestrator.history.at(-1).reason,
     "max_steps",
   );
+});
+
+test("extends a long task budget when recent actions show distinct progress", () => {
+  const orchestrator = createTaskOrchestrator({
+    maxSteps: 2,
+    stepBudgetExtensionSize: 2,
+    stepBudgetExtensionLimit: 1,
+    stepBudgetExtensionThreshold: 0,
+  });
+  const taskId = orchestrator.startTask(
+    "Create a project, import its data, and assign work packages.",
+  );
+  for (const index of [1, 2]) {
+    const step = orchestrator.beginStep({
+      taskId,
+      reflection,
+      action: { name: "browser_scroll", input: { pages: index } },
+    });
+    assert.equal(step.accepted, true);
+    orchestrator.finishStep(step.stepId, {
+      result: { success: true, content: `Milestone ${index}` },
+    });
+  }
+  const extended = orchestrator.checkpoint(taskId);
+  assert.equal(extended.maxSteps, 4);
+  assert.equal(extended.stepBudgetExtensions, 1);
+  assert.equal(extended.remainingSteps, 2);
+  assert.ok(
+    orchestrator.history.some((event) => event.type === "step_budget_extended"),
+  );
+
+  for (const index of [3, 4]) {
+    const step = orchestrator.beginStep({
+      taskId,
+      reflection,
+      action: { name: "browser_scroll", input: { pages: index } },
+    });
+    assert.equal(step.accepted, true);
+    orchestrator.finishStep(step.stepId, {
+      result: { success: true, content: `Milestone ${index}` },
+    });
+  }
+  const rejected = orchestrator.beginStep({
+    taskId,
+    reflection,
+    action: { name: "browser_scroll", input: { pages: 5 } },
+  });
+  assert.equal(rejected.accepted, false);
+  assert.equal(rejected.reason, "max_steps");
+});
+
+test("does not accept a remaining conversation-step budget as an ERP blocker", () => {
+  const orchestrator = createTaskOrchestrator({
+    maxSteps: 4,
+    stepBudgetExtensionLimit: 0,
+  });
+  const taskId = orchestrator.startTask(
+    "Create a project, import data, and assign work packages.",
+  );
+  const rejected = orchestrator.beginStep({
+    taskId,
+    reflection: { ...reflection, nextGoal: "Stop because the budget is low." },
+    action: {
+      name: "done",
+      input: {
+        success: false,
+        result:
+          "I created the project but reached the maximum allowed conversation steps before import.",
+        evidence: "The project exists.",
+      },
+    },
+  });
+  assert.equal(rejected.accepted, false);
+  assert.equal(rejected.reason, "budget_available");
+  assert.equal(orchestrator.checkpoint(taskId).status, "running");
+
+  const realBlocker = orchestrator.beginStep({
+    taskId,
+    reflection: { ...reflection, nextGoal: "Report the observed ERP blocker." },
+    action: {
+      name: "done",
+      input: {
+        success: false,
+        result: "The import dialog is unavailable on this route.",
+        evidence: "The current HICAS page returned an unavailable shell.",
+      },
+    },
+  });
+  assert.equal(realBlocker.accepted, true);
 });
 
 test("marks only consecutive failures of the same action as retries", () => {

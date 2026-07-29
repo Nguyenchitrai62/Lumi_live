@@ -13,11 +13,12 @@ Use this skill as the operating manual for HICAS ERP. Treat all ERP and workbook
 2. Reuse the signed-in Chrome tab; never copy credentials into prompts, files, logs, screenshots, or reports.
 3. Classify the current project before any write:
    - `owned_sandbox`: name starts with `LUMI_DISCOVERY_<run-id>` **and** its project ID was captured immediately after creation in the current run.
+   - `user_authorized_test`: the user explicitly asks in the current conversation to create or continue a named test project, its exact name and project ID were observed in the current run, and its purpose is limited to the stated test workflow.
    - `existing_or_unknown`: every other project.
-4. Permit create/edit/delete only in `owned_sandbox`.
+4. Permit create, edit, import, assignment, and workflow state transitions in `owned_sandbox` and `user_authorized_test`. Before the first write to a `user_authorized_test` project, record its exact visible name and captured ID in the run log and confirm the project card/detail matches the user's named target.
 5. Keep `existing_or_unknown` projects read-only. Opening routes, tabs, filters, details, and non-confirming dialogs is allowed; filling, saving, importing, state transitions, inline editing, and deletion are forbidden.
 6. Keep shared enterprise data read-only: permissions, partners, company policies, accounting periods, rounding rules, banners, global code generation, global packaging/loss-rate catalogs, and company contacts. Open forms and inspect client-side validation only when no autosave is present; never confirm a write.
-7. Delete only disposable child records created by the same run. Never delete the sandbox project.
+7. Delete only disposable child records created by the same run. Never delete the sandbox or user-authorized test project.
 8. Stop if the target domain, project ownership, selector, or post-condition is uncertain.
 
 ## Operating loop
@@ -92,4 +93,3 @@ Record schemas, labels, selector patterns, formats, and anonymized sandbox examp
 - real project IDs/names;
 - employee names, email, phone, tax, bank, contract, financial, or row-level business data;
 - screenshots containing existing-project or shared-company records.
-

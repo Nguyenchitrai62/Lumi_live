@@ -292,6 +292,8 @@ def create_app(data_dir: Path | str = ".lumi-qc", installation_token: str | None
                     writeback=WritebackTarget(sheet="Prompt_Run"),
                     risk=source_step.risk,
                     entity_scope=source_step.entity_scope,
+                    skill_record=source_step.skill_record,
+                    coverage_status=source_step.coverage_status,
                     status=status,
                     source_row=index + 1,
                 )

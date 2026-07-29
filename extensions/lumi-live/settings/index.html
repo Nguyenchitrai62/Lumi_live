@@ -116,6 +116,49 @@
 
         </div>
 
+        <article class="settings-card qc-settings-card">
+          <div class="card-heading">
+            <span class="eyebrow">LOCAL QC SERVICE</span>
+            <h2>Excel QC runtime</h2>
+            <p>Configure the local service here once. In Lumi, attach an Excel workbook directly to the chat.</p>
+          </div>
+          <div class="qc-settings-fields">
+            <section class="connection-field">
+              <label for="qcServiceUrlInput">Service URL</label>
+              <input id="qcServiceUrlInput" type="url" value="http://127.0.0.1:8765" autocomplete="off" spellcheck="false" />
+              <p class="field-help">Only localhost and 127.0.0.1 are accepted.</p>
+            </section>
+            <section class="connection-field">
+              <label for="qcServiceTokenInput">Installation token</label>
+              <input id="qcServiceTokenInput" type="password" autocomplete="off" spellcheck="false" />
+              <p class="field-help">Stored only in this browser and never shown in chat.</p>
+            </section>
+            <section class="connection-field">
+              <label for="qcAllowedDomainsInput">Allowed ERP domains</label>
+              <input id="qcAllowedDomainsInput" type="text" value="sit.hawee.hicas.vn" autocomplete="off" spellcheck="false" />
+              <p class="field-help">Comma-separated security boundary for QC actions.</p>
+            </section>
+            <section class="connection-field qc-discovery-setting">
+              <div class="setting-row">
+                <div>
+                  <h2>Discovery Mode</h2>
+                  <p>Learn page and field candidates while working in HICAS.</p>
+                </div>
+                <label class="toggle-switch" for="qcDiscoveryModeInput">
+                  <input id="qcDiscoveryModeInput" type="checkbox" />
+                  <span aria-hidden="true"></span>
+                  <span class="sr-only">Enable QC Discovery Mode</span>
+                </label>
+              </div>
+            </section>
+          </div>
+          <div class="qc-settings-actions">
+            <button id="qcTestServiceButton" class="secondary" type="button">Check service</button>
+            <button id="qcSaveSettingsButton" class="primary" type="button">Save QC settings</button>
+          </div>
+          <p id="qcSettingsNote" class="note" role="status">These settings stay out of the chat interface.</p>
+        </article>
+
         <article id="mcpCard" class="settings-card mcp-card">
           <div id="mcpOverviewView" class="mcp-overview-view">
           <div class="mcp-card-heading">

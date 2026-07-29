@@ -76,7 +76,7 @@ Verified behavior:
 
 - Empty save marks project name invalid and shows `Hãy nhập thông tin cho trường Tên dự án`.
 - Saving only a unique name succeeds, assigns a generated project code, returns to the catalog, and creates an active project.
-- Use `LUMI_DISCOVERY_<run-id>`; immediately capture the generated card/project ID and register it as the only mutable project.
+- Prefer `LUMI_DISCOVERY_<run-id>`; immediately capture the generated card/project ID. If the user explicitly supplies a different test-project name for the current workflow, register that exact name and ID as `user_authorized_test` and permit only the requested test actions.
 
 ## Company contacts
 
@@ -121,4 +121,3 @@ Account menu from `#avatar-trigger-profile:visible`:
 Notifications open from `.anticon-bell.ant-dropdown-trigger`. Record unread/read state and generic message metadata only; redact content unless requested.
 
 `TRỢ GIÚP` opens `/help?from=<current-path>` in a new tab. The researched build returned an empty ERP shell.
-

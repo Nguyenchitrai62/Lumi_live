@@ -12,6 +12,8 @@ const VOICE_STORAGE_KEY = STORAGE_KEYS.voice;
 const ELEMENT_HIGHLIGHTS_STORAGE_KEY = STORAGE_KEYS.elementHighlights;
 const MCP_DISABLED_TOOLS_STORAGE_KEY = STORAGE_KEYS.mcpDisabledTools;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
+const QC_DEFAULT_SERVICE_URL = "http://127.0.0.1:8765";
+const QC_DEFAULT_ALLOWED_DOMAINS = "sit.hawee.hicas.vn";
 const elements = {
   extensionVersion: document.querySelector("#extensionVersion"),
   apiKeyInput: document.querySelector("#apiKeyInput"),
@@ -23,6 +25,13 @@ const elements = {
   microphonePermissionStatus: document.querySelector("#microphonePermissionStatus"),
   enableMicrophoneButton: document.querySelector("#enableMicrophoneButton"),
   showElementHighlightsInput: document.querySelector("#showElementHighlightsInput"),
+  qcServiceUrlInput: document.querySelector("#qcServiceUrlInput"),
+  qcServiceTokenInput: document.querySelector("#qcServiceTokenInput"),
+  qcAllowedDomainsInput: document.querySelector("#qcAllowedDomainsInput"),
+  qcDiscoveryModeInput: document.querySelector("#qcDiscoveryModeInput"),
+  qcTestServiceButton: document.querySelector("#qcTestServiceButton"),
+  qcSaveSettingsButton: document.querySelector("#qcSaveSettingsButton"),
+  qcSettingsNote: document.querySelector("#qcSettingsNote"),
   showAddMcpButton: document.querySelector("#showAddMcpButton"),
   mcpAddModal: document.querySelector("#mcpAddModal"),
   cancelAddMcpButton: document.querySelector("#cancelAddMcpButton"),
@@ -127,6 +136,75 @@ async function saveVisualPreference() {
   await sendRuntime("set_visual_preferences", { showElementHighlights });
 }
 
+function normalizeQcServiceUrl(value) {
+  const url = new URL(String(value || QC_DEFAULT_SERVICE_URL).trim());
+  if (url.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(url.hostname)) {
+    throw new Error("QC Service must use http://127.0.0.1 or http://localhost.");
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "");
+  url.search = "";
+  url.hash = "";
+  return url.toString().replace(/\/$/, "");
+}
+
+async function saveQcSettings({ showConfirmation = true } = {}) {
+  try {
+    const serviceUrl = normalizeQcServiceUrl(elements.qcServiceUrlInput.value);
+    const token = elements.qcServiceTokenInput.value.trim();
+    if (!token) throw new Error("Enter the Local QC Service installation token.");
+    const domains = elements.qcAllowedDomainsInput.value
+      .split(/[\s,;]+/)
+      .map((domain) => domain.trim().toLowerCase())
+      .filter(Boolean)
+      .filter((domain, index, values) => values.indexOf(domain) === index)
+      .join(", ");
+    if (!domains) throw new Error("Enter at least one allowed ERP domain.");
+    elements.qcServiceUrlInput.value = serviceUrl;
+    elements.qcAllowedDomainsInput.value = domains;
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.qcServiceUrl]: serviceUrl,
+      [STORAGE_KEYS.qcServiceToken]: token,
+      [STORAGE_KEYS.qcAllowedDomains]: domains,
+      [STORAGE_KEYS.qcDiscoveryEnabled]: elements.qcDiscoveryModeInput.checked,
+    });
+    if (showConfirmation) {
+      elements.qcSettingsNote.dataset.state = "saved";
+      elements.qcSettingsNote.textContent =
+        "QC settings saved. Attach an .xlsx workbook in Lumi chat to create a Run Plan.";
+    }
+    return { serviceUrl, token };
+  } catch (error) {
+    elements.qcSettingsNote.dataset.state = "error";
+    elements.qcSettingsNote.textContent =
+      error instanceof Error ? error.message : "Could not save QC settings.";
+    throw error;
+  }
+}
+
+async function testQcService() {
+  elements.qcTestServiceButton.disabled = true;
+  elements.qcSettingsNote.dataset.state = "";
+  elements.qcSettingsNote.textContent = "Checking Local QC Service…";
+  try {
+    const { serviceUrl } = await saveQcSettings({ showConfirmation: false });
+    const response = await fetch(`${serviceUrl}/health`, {
+      method: "GET",
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error(`QC Service returned HTTP ${response.status}.`);
+    const health = await response.json();
+    elements.qcSettingsNote.dataset.state = "saved";
+    elements.qcSettingsNote.textContent =
+      `Local QC Service ${health.version || ""} is ready.`.replace(/\s+\./, ".");
+  } catch (error) {
+    elements.qcSettingsNote.dataset.state = "error";
+    elements.qcSettingsNote.textContent =
+      error instanceof Error ? error.message : "Local QC Service is unavailable.";
+  } finally {
+    elements.qcTestServiceButton.disabled = false;
+  }
+}
+
 elements.toggleKeyButton.addEventListener("click", () => {
   const shouldShow = elements.apiKeyInput.type === "password";
   elements.apiKeyInput.type = shouldShow ? "text" : "password";
@@ -150,6 +228,10 @@ elements.showElementHighlightsInput.addEventListener("change", () => {
     elements.saveNote.textContent = error instanceof Error ? error.message : "Could not update PageAgent guides.";
   });
 });
+elements.qcSaveSettingsButton.addEventListener("click", () => {
+  void saveQcSettings().catch(() => {});
+});
+elements.qcTestServiceButton.addEventListener("click", () => void testQcService());
 window.addEventListener("focus", () => void refreshMicrophonePermission());
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void refreshMicrophonePermission();
@@ -162,11 +244,23 @@ async function initialize() {
     API_KEY_STORAGE_KEY,
     VOICE_STORAGE_KEY,
     ELEMENT_HIGHLIGHTS_STORAGE_KEY,
+    STORAGE_KEYS.qcServiceUrl,
+    STORAGE_KEYS.qcServiceToken,
+    STORAGE_KEYS.qcAllowedDomains,
+    STORAGE_KEYS.qcDiscoveryEnabled,
   ]);
   elements.apiKeyInput.value = String(stored[API_KEY_STORAGE_KEY] || "");
   elements.voiceInput.value = String(stored[VOICE_STORAGE_KEY] || DEFAULT_VOICE_NAME);
   voicePreview.updateVoiceProfiles();
   elements.showElementHighlightsInput.checked = stored[ELEMENT_HIGHLIGHTS_STORAGE_KEY] === true;
+  elements.qcServiceUrlInput.value =
+    String(stored[STORAGE_KEYS.qcServiceUrl] || QC_DEFAULT_SERVICE_URL);
+  elements.qcServiceTokenInput.value =
+    String(stored[STORAGE_KEYS.qcServiceToken] || "");
+  elements.qcAllowedDomainsInput.value =
+    String(stored[STORAGE_KEYS.qcAllowedDomains] || QC_DEFAULT_ALLOWED_DOMAINS);
+  elements.qcDiscoveryModeInput.checked =
+    stored[STORAGE_KEYS.qcDiscoveryEnabled] === true;
   elements.connectMcpButton.disabled = true;
   await Promise.all([
     refreshMicrophonePermission(),

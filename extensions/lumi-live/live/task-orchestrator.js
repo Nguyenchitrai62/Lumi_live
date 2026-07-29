@@ -1,6 +1,9 @@
 import { AGENT_DONE_ACTION_NAME } from "./agent-protocol.js";
 import {
   DEFAULT_AGENT_MAX_STEPS,
+  DEFAULT_AGENT_STEP_BUDGET_EXTENSION_LIMIT,
+  DEFAULT_AGENT_STEP_BUDGET_EXTENSION_SIZE,
+  DEFAULT_AGENT_STEP_BUDGET_EXTENSION_THRESHOLD,
   DEFAULT_COMPLETION_RECOVERY_LIMIT,
   DEFAULT_IDENTICAL_STATE_ACTION_LIMIT,
 } from "../core/ui-config.js";
@@ -17,6 +20,18 @@ const VOLATILE_RESULT_KEYS = new Set([
 
 function cleanText(value, maxLength = 2400) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function isBudgetOnlyBlocker(value) {
+  const text = cleanText(
+    `${value?.result || ""} ${value?.evidence || ""}`,
+    2400,
+  ).toLowerCase();
+  return (
+    /\b(?:step|action|conversation)\s+(?:budget|limit|steps?)\b/.test(text)
+    || /\b(?:maximum|max)\b.{0,80}\b(?:step|action|conversation|budget)\b/.test(text)
+    || /\b(?:step|action|conversation|budget)\b.{0,80}\b(?:exhausted|reached|limit|maximum|max)\b/.test(text)
+  );
 }
 
 function stableValue(value, depth = 0) {
@@ -123,12 +138,18 @@ export function qcPhaseForAction(name, kind = "") {
 
 export function createTaskOrchestrator({
   maxSteps = DEFAULT_AGENT_MAX_STEPS,
+  stepBudgetExtensionSize = DEFAULT_AGENT_STEP_BUDGET_EXTENSION_SIZE,
+  stepBudgetExtensionLimit = DEFAULT_AGENT_STEP_BUDGET_EXTENSION_LIMIT,
+  stepBudgetExtensionThreshold = DEFAULT_AGENT_STEP_BUDGET_EXTENSION_THRESHOLD,
   identicalStateActionLimit = DEFAULT_IDENTICAL_STATE_ACTION_LIMIT,
   completionRecoveryLimit = DEFAULT_COMPLETION_RECOVERY_LIMIT,
   now = Date.now,
   onHistoryChange = () => {},
 } = {}) {
   const configuredMaxSteps = Number(maxSteps);
+  const configuredExtensionSize = Number(stepBudgetExtensionSize);
+  const configuredExtensionLimit = Number(stepBudgetExtensionLimit);
+  const configuredExtensionThreshold = Number(stepBudgetExtensionThreshold);
   const configuredRepeatedActionLimit = Number(identicalStateActionLimit);
   const configuredCompletionRetryLimit = Number(completionRecoveryLimit);
   const defaultMaxSteps = Math.max(
@@ -145,6 +166,30 @@ export function createTaskOrchestrator({
       Number.isFinite(configuredRepeatedActionLimit)
         ? configuredRepeatedActionLimit
         : DEFAULT_IDENTICAL_STATE_ACTION_LIMIT,
+    ),
+  );
+  const defaultExtensionSize = Math.max(
+    1,
+    Math.trunc(
+      Number.isFinite(configuredExtensionSize)
+        ? configuredExtensionSize
+        : DEFAULT_AGENT_STEP_BUDGET_EXTENSION_SIZE,
+    ),
+  );
+  const defaultExtensionLimit = Math.max(
+    0,
+    Math.trunc(
+      Number.isFinite(configuredExtensionLimit)
+        ? configuredExtensionLimit
+        : DEFAULT_AGENT_STEP_BUDGET_EXTENSION_LIMIT,
+    ),
+  );
+  const defaultExtensionThreshold = Math.max(
+    0,
+    Math.trunc(
+      Number.isFinite(configuredExtensionThreshold)
+        ? configuredExtensionThreshold
+        : DEFAULT_AGENT_STEP_BUDGET_EXTENSION_THRESHOLD,
     ),
   );
   const completionRetryLimit = Math.max(
@@ -231,6 +276,63 @@ export function createTaskOrchestrator({
     };
   };
 
+  const maybeExtendStepBudget = (taskId) => {
+    const started = history.find(
+      (event) => event.taskId === taskId && event.type === "task_started",
+    );
+    if (!started || latestTaskDone(taskId)) return false;
+    const extensionLimit = Math.max(
+      0,
+      Math.trunc(Number(started.stepBudgetExtensionLimit) || 0),
+    );
+    const extensionCount = Math.max(
+      0,
+      Math.trunc(Number(started.stepBudgetExtensions) || 0),
+    );
+    if (!extensionLimit || extensionCount >= extensionLimit) return false;
+    const steps = actionSteps(taskId).filter(
+      (event) => event.action.status !== "loop_blocked",
+    );
+    const remainingSteps = Math.max(0, started.maxSteps - steps.length);
+    const threshold = Math.max(
+      0,
+      Math.trunc(Number(started.stepBudgetExtensionThreshold) || 0),
+    );
+    if (remainingSteps > threshold) return false;
+
+    const recent = steps.slice(-8);
+    const completed = recent.filter((event) => event.action.status === "completed");
+    const requiredCompleted = Math.min(4, Math.max(2, started.maxSteps));
+    const distinctProgress = new Set(
+      completed.map((event) =>
+        event.observation?.fingerprint || event.actionFingerprint || event.action.name),
+    );
+    if (
+      completed.length < requiredCompleted
+      || distinctProgress.size < Math.min(2, requiredCompleted)
+    ) return false;
+
+    const extensionSize = Math.max(
+      1,
+      Math.trunc(Number(started.stepBudgetExtensionSize) || defaultExtensionSize),
+    );
+    const extended = replace(started.id, {
+      maxSteps: started.maxSteps + extensionSize,
+      stepBudgetExtensions: extensionCount + 1,
+    });
+    append({
+      type: "step_budget_extended",
+      taskId,
+      extension: extensionCount + 1,
+      addedSteps: extensionSize,
+      maxSteps: extended.maxSteps,
+      message:
+        `Lumi extended the task budget to ${extended.maxSteps} actions because recent steps showed verified progress.`,
+      phase: "PLAN",
+    });
+    return true;
+  };
+
   const checkpoint = (taskId) => {
     const started = history.find(
       (event) => event.taskId === taskId && event.type === "task_started",
@@ -244,9 +346,9 @@ export function createTaskOrchestrator({
       (started?.maxSteps || defaultMaxSteps) - usedSteps,
     );
     const warning = remainingSteps === 5
-      ? "Only 5 action steps remain; converge on the requested outcome."
+      ? "Only 5 action steps remain at the hard cap; preserve milestone memory and converge on the complete requested outcome."
       : remainingSteps <= 2 && !done
-        ? `Critical: only ${remainingSteps} action step${remainingSteps === 1 ? "" : "s"} remain. Finish or call done with a partial result.`
+        ? `Critical: only ${remainingSteps} action step${remainingSteps === 1 ? "" : "s"} remain at the hard cap. Complete the request or report a concrete ERP/policy blocker.`
         : "";
     return {
       taskId,
@@ -258,6 +360,8 @@ export function createTaskOrchestrator({
       usedSteps,
       maxSteps: started?.maxSteps || defaultMaxSteps,
       remainingSteps,
+      stepBudgetExtensions: started?.stepBudgetExtensions || 0,
+      stepBudgetExtensionLimit: started?.stepBudgetExtensionLimit || 0,
       warning,
     };
   };
@@ -309,6 +413,27 @@ export function createTaskOrchestrator({
         1,
         Math.trunc(Number(metadata.maxSteps) || defaultMaxSteps),
       ),
+      stepBudgetExtensionSize: Math.max(
+        1,
+        Math.trunc(Number(metadata.stepBudgetExtensionSize) || defaultExtensionSize),
+      ),
+      stepBudgetExtensionLimit: Math.max(
+        0,
+        Math.trunc(
+          Number.isFinite(Number(metadata.stepBudgetExtensionLimit))
+            ? Number(metadata.stepBudgetExtensionLimit)
+            : defaultExtensionLimit,
+        ),
+      ),
+      stepBudgetExtensionThreshold: Math.max(
+        0,
+        Math.trunc(
+          Number.isFinite(Number(metadata.stepBudgetExtensionThreshold))
+            ? Number(metadata.stepBudgetExtensionThreshold)
+            : defaultExtensionThreshold,
+        ),
+      ),
+      stepBudgetExtensions: 0,
       turnSequence: Number(metadata.turnSequence) || 0,
       phase: "PLAN",
     });
@@ -326,7 +451,7 @@ export function createTaskOrchestrator({
 
   const beginStep = ({ taskId = activeTask()?.taskId, reflection, action } = {}) => {
     if (!taskId) throw new Error("No active Lumi task.");
-    const started = history.find(
+    let started = history.find(
       (event) => event.taskId === taskId && event.type === "task_started",
     );
     if (!started || latestTaskDone(taskId)) {
@@ -339,6 +464,20 @@ export function createTaskOrchestrator({
     const actionKind = cleanText(action.kind, 80)
       || (name === AGENT_DONE_ACTION_NAME ? "done" : "tool_action");
     const phase = qcPhaseForAction(name, actionKind);
+    if (
+      name === AGENT_DONE_ACTION_NAME
+      && action.input.success === false
+      && isBudgetOnlyBlocker(action.input)
+    ) {
+      maybeExtendStepBudget(taskId);
+      if (checkpoint(taskId).remainingSteps > 0) {
+        return rejectStepConstraint(
+          taskId,
+          "budget_available",
+          "A low conversation-step budget is not an ERP blocker. Preserve milestone memory and continue the unfinished original request.",
+        );
+      }
+    }
     const unverifiedBrowserAction = latestUnverifiedBrowserAction(taskId);
     if (
       name === AGENT_DONE_ACTION_NAME
@@ -387,6 +526,13 @@ export function createTaskOrchestrator({
     const usedSteps = actionSteps(taskId).filter(
       (event) => event.action.status !== "loop_blocked",
     ).length;
+    if (name !== AGENT_DONE_ACTION_NAME && usedSteps >= started.maxSteps) {
+      if (maybeExtendStepBudget(taskId)) {
+        started = history.find(
+          (event) => event.taskId === taskId && event.type === "task_started",
+        );
+      }
+    }
     if (name !== AGENT_DONE_ACTION_NAME && usedSteps >= started.maxSteps) {
       append({
         type: "error",
@@ -579,6 +725,7 @@ export function createTaskOrchestrator({
         });
       }
     }
+    maybeExtendStepBudget(step.taskId);
     return {
       step: updated,
       checkpoint: checkpoint(step.taskId),

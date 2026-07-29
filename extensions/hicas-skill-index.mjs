@@ -248,8 +248,9 @@ export async function buildHicasSkillIndex(
     source_sha256: sourceSha256.digest("hex"),
     generated_at: new Date().toISOString(),
     policies: {
-      existing_project: "read_only",
-      sandbox_project: "run_created_scoped_mutation",
+      unidentified_project: "read_only",
+      user_authorized_test_project: "exact_name_and_run_captured_id_scoped_mutation",
+      newly_created_project: "run_created_scoped_mutation",
       shared_enterprise_data: "read_only",
       screenshot_existing_or_shared_data: "forbidden",
       action_loop: ["OBSERVE", "ACT", "STABILIZE", "VERIFY", "RECORD"],

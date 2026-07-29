@@ -60,6 +60,7 @@ export function createQcWorkspaceController({
   getActiveTarget = async () => null,
   getKnowledgeTarget = async () => null,
   onStatus = () => {},
+  onRunChanged = () => {},
 } = {}) {
   let currentRun = null;
   let approvalToken = "";
@@ -123,6 +124,7 @@ export function createQcWorkspaceController({
       elements.approveStepButton.hidden = true;
       elements.downloads.hidden = true;
       if (elements.collectComparisonButton) elements.collectComparisonButton.disabled = true;
+      onRunChanged(null, { stats: runStats(null), activeStep: null });
       return;
     }
     const stats = runStats(run);
@@ -177,6 +179,7 @@ export function createQcWorkspaceController({
         run.plan?.source_type === "workbook_compare" && run.status === "running"
       );
     }
+    onRunChanged(run, { stats, activeStep });
   }
 
   async function saveConnection() {
@@ -196,19 +199,25 @@ export function createQcWorkspaceController({
       await saveConnection();
       const health = await client.health();
       setStatus(`Local service ${health.version} is ready.`, "success");
+      return health;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Local service is unavailable.", "error");
+      return null;
     }
   }
 
-  async function compile() {
-    const file = elements.workbook.files?.[0];
-    const referenceFile = elements.referenceWorkbook?.files?.[0] || null;
+  async function compileWorkbook(file, {
+    referenceFile = null,
+    allowedDomains = null,
+  } = {}) {
     if (!file) {
       setStatus("Choose an .xlsx workbook first.", "error");
-      return;
+      throw new Error("Choose an .xlsx workbook first.");
     }
     try {
+      if (Array.isArray(allowedDomains) && allowedDomains.length) {
+        elements.domains.value = cleanDomains(allowedDomains.join(", ")).join(", ");
+      }
       await saveConnection();
       setStatus("Compiling workbook into a QC run plan…");
       currentRun = await client.compile(
@@ -225,9 +234,17 @@ export function createQcWorkspaceController({
       openEvents(currentRun.run_id);
       renderPlan();
       setStatus(`Draft ${currentRun.run_id} compiled. Review the plan before approval.`, "success");
+      return currentRun;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Workbook compilation failed.", "error");
+      throw error;
     }
+  }
+
+  async function compile() {
+    const file = elements.workbook.files?.[0];
+    const referenceFile = elements.referenceWorkbook?.files?.[0] || null;
+    await compileWorkbook(file, { referenceFile }).catch(() => {});
   }
 
   async function activateRun(run, token = "") {
@@ -340,9 +357,19 @@ export function createQcWorkspaceController({
           scheduled: false,
         });
       }
+      return currentRun;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : `Could not ${action} run.`, "error");
+      return null;
     }
+  }
+
+  function requestRefine() {
+    if (!currentRun) return;
+    onRefineRequested({
+      runId: currentRun.run_id,
+      needsReview: runStats(currentRun).review,
+    });
   }
 
   async function approveCriticalStep() {
@@ -880,13 +907,7 @@ export function createQcWorkspaceController({
   elements.createScheduleButton.addEventListener("click", () => void createSchedule());
   elements.refreshSchedulesButton.addEventListener("click", () => void refreshSchedules());
   elements.refreshBugDraftsButton.addEventListener("click", () => void refreshBugDrafts());
-  elements.refineButton.addEventListener("click", () => {
-    if (!currentRun) return;
-    onRefineRequested({
-      runId: currentRun.run_id,
-      needsReview: runStats(currentRun).review,
-    });
-  });
+  elements.refineButton.addEventListener("click", requestRefine);
   elements.approveButton.addEventListener("click", () => void transition("approve"));
   elements.startButton.addEventListener("click", () => void transition("start"));
   elements.pauseButton.addEventListener("click", () => void transition("pause"));
@@ -903,6 +924,12 @@ export function createQcWorkspaceController({
 
   return {
     initialize,
+    compileWorkbook,
+    testConnection,
+    transitionRun: transition,
+    requestRefine,
+    approveCriticalStep,
+    downloadArtifact: download,
     runTool,
     authorizeBrowserAction,
     recordAgentEvent,

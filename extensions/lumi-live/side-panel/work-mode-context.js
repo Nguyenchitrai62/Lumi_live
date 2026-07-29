@@ -79,7 +79,7 @@ export function createWorkModeTurn({
     ? `LUMI-WORK-${Math.max(0, Number(now) || 0).toString(36).toUpperCase()}-${target.tabId || "TAB"}`
     : "";
   const protectedErpRule = protectedHost
-    ? `\nProtected ERP rule: never modify or delete a pre-existing project. A new project may be created; append this exact marker to its name so ownership can be verified: ${creationMarker}. Only that verified new project may be modified later in this conversation.
+    ? `\nProtected ERP rule: do not reject a requested test-project name merely because it lacks a LUMI_DISCOVERY or LUMI-WORK prefix. When USER REQUEST explicitly names a new test project, create it with that exact name, then capture and verify its visible name and generated project ID before modifying it further in this conversation. Do not modify or delete an unrelated pre-existing project. The internal run marker ${creationMarker} is for traceability only and must not be appended to the user-requested project name.
 HICAS knowledge rule: after the first fresh page observation and whenever the route or module changes, call hicas_get_skill_context before a browser action. Only records returned as verified are fast-path eligible. Observed, partial, unavailable, blocked, or role-unverified knowledge requires live inspection or needs_review.`
     : "";
   return {

@@ -1,0 +1,60 @@
+Tôi cần tạo dự án mới tới đoạn gán Gói công việc
+Hãy thao tác theo các test steps sau trên màn hình  
+
+Tạo dự án
+1. Click button "Tạo dự án"
+2. Click vào trường "Tên dự án" => Nhập "Auto active 2"
+3. Click button "Lưu" 
+Import Sơ đồ khu vực 
+4. Click chọn card dự án có tên "Auto active 2"
+5. Click button "Nhập dữ liệu từ tệp" 
+6. Chọn file sau để import vào: ‪C:\Users\hangdt\Downloads\DATA TEST D1\Sơ đồ khu vực dự án.xlsx
+7. Click button "Xem trước"
+8. Click button "Lưu"
+Import sơ đồ khu vực theo tháp 
+9. Click chọn khối có chữ "Tháp A" => Click button "Nhập dữ liệu từ tệp" 
+10. Chọn file sau để import vào ‪C:\Users\hangdt\Downloads\DATA TEST D1\SDKV_Ho Tay_SRH .xlsx
+11. Click button "Xem trước"
+12. Click button "Lưu" => Click icon <- ở góc trái màn hình (để back về sơ đồ dự án) 
+13. Click chọn khối có chữ "Hầm 1" => Click button "Nhập dữ liệu từ tệp" 
+14. Chọn file sau để import vào ‪C:\Users\hangdt\Downloads\DATA TEST D1\SDKV_Ho Tay_SRH .xlsx
+15. Click trường "Tên trang tính" => Chọn sheet "SH-ham"
+16. Click button "Xem trước"
+17. Click button "Lưu" => Click icon <- ở góc trái màn hình (để back về sơ đồ dự án) 
+18. Click chọn khối có chữ "Tháp B" => Click button "Nhập dữ liệu từ tệp" 
+19. Chọn file sau để import vào ‪C:\Users\hangdt\Downloads\DATA TEST D1\SDKV_Ho Tay_SRH .xlsx
+20. Click trường "Tên trang tính" => Chọn sheet "MH-thap"
+21. Click button "Xem trước"
+22. Click button "Lưu" => Click icon <- ở góc trái màn hình (để back về sơ đồ dự án) 
+23. Click chọn khối có chữ "Tháp C" => Click button "Nhập dữ liệu từ tệp" 
+24. Chọn file sau để import vào ‪C:\Users\hangdt\Downloads\DATA TEST D1\SDKV_Ho Tay_SRH .xlsx
+25. Click trường "Tên trang tính" => Chọn sheet "GP"
+26. Click button "Xem trước"
+27. Click button "Lưu" => Click icon <- ở góc trái màn hình (để back về sơ đồ dự án)
+Gán gói công việc
+28. Click vào dropdown "Quản lý dự án" => Chọn "Gói công việc" (Mở màn Danh sách gói công việc) 
+29. Click button "Gán gói công việc" => Click checkbox chọn hết (Checkbox ở bên cạnh cột 'Trạng thái') 
+30. Chọn trang tiếp theo => Click checkbox chọn hết (Checkbox ở bên cạnh cột 'Trạng thái') 
+31. Click button "Lưu" 
+Gán giai đoạn
+32. Click vào dropdown "Quản lý dự án_Sơ đồ khu vực" => Chọn "Giai đoạn" (Mở màn hình Danh sách giai đoạn) 
+33. Click button "Gán giai đoạn" => Chọn 3 checkbox đầu tiên (Giai đoạn Cơ điện 1, Cơ điện 2, Cơ điện 3) 
+34. Click button "Lưu" 
+Up định mức
+35. Click vào dropdown "Quản lý dự án" => Chọn "Khối lượng định mức" (Mở màn hình Danh sách phiếu khối lượng định mức) 
+36. Click button 'Tạo mới" 
+37. Click button "Nhập dữ liệu từ tệp" 
+38. Chọn file sau để import vào ‪‪‪C:\Users\hangdt\Downloads\DATA TEST D1\Mẫu up định mức.xlsx
+39. Click trường "Tên trang tính" => Chọn sheet "Mẫu up"
+40. Click button "Tiếp theo" 
+41. Click button "Xem trước dữ liệu" 
+42. Click button "Đồng ý nhập liệu" 
+43. Click button "Lưu" 
+43. Click button "Submit" => Click button "Submit" tại poup thông báo 
+44. Click button "Trình duyệt" => Click button "Lưu" 
+45. Click button "Phê duyệt" => Click button "Phê duyệt" tại popup 
+46. Click button "Quay về danh sách" tại popup 
+
+
+
+

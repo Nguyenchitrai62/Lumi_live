@@ -66,7 +66,6 @@ import {
 } from "../live/tool-call-ledger.js";
 import {
   imageFilesFromClipboard,
-  imageFilesFromDrop,
   prepareImageAttachment,
   queuedImageMessagePreview,
 } from "./image-attachments.js";
@@ -259,7 +258,11 @@ let activeTabFrameCapture = null;
 let textSendPending = false;
 let imageAttachmentPending = false;
 let pendingImageAttachment = null;
+let pendingWorkbookAttachment = null;
 let imageDragDepth = 0;
+let qcRunCardElement = null;
+let qcRunCardId = "";
+let qcRunCardNotice = { message: "", tone: "" };
 let shouldMaintainGeminiSession = false;
 let sessionConnectionOptions = null;
 let sessionResumptionHandle = "";
@@ -435,6 +438,12 @@ const qcWorkspace = createQcWorkspaceController({
   getKnowledgeTarget: (url) => hicasSkill.routeMetadata(url),
   onSchedulesChanged: (schedules) => {
     void sendRuntime("qc_schedules_sync", { schedules }).catch(() => {});
+  },
+  onStatus: (message, tone) => {
+    renderQcChatStatus(message, tone);
+  },
+  onRunChanged: (run, detail) => {
+    renderQcRunCard(run, detail);
   },
   onSendBugDraft: async (item) => {
     const draft = item.draft || {};
@@ -662,28 +671,47 @@ function formatImageAttachmentSize(byteSize) {
     : `${Math.max(1, Math.round(size / 1024))} KB`;
 }
 
+function isExcelWorkbookFile(file) {
+  const name = String(file?.name || "").toLowerCase();
+  const type = String(file?.type || "").toLowerCase();
+  return Number(file?.size) > 0 && (
+    name.endsWith(".xlsx")
+    || type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+}
+
 function renderPendingImageAttachment() {
   elements.imageAttachmentTray.replaceChildren();
-  elements.imageAttachmentTray.hidden = !pendingImageAttachment;
-  if (!pendingImageAttachment) return;
+  const pendingAttachment = pendingWorkbookAttachment || pendingImageAttachment;
+  elements.imageAttachmentTray.hidden = !pendingAttachment;
+  if (!pendingAttachment) return;
 
   const card = document.createElement("div");
   card.className = "image-attachment-card";
-  const preview = document.createElement("img");
-  preview.src = pendingImageAttachment.previewDataUrl;
-  preview.alt = `Attached image ${pendingImageAttachment.name}`;
+  let preview;
+  if (pendingAttachment.kind === "workbook") {
+    preview = document.createElement("span");
+    preview.className = "workbook-attachment-mark";
+    preview.textContent = "XLSX";
+  } else {
+    preview = document.createElement("img");
+    preview.src = pendingAttachment.previewDataUrl;
+    preview.alt = `Attached image ${pendingAttachment.name}`;
+  }
   const copy = document.createElement("div");
   copy.className = "image-attachment-copy";
   const name = document.createElement("strong");
-  name.textContent = pendingImageAttachment.name;
+  name.textContent = pendingAttachment.name;
   const details = document.createElement("span");
-  details.textContent = `${pendingImageAttachment.width} × ${pendingImageAttachment.height} · ${formatImageAttachmentSize(pendingImageAttachment.byteSize)}`;
+  details.textContent = pendingAttachment.kind === "workbook"
+    ? `Excel QC workbook · ${formatImageAttachmentSize(pendingAttachment.byteSize)}`
+    : `${pendingAttachment.width} × ${pendingAttachment.height} · ${formatImageAttachmentSize(pendingAttachment.byteSize)}`;
   copy.append(name, details);
   const remove = document.createElement("button");
   remove.className = "image-attachment-remove";
   remove.type = "button";
-  remove.setAttribute("aria-label", "Remove attached image");
-  remove.title = "Remove attached image";
+  remove.setAttribute("aria-label", "Remove attached file");
+  remove.title = "Remove attached file";
   remove.innerHTML = `
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M6 6l12 12M18 6L6 18"></path>
@@ -691,6 +719,7 @@ function renderPendingImageAttachment() {
   `;
   remove.addEventListener("click", () => {
     pendingImageAttachment = null;
+    pendingWorkbookAttachment = null;
     renderPendingImageAttachment();
     syncMessageComposer();
     elements.messageInput.focus();
@@ -701,6 +730,7 @@ function renderPendingImageAttachment() {
 
 function clearPendingImageAttachment() {
   pendingImageAttachment = null;
+  pendingWorkbookAttachment = null;
   elements.imageAttachmentInput.value = "";
   renderPendingImageAttachment();
 }
@@ -718,6 +748,7 @@ async function attachImageFiles(files) {
   elements.statusLine.textContent = "Preparing image attachment…";
   try {
     const attachment = await prepareImageAttachment(file);
+    pendingWorkbookAttachment = null;
     pendingImageAttachment = attachment;
     renderPendingImageAttachment();
     elements.statusLine.textContent = selectedFiles.length > 1
@@ -736,11 +767,45 @@ async function attachImageFiles(files) {
   }
 }
 
+async function attachComposerFiles(files) {
+  const selectedFiles = Array.from(files || []);
+  const file = selectedFiles[0];
+  if (!file) {
+    elements.statusLine.textContent = "Choose an image or an Excel QC workbook.";
+    return false;
+  }
+  if (!isExcelWorkbookFile(file)) return attachImageFiles(selectedFiles);
+  if (imageAttachmentPending) return false;
+  if (file.size > 50 * 1024 * 1024) {
+    elements.statusLine.textContent = "Excel workbooks must be 50 MB or smaller.";
+    return false;
+  }
+  imageAttachmentPending = true;
+  syncMessageComposer();
+  try {
+    pendingImageAttachment = null;
+    pendingWorkbookAttachment = {
+      kind: "workbook",
+      file,
+      name: String(file.name || "QC-workbook.xlsx"),
+      byteSize: Number(file.size) || 0,
+    };
+    renderPendingImageAttachment();
+    elements.statusLine.textContent =
+      `Attached ${pendingWorkbookAttachment.name}. Send it to compile a QC Run Plan in chat.`;
+    return true;
+  } finally {
+    imageAttachmentPending = false;
+    elements.imageAttachmentInput.value = "";
+    syncMessageComposer();
+  }
+}
+
 function syncMessageComposer() {
   const ready = sessionStatus === "ready";
   const transportReady = isGeminiTransportReady();
   const hasText = Boolean(elements.messageInput.value.trim());
-  const hasContent = hasText || Boolean(pendingImageAttachment);
+  const hasContent = hasText || Boolean(pendingImageAttachment || pendingWorkbookAttachment);
   const cancelMode = ready && agentTurnActive && !turnCancellationPending && !hasContent;
   const queueMode = ready
     && (agentTurnActive || turnCancellationPending || !transportReady)
@@ -1254,6 +1319,7 @@ async function restoreConversation(conversationId, { reconnect = true } = {}) {
     if (role === "lumi") renderMarkdown(rendered.content, message.text);
     conversationHistory.push({ role: message.role, text: message.text });
   }
+  if (qcWorkspace?.activeRun) renderQcRunCard(qcWorkspace.activeRun);
   const recentHistory = trimConversationHistory(conversationHistory);
   conversationHistory.splice(0, conversationHistory.length, ...recentHistory);
   activeConversationId = conversation.id;
@@ -1280,6 +1346,7 @@ async function createNewConversation() {
       [HISTORY_ACTIVE_CONVERSATION_STORAGE_KEY]: activeConversationId,
     });
     clearConversationContext();
+    if (qcWorkspace?.activeRun) renderQcRunCard(qcWorkspace.activeRun);
     await renderHistoryList();
     elements.historyDrawer.hidden = true;
     if (sessionStatus === "ready") {
@@ -1570,16 +1637,237 @@ function createMessage(role, text, { attachment = null } = {}) {
   content.textContent = text;
   article.append(author);
   if (role === "user" && attachment) {
-    const image = document.createElement("img");
-    image.className = "message-attachment-preview";
-    image.src = attachment.previewDataUrl;
-    image.alt = attachment.name || "Attached image";
-    article.append(image);
+    if (attachment.kind === "workbook") {
+      const file = document.createElement("div");
+      file.className = "message-workbook-attachment";
+      const mark = document.createElement("span");
+      mark.textContent = "XLSX";
+      const copy = document.createElement("div");
+      const name = document.createElement("strong");
+      name.textContent = attachment.name || "QC workbook.xlsx";
+      const detail = document.createElement("small");
+      detail.textContent = `${formatImageAttachmentSize(attachment.byteSize)} · Excel QC workbook`;
+      copy.append(name, detail);
+      file.append(mark, copy);
+      article.append(file);
+    } else {
+      const image = document.createElement("img");
+      image.className = "message-attachment-preview";
+      image.src = attachment.previewDataUrl;
+      image.alt = attachment.name || "Attached image";
+      article.append(image);
+    }
   }
   article.append(content);
   elements.transcript.append(article);
   scrollTranscriptToLatest();
   return { article, content, role, text, visibleText: text };
+}
+
+function qcStats(run) {
+  const plan = run?.plan || {};
+  return {
+    cases: Number(plan.stats?.test_cases || plan.test_cases?.length || 0),
+    steps: Number(plan.stats?.steps || 0),
+    review: Number(plan.stats?.needs_review || 0),
+    highRisk: Number(plan.stats?.high_risk || 0),
+  };
+}
+
+function qcStatusLabel(status) {
+  return ({
+    draft: "Review required",
+    approved: "Approved",
+    running: "Running",
+    paused: "Paused",
+    completed: "Completed",
+    failed: "Failed",
+    blocked: "Needs attention",
+    cancelled: "Cancelled",
+  })[status] || String(status || "Draft");
+}
+
+function qcActionButton(label, action, { primary = false, danger = false } = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.dataset.qcAction = action;
+  if (primary) button.classList.add("is-primary");
+  if (danger) button.classList.add("is-danger");
+  button.addEventListener("click", () => {
+    void runQcCardAction(action, button);
+  });
+  return button;
+}
+
+async function runQcCardAction(action, button) {
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    if (action === "refine") qcWorkspace.requestRefine();
+    else if (action === "approve") await qcWorkspace.transitionRun("approve");
+    else if (action === "start") await qcWorkspace.transitionRun("start");
+    else if (action === "pause") await qcWorkspace.transitionRun("pause");
+    else if (action === "resume") await qcWorkspace.transitionRun("resume");
+    else if (action === "cancel") await qcWorkspace.transitionRun("cancel");
+    else if (action === "approve_step") await qcWorkspace.approveCriticalStep();
+    else if (action === "download_xlsx") await qcWorkspace.downloadArtifact("xlsx");
+    else if (action === "download_html") await qcWorkspace.downloadArtifact("html");
+    else if (action === "settings") await openSettings();
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderQcChatStatus(message, tone = "") {
+  const clean = String(message || "").trim();
+  if (!clean) return;
+  qcRunCardNotice = { message: clean, tone: String(tone || "") };
+  if (qcWorkspace?.activeRun) {
+    renderQcRunCard(qcWorkspace.activeRun);
+    return;
+  }
+  elements.statusLine.textContent = clean;
+  if (!["error", "warning"].includes(tone)) return;
+  const rendered = createMessage("lumi", `QC: ${clean}`);
+  rendered.article.classList.add("qc-chat-service-message");
+  const settings = qcActionButton("Open QC settings", "settings");
+  rendered.article.append(settings);
+}
+
+function renderQcRunCard(run, detail = {}) {
+  if (!run) {
+    qcRunCardElement?.remove();
+    qcRunCardElement = null;
+    qcRunCardId = "";
+    return;
+  }
+  if (!qcRunCardElement?.isConnected || qcRunCardId !== run.run_id) {
+    qcRunCardElement?.remove();
+    qcRunCardElement = document.createElement("article");
+    qcRunCardElement.className = "message message-lumi qc-chat-card";
+    qcRunCardId = run.run_id;
+    elements.transcript.append(qcRunCardElement);
+  }
+  const card = qcRunCardElement;
+  const priorPlanOpen = card.querySelector(".qc-chat-plan")?.open === true;
+  card.replaceChildren();
+
+  const author = document.createElement("span");
+  author.textContent = "Lumi · QC";
+  const shell = document.createElement("section");
+  shell.className = "qc-chat-shell";
+  shell.dataset.status = run.status || "draft";
+
+  const header = document.createElement("header");
+  const headingCopy = document.createElement("div");
+  const eyebrow = document.createElement("small");
+  eyebrow.textContent = "RUN PLAN";
+  const heading = document.createElement("strong");
+  heading.textContent = run.plan?.title
+    || run.plan?.test_cases?.[0]?.title
+    || `QC run ${String(run.run_id || "").slice(0, 8)}`;
+  headingCopy.append(eyebrow, heading);
+  const status = document.createElement("span");
+  status.className = "qc-chat-status";
+  status.textContent = qcStatusLabel(run.status);
+  header.append(headingCopy, status);
+
+  const stats = detail.stats || qcStats(run);
+  const metrics = document.createElement("div");
+  metrics.className = "qc-chat-metrics";
+  for (const [value, label, tone] of [
+    [stats.cases, "cases", ""],
+    [stats.steps, "steps", ""],
+    [stats.review, "review", stats.review ? "warning" : ""],
+    [stats.highRisk, "high risk", stats.highRisk ? "danger" : ""],
+  ]) {
+    const metric = document.createElement("span");
+    if (tone) metric.dataset.tone = tone;
+    const number = document.createElement("strong");
+    number.textContent = String(value);
+    metric.append(number, document.createTextNode(label));
+    metrics.append(metric);
+  }
+
+  const notice = document.createElement("p");
+  notice.className = "qc-chat-notice";
+  notice.dataset.tone = qcRunCardNotice.tone;
+  notice.textContent = qcRunCardNotice.message
+    || (run.status === "draft"
+      ? "Review the complete plan below before approving any ERP changes."
+      : `Run ${String(run.run_id || "").slice(0, 8)} is ${qcStatusLabel(run.status).toLowerCase()}.`);
+
+  const plan = document.createElement("details");
+  plan.className = "qc-chat-plan";
+  plan.open = priorPlanOpen;
+  const planSummary = document.createElement("summary");
+  planSummary.textContent = `Review full plan · ${stats.steps} step${stats.steps === 1 ? "" : "s"}`;
+  const planBody = document.createElement("div");
+  planBody.className = "qc-chat-plan-body";
+  for (const testCase of run.plan?.test_cases || []) {
+    const testCaseCard = document.createElement("section");
+    const title = document.createElement("strong");
+    title.textContent = `${testCase.id || "Case"} · ${testCase.title || "Untitled test case"}`;
+    const steps = document.createElement("ol");
+    for (const step of testCase.steps || []) {
+      const item = document.createElement("li");
+      item.dataset.status = step.status || "";
+      const action = document.createElement("b");
+      action.textContent = `${step.action || "step"} · ${step.target || step.id || "target"}`;
+      const instruction = document.createElement("span");
+      instruction.textContent = step.instruction || "";
+      const expected = document.createElement("small");
+      expected.textContent = step.expected
+        ? `Expected: ${step.expected}`
+        : "Expected result missing · needs review";
+      item.append(action, instruction, expected);
+      steps.append(item);
+    }
+    testCaseCard.append(title, steps);
+    planBody.append(testCaseCard);
+  }
+  plan.append(planSummary, planBody);
+
+  const actions = document.createElement("footer");
+  actions.className = "qc-chat-actions";
+  if (run.status === "draft" && stats.review > 0) {
+    actions.append(qcActionButton("Refine with Lumi", "refine", { primary: true }));
+  } else if (run.status === "draft") {
+    actions.append(qcActionButton("Approve plan", "approve", { primary: true }));
+  } else if (run.status === "approved") {
+    actions.append(
+      qcActionButton("Start run", "start", { primary: true }),
+      qcActionButton("Cancel", "cancel", { danger: true }),
+    );
+  } else if (run.status === "running") {
+    actions.append(
+      qcActionButton("Pause", "pause"),
+      qcActionButton("Cancel", "cancel", { danger: true }),
+    );
+  } else if (run.status === "paused") {
+    actions.append(
+      qcActionButton("Resume", "resume", { primary: true }),
+      qcActionButton("Cancel", "cancel", { danger: true }),
+    );
+  }
+  const activeStep = detail.activeStep || qcWorkspace?.activeStep;
+  if (
+    activeStep?.risk === "high"
+    && ["running", "paused"].includes(run.status)
+  ) {
+    actions.prepend(qcActionButton("Approve high-risk step", "approve_step", { primary: true }));
+  }
+  if (["completed", "failed"].includes(run.status)) {
+    actions.append(
+      qcActionButton("Executed Excel", "download_xlsx"),
+      qcActionButton("HTML report", "download_html"),
+    );
+  }
+  actions.append(qcActionButton("QC settings", "settings"));
+  shell.append(header, metrics, notice, plan, actions);
+  card.append(author, shell);
+  scrollTranscriptToLatest({ smooth: true });
 }
 
 function createCapturedTabMessage(capture) {
@@ -2208,6 +2496,7 @@ function agentStepEnvelope(actionName, actionResult, orchestrationResult) {
   const reasonGuidance = {
     loop_detected: "The repeated action was not executed. Use a distinct safe tactic or call done with a concrete blocker.",
     max_steps: "The controller exhausted the step budget and recorded a failed completion.",
+    budget_available: "The controller rejected step-budget exhaustion as a blocker. Preserve milestone memory and continue the unfinished original request.",
     observation_required: "Observe current browser state first, then retry the action using only fresh indices or tab data.",
     verification_required: "Run one browser observation or targeted wait now. Do not repeat the action or call done until fresh evidence is available.",
     premature_done: "Complete at least one concrete task step and collect evidence before reporting success.",
@@ -2479,6 +2768,7 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
           const constraintMessages = {
             loop_detected: "Repeated action blocked against an unchanged observation fingerprint.",
             max_steps: "The task step budget is exhausted.",
+            budget_available: "Step budget remains available; continue the unfinished workflow.",
             observation_required: "A fresh browser observation is required before this action.",
             verification_required: "The previous browser action needs a fresh verification observation.",
             premature_done: "Structured completion was requested before any task step completed.",
@@ -3241,6 +3531,51 @@ async function toggleMute() {
   avatarController.syncState();
 }
 
+async function submitWorkbookQc(text, attachment) {
+  if (!attachment?.file || textSendPending) return false;
+  if (agentTurnActive || turnCancellationPending) {
+    elements.statusLine.textContent =
+      "Finish or stop the current Lumi action before compiling another QC workbook.";
+    return false;
+  }
+  if (["approved", "running", "paused"].includes(qcWorkspace.activeRun?.status)) {
+    elements.statusLine.textContent =
+      "Finish or cancel the active QC run before compiling another workbook.";
+    return false;
+  }
+  const prompt = String(text || "").trim();
+  const displayText = prompt || `Create a QC Run Plan from ${attachment.name}`;
+  textSendPending = true;
+  syncMessageComposer();
+  createMessage("user", displayText, { attachment });
+  rememberConversationTurn(
+    "user",
+    `${displayText} [Attached workbook: ${attachment.name}]`,
+  );
+  elements.messageInput.value = "";
+  clearPendingImageAttachment();
+  resizeMessageInput();
+  elements.statusLine.textContent = "Compiling the Excel workbook into a QC Run Plan…";
+  try {
+    const run = await qcWorkspace.compileWorkbook(attachment.file);
+    void persistHistoryMessage(
+      "system",
+      `QC Run Plan ${run.run_id} compiled from ${attachment.name}.`,
+      { kind: "task_summary", runId: run.run_id },
+    );
+    elements.statusLine.textContent =
+      "Run Plan ready in chat. Review every step, then approve it here.";
+    return true;
+  } catch {
+    elements.statusLine.textContent =
+      "Could not compile this workbook. Open QC settings to check the local service.";
+    return false;
+  } finally {
+    textSendPending = false;
+    syncMessageComposer();
+  }
+}
+
 async function sendText(
   text,
   {
@@ -3528,7 +3863,7 @@ elements.imageAttachmentButton.addEventListener("click", () => {
   if (!imageAttachmentPending && !textSendPending) elements.imageAttachmentInput.click();
 });
 elements.imageAttachmentInput.addEventListener("change", () => {
-  void attachImageFiles(elements.imageAttachmentInput.files);
+  void attachComposerFiles(elements.imageAttachmentInput.files);
 });
 elements.messageInput.addEventListener("paste", (event) => {
   const files = imageFilesFromClipboard(event.clipboardData);
@@ -3558,7 +3893,7 @@ elements.messageForm.addEventListener("drop", (event) => {
   event.preventDefault();
   imageDragDepth = 0;
   elements.messageForm.classList.remove("is-image-dragging");
-  void attachImageFiles(imageFilesFromDrop(event.dataTransfer));
+  void attachComposerFiles(event.dataTransfer?.files);
 });
 elements.messageInput.addEventListener("input", () => {
   resizeMessageInput();
@@ -3572,6 +3907,11 @@ elements.messageInput.addEventListener("keydown", (event) => {
 elements.messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const message = elements.messageInput.value.trim();
+  const workbook = pendingWorkbookAttachment;
+  if (workbook) {
+    void submitWorkbookQc(message, workbook);
+    return;
+  }
   const attachment = pendingImageAttachment;
   const hasContent = Boolean(message || attachment);
   if (hasContent && (!isGeminiTransportReady() || agentTurnActive || turnCancellationPending)) {

@@ -86,6 +86,16 @@ input:focus, select:focus { border-color: #9782d7; box-shadow: 0 0 0 3px rgba(11
 .note[data-state="saved"] { color: var(--mint); }
 .note[data-state="error"] { color: var(--danger); }
 .mcp-card { grid-column: 1 / -1; min-width: 0; min-height: 390px; padding: 28px; background: linear-gradient(145deg, rgba(255,255,255,.94), rgba(244,241,252,.86)); }
+.qc-settings-card { grid-column: 1 / -1; padding: 28px; background: linear-gradient(145deg, rgba(255,255,255,.96), rgba(235,249,245,.82)); }
+.qc-settings-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin-top: 20px; }
+.qc-settings-fields .connection-field { padding: 14px; }
+.qc-settings-fields .connection-field > label { margin-top: 0; }
+.qc-discovery-setting { display: flex; align-items: center; }
+.qc-discovery-setting .setting-row { width: 100%; }
+.qc-discovery-setting .setting-row h2 { margin: 0 0 5px; font-size: 15px; }
+.qc-settings-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 16px; }
+.qc-settings-actions .primary { width: auto; min-width: 150px; margin: 0; }
+.qc-settings-actions .secondary { min-width: 120px; }
 .mcp-overview-view { min-width: 0; }
 .mcp-tools-view { position: fixed; z-index: 50; inset: 0; min-width: 0; overflow-x: hidden; overflow-y: auto; color: var(--ink); background: radial-gradient(circle at 90% 0%, rgba(132, 105, 210, .22), transparent 34%), radial-gradient(circle at 0% 100%, rgba(92, 170, 191, .16), transparent 34%), #f3f2fa; opacity: 0; pointer-events: none; transform: translateX(100%); transition: opacity .24s ease, transform .36s cubic-bezier(.22,.8,.28,1); scrollbar-width: thin; }
 body.is-mcp-tools-view .mcp-tools-view { opacity: 1; pointer-events: auto; transform: translateX(0); }
@@ -235,11 +245,16 @@ body.is-mcp-connector-modal-open { overflow: hidden; }
   .mcp-tools-view { background: radial-gradient(circle at 90% 0%, rgba(132, 105, 210, .23), transparent 34%), #1d1927; }
   .connection-card { background: linear-gradient(145deg, rgba(57, 47, 75, .96), rgba(45, 37, 61, .9)); }
   .connection-field { border-color: rgba(205, 190, 236, .14); background: rgba(28, 23, 39, .3); }
+  .qc-settings-card { background: linear-gradient(145deg, rgba(51, 48, 70, .96), rgba(35, 49, 55, .92)); }
   .mcp-card { background: linear-gradient(145deg, rgba(53, 44, 70, .95), rgba(40, 33, 54, .9)); }
   .toggle-switch > span[aria-hidden="true"] { background: #51475f; }
 }
 
 @media (max-width: 720px) {
+  .qc-settings-fields { grid-template-columns: 1fr; }
+  .qc-settings-actions { align-items: stretch; flex-direction: column; }
+  .qc-settings-actions .primary,
+  .qc-settings-actions .secondary { width: 100%; }
   .settings-shell { width: min(100% - 20px, 560px); padding-top: 22px; }
   .settings-head { align-items: flex-start; flex-direction: column; }
   .settings-head > p { text-align: left; }

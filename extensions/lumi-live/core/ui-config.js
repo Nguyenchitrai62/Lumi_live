@@ -19,6 +19,12 @@ export const DEFAULT_SHOW_ELEMENT_HIGHLIGHTS = false;
 // Lumi Task orchestration
 // Maximum number of non-done actions allowed in one Lumi Task.
 export const DEFAULT_AGENT_MAX_STEPS = 24;
+// Extend a long task only when recent actions show distinct, completed progress.
+// Three bounded extensions let dependency-heavy ERP workflows continue while
+// preserving a hard controller cap and the repeated-state loop guard.
+export const DEFAULT_AGENT_STEP_BUDGET_EXTENSION_SIZE = 24;
+export const DEFAULT_AGENT_STEP_BUDGET_EXTENSION_LIMIT = 3;
+export const DEFAULT_AGENT_STEP_BUDGET_EXTENSION_THRESHOLD = 5;
 // Block an identical action after this many executions against the same observation.
 export const DEFAULT_IDENTICAL_STATE_ACTION_LIMIT = 2;
 // Number of controller prompts allowed when Gemini ends a turn without structured done.

@@ -1,7 +1,16 @@
 export const MAX_BROWSER_UPLOAD_FILES = 20;
 
+// Paths copied from Windows Explorer or pasted out of a document often carry
+// invisible bidi/zero-width marks. String.trim() does not remove them, so the
+// drive-letter check below would reject an otherwise valid path.
+const INVISIBLE_MARK_PATTERN = /[​-‏‪-‮⁦-⁩﻿]/g;
+
+export function cleanLocalFilePath(value) {
+  return String(value || "").replace(INVISIBLE_MARK_PATTERN, "").trim();
+}
+
 export function isAbsoluteLocalFilePath(value) {
-  const path = String(value || "").trim();
+  const path = cleanLocalFilePath(value);
   if (!path || path.includes("\0")) return false;
   return (
     /^[a-zA-Z]:[\\/]/.test(path)
@@ -13,7 +22,7 @@ export function isAbsoluteLocalFilePath(value) {
 export function normalizeUploadFilePaths(value) {
   const requestedPaths = Array.isArray(value) ? value : [value];
   const filePaths = requestedPaths
-    .map((path) => String(path || "").trim())
+    .map((path) => cleanLocalFilePath(path))
     .filter(Boolean);
 
   if (!filePaths.length) {

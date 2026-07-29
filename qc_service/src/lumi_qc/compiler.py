@@ -97,6 +97,10 @@ def normalize_text(value: Any) -> str:
 
 def normalize_header(value: Any) -> str:
     text = normalize_text(value).lower()
+    # U+0111 has no Unicode decomposition, so NFKD leaves it and the ASCII
+    # filter below would delete it: "đăng nhập" -> "ang nhap". Map it first so
+    # Vietnamese keywords such as "dang nhap" and "dieu kien" still match.
+    text = text.replace("đ", "d")
     text = "".join(
         character
         for character in unicodedata.normalize("NFKD", text)
@@ -176,7 +180,7 @@ def sha256_file(path: Path) -> str:
 def split_instructions(instruction: str) -> list[str]:
     parts = [
         part.strip()
-        for part in re.split(r"\s*(?:→|--?>)\s*", instruction)
+        for part in re.split(r"\s*(?:→|=+>|-{1,2}>)\s*", instruction)
         if part.strip()
     ]
     return parts or [instruction]
