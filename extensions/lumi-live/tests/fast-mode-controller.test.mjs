@@ -56,7 +56,7 @@ test("keeps the user-triggered Fast engagement effect when the storage event arr
 
   const togglePromise = controller.toggle();
   controller.apply(true);
-  resolvePreference({ fastMode: true, workspace: { title: "Lumi Workspace" } });
+  resolvePreference({ fastMode: true, workspace: { title: "⚡ Lumi Fast" } });
   await togglePromise;
 
   assert.equal(controller.enabled, true);

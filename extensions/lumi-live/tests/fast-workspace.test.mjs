@@ -73,7 +73,7 @@ function createChromeFakes({ storedGroupId = null } = {}) {
   return { groups, storage, tabGroupsApi, tabs, tabsApi, storageArea };
 }
 
-test("creates one named purple workspace group and reuses it for more tabs", async () => {
+test("creates one named yellow Fast workspace group and reuses it for more tabs", async () => {
   const fakes = createChromeFakes();
   const workspace = createFastWorkspace({
     tabsApi: fakes.tabsApi,

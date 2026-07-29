@@ -68,8 +68,8 @@ export function createFastModeController({
       });
       apply(preferences.fastMode === true, { animate: preferences.fastMode === true });
       setStatus(enabled
-        ? "Fast execution active · shared context · verified bulk stages · visual delays removed."
-        : "Normal execution active · shared context · verified stages with visual progress.");
+        ? `Fast execution active · ${preferences.workspace?.title || "strict workspace"} · shared context · visual delays removed.`
+        : "Normal execution active · active-tab target · shared context · verified stages with visual progress.");
       return preferences;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error || "Chrome rejected the workspace change.");

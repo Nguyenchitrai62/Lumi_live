@@ -9,7 +9,6 @@ export const STORAGE_KEYS = Object.freeze({
   apiKey: "lumiGeminiApiKey",
   avatarMode: "lumiAvatarMode",
   capturedTabAssets: "lumiCapturedTabAssets",
-  backgroundWorkspace: "lumiBackgroundWorkspace",
   elementHighlights: "lumiShowElementHighlights",
   fastMode: "lumiFastMode",
   fastWorkspaceGroupId: "lumiFastWorkspaceGroupId",

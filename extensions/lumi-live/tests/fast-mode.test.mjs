@@ -49,11 +49,13 @@ test("publishes one state-bound StagePlan contract for Normal and Fast execution
   assert.match(normalInstruction, /Normal execution is enabled at session start/i);
   assert.match(normalInstruction, /same shared full-page context/i);
   assert.match(normalInstruction, /representative page animations/i);
-  assert.match(fastInstruction, /Normal and Fast are execution policies only/i);
-  assert.match(normalInstruction, /Normal and Fast are execution policies only/i);
+  assert.match(fastInstruction, /Normal and Fast always use identical semantic context/i);
+  assert.match(normalInstruction, /Normal and Fast always use identical semantic context/i);
+  assert.match(fastInstruction, /strictly limited to the Lumi Fast tab group/i);
+  assert.match(normalInstruction, /Normal follows the user's active/i);
 });
 
-test("keeps context and verification identical while separating execution and target policies", async () => {
+test("keeps shared context while coupling Fast execution to its strict workspace", async () => {
   const [
     settingsHtml,
     panelHtml,
@@ -87,31 +89,34 @@ test("keeps context and verification identical while separating execution and ta
   ]);
 
   assert.match(settingsHtml, /id="fastModeInput"/);
-  assert.match(settingsHtml, /id="backgroundWorkspaceInput"/);
+  assert.doesNotMatch(settingsHtml, /id="backgroundWorkspaceInput"/);
   assert.match(panelHtml, /id="fastModeButton"/);
   assert.match(panelController, /createFastModeController/);
   assert.match(fastController, /panelAudio\.setVisualAnimationsEnabled\(!enabled\)/);
-  assert.match(fastController, /shared context.+verified bulk stages/i);
+  assert.match(fastController, /Fast execution active.+shared context/i);
 
-  assert.match(worker, /WORKSPACE_ENABLED_STORAGE_KEY/);
-  assert.match(worker, /async function applyFastModeEnabled\(enabled\)/);
-  assert.match(worker, /async function applyWorkspaceEnabled\(enabled/);
+  assert.doesNotMatch(worker, /WORKSPACE_ENABLED_STORAGE_KEY/);
+  assert.match(worker, /async function applyFastModeEnabled\(enabled,/);
+  assert.doesNotMatch(worker, /async function applyWorkspaceEnabled/);
   const executionPolicySource = worker.match(
-    /async function applyFastModeEnabled[\s\S]*?(?=async function applyWorkspaceEnabled)/,
+    /async function applyFastModeEnabled[\s\S]*?(?=async function prepareBrowserPrompt)/,
   )?.[0];
   assert.ok(executionPolicySource);
-  assert.doesNotMatch(executionPolicySource, /addTab|release\(/);
-  assert.match(worker, /message\.command === "set_workspace_enabled"/);
-  assert.match(worker, /targetPolicy: "background_workspace"/);
+  assert.match(executionPolicySource, /activateFastWorkspace/);
+  assert.match(executionPolicySource, /fastWorkspace\.release\(\)/);
+  assert.doesNotMatch(worker, /message\.command === "set_workspace_enabled"/);
+  assert.match(worker, /targetPolicy: "fast_workspace"/);
   assert.match(worker, /restriction: "workspace_tabs_only"/);
+  assert.match(worker, /Fast mode can switch only to tabs already inside the Lumi Fast workspace/);
   assert.match(worker, /PARTIAL_STAGE_TOOLS\.has\(tool\)/);
-  assert.match(workspace, /FAST_WORKSPACE_TITLE = "Lumi Workspace"/);
+  assert.match(workspace, /FAST_WORKSPACE_TITLE = "⚡ Lumi Fast"/);
   assert.match(workspace, /tabsApi\.group/);
   assert.match(workspace, /autoDiscardable: false/);
   assert.ok(JSON.parse(manifest).permissions.includes("tabGroups"));
 
   assert.match(panelController, /await sendRuntime\("prepare_browser_prompt"\)/);
-  assert.match(panelController, /Target policy: Background workspace/);
+  assert.match(panelController, /Target policy: strict Fast workspace/);
+  assert.match(panelController, /Never import or control a tab outside the Lumi Fast group/);
   assert.match(panelController, /Use browser_apply_stage for independent form edits/);
 
   assert.match(pageController, /tool === "browser_apply_stage"/);
