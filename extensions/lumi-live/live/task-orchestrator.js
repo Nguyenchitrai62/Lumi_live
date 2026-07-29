@@ -14,6 +14,7 @@ const VOLATILE_RESULT_KEYS = new Set([
   "completedAt",
   "previewDataUrl",
 ]);
+export const MAX_TASK_REQUEST_ANCHOR_CHARS = 1800;
 
 function cleanText(value, maxLength = 2400) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
@@ -253,13 +254,24 @@ export function createTaskOrchestrator({
       : remainingSteps <= 2 && !done
         ? `Critical: only ${remainingSteps} action step${remainingSteps === 1 ? "" : "s"} remain. Finish or call done with a partial result.`
         : "";
+    const latestStep = [...taskEvents(history, taskId)].reverse().find(
+      (event) => event.type === "step",
+    );
     return {
       taskId,
+      requestAnchor: cleanText(
+        started?.request,
+        MAX_TASK_REQUEST_ANCHOR_CHARS,
+      ),
       status: done ? (done.success ? "completed" : "failed") : "running",
       usedSteps,
       maxSteps: started?.maxSteps || defaultMaxSteps,
       remainingSteps,
       consecutiveFailures,
+      currentGoal: cleanText(latestStep?.reflection?.nextGoal, 500),
+      remainingGoalCount: Array.isArray(latestStep?.reflection?.remainingGoals)
+        ? latestStep.reflection.remainingGoals.length
+        : 0,
       warning,
     };
   };

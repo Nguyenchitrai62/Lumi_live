@@ -76,6 +76,7 @@ import {
   AGENT_DONE_ACTION_NAME,
   AGENT_STEP_TOOL_NAME,
   buildAgentStepDeclaration,
+  classifyAgentAction,
   parseAgentStepCall,
 } from "../live/agent-protocol.js";
 import { createTaskOrchestrator } from "../live/task-orchestrator.js";
@@ -94,6 +95,7 @@ import {
   normalizeLocalChatHistoryState,
 } from "./local-chat-history.js";
 import { createLocalChatSnapshotStore } from "./local-chat-snapshots.js";
+import { boundAgentObservationForModel } from "./agent-context-budget.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
@@ -2162,6 +2164,8 @@ function ensureActiveAgentTask() {
 
 function agentStepEnvelope(actionName, actionResult, orchestrationResult) {
   const checkpoint = orchestrationResult?.checkpoint || null;
+  const actionKind = orchestrationResult?.step?.action?.kind
+    || classifyAgentAction(actionName);
   const reasonGuidance = {
     loop_detected: "The repeated action was not executed. Use a distinct safe tactic or call done with a concrete blocker.",
     max_steps: "The controller exhausted the step budget and recorded a failed completion.",
@@ -2179,7 +2183,10 @@ function agentStepEnvelope(actionName, actionResult, orchestrationResult) {
         ?? orchestrationResult?.retryAttempt
         ?? 0,
     },
-    observation: actionResult,
+    observation: boundAgentObservationForModel(actionResult, {
+      actionKind,
+      actionName,
+    }),
     controllerGuidance: checkpoint?.warning
       || reasonGuidance[orchestrationResult?.reason]
       || "Evaluate this observation, update durable memory, and continue with exactly one next action or done.",
@@ -2516,7 +2523,6 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
         if (isBrowserTool) {
           result = addBrowserWorkflowContext(result, {
             toolName: actionName,
-            userRequest: activeTurnUserRequest,
           });
         }
         if (isBrowserTool || isLiveTranslationTool) {
@@ -2582,7 +2588,6 @@ async function handleServerMessage(event, sourceSocket, sessionThinkingLevel) {
         const failure = isBrowserTool
           ? addBrowserWorkflowContext(buildBrowserToolFailureResponse(error), {
               toolName: actionName,
-              userRequest: activeTurnUserRequest,
             })
           : { error: detail };
         const failed = orchestration?.accepted

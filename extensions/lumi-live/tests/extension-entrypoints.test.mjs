@@ -260,6 +260,8 @@ test("captures visual context only when the agent requests it and renders rich c
   assert.match(controller, /inspectScreenshot:\s*captureAndSendVisualInspectionFrame/);
   assert.match(browserToolRunner, /tool === "browser_inspect_screenshot"[^]*await inspectScreenshot\(\)/);
   assert.match(controller, /addBrowserWorkflowContext\(result/);
+  assert.match(controller, /boundAgentObservationForModel\(actionResult/);
+  assert.match(controller, /classifyAgentAction\(actionName\)/);
   assert.match(controller, /activeTurnUserRequest = userRequestText/);
   assert.doesNotMatch(controller, /AUTOMATIC_TAB_CAPTURE_ORIGINS|screenshotAccessRequest/);
   assert.doesNotMatch(controller, /chrome\.permissions\.(?:request|contains)\(\{\s*origins:/);

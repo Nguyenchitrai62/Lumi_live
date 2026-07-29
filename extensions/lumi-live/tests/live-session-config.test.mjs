@@ -11,6 +11,8 @@ import {
   buildSessionInstruction,
   configureMcpTools,
   DEFAULT_THINKING_LEVEL,
+  MAX_INITIAL_HISTORY_CHARS,
+  MAX_INITIAL_HISTORY_TURNS,
   normalizeThinkingLevel,
   shouldRefreshLiveContext,
   THINKING_LEVELS,
@@ -18,6 +20,8 @@ import {
 } from "../live/session-config.js";
 
 test("builds bounded initial history without triggering a model turn", () => {
+  assert.equal(MAX_INITIAL_HISTORY_TURNS, 6);
+  assert.equal(MAX_INITIAL_HISTORY_CHARS, 6000);
   assert.deepEqual(buildInitialHistoryClientContent([
     { role: "user", text: "  Xin   chào  " },
     { role: "model", text: "Chào bạn" },
@@ -83,6 +87,10 @@ test("uses resumable sockets without server-side context compression", () => {
   assert.deepEqual(buildSessionHandshakeConfig(" resume-handle "), {
     sessionResumption: { handle: "resume-handle" },
   });
+  assert.equal(
+    Object.hasOwn(buildSessionHandshakeConfig(), "contextWindowCompression"),
+    false,
+  );
   assert.deepEqual(
     [1, 2, 3, 4, 5, 8].map(automaticSessionReconnectDelayMs),
     [250, 500, 1000, 2000, 4000, 8000],

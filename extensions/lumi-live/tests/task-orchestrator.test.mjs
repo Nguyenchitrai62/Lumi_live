@@ -44,6 +44,9 @@ test("uses historical events as the task source of truth", () => {
   });
   assert.equal(finished.step.action.status, "completed");
   assert.equal(finished.step.action.durationMs, 19);
+  assert.equal(finished.checkpoint.requestAnchor, "Open the result and verify it.");
+  assert.equal(finished.checkpoint.currentGoal, reflection.nextGoal);
+  assert.equal(finished.checkpoint.remainingGoalCount, 0);
 
   const doneStep = orchestrator.beginStep({
     taskId,
