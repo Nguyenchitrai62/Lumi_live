@@ -95,7 +95,7 @@ export function buildAgentStepDeclaration(actionDeclarations = []) {
         previousGoalStatus: {
           type: "STRING",
           enum: PREVIOUS_GOAL_STATUSES,
-          description: "Evidence verdict for the previous goal: not_applicable only on the first step, otherwise success, failure, or uncertain.",
+          description: "Optional machine-readable evidence verdict for the previous goal: not_applicable only on the first step, otherwise success, failure, or uncertain.",
         },
         memory: {
           type: "STRING",
@@ -109,7 +109,7 @@ export function buildAgentStepDeclaration(actionDeclarations = []) {
           type: "ARRAY",
           maxItems: MAX_REMAINING_GOALS,
           items: { type: "STRING" },
-          description: "Ordered unfinished outcomes from the original request after accounting for observed evidence. Keep each item concise. Use [] only when every requested outcome is verified.",
+          description: "Optional ordered unfinished-outcome ledger for multi-goal requests. Keep each item concise and use [] only when every requested outcome is verified.",
         },
         actionName: {
           type: "STRING",
@@ -123,10 +123,8 @@ export function buildAgentStepDeclaration(actionDeclarations = []) {
       },
       required: [
         "evaluationPreviousGoal",
-        "previousGoalStatus",
         "memory",
         "nextGoal",
-        "remainingGoals",
         "actionName",
         "actionArgumentsJson",
       ],
@@ -139,17 +137,15 @@ export function buildAgentProtocolInstruction(actionDeclarations = []) {
 
 For ordinary conversation that needs no tool, answer normally. Once a request needs any browser, Live Translate, or MCP action, use only ${AGENT_STEP_TOOL_NAME}. Never try to call an underlying action directly.
 
-Each ${AGENT_STEP_TOOL_NAME} call is exactly one reflection-before-action step and must contain:
+Each ${AGENT_STEP_TOOL_NAME} call remains exactly one reflection-before-action step and must contain:
 1. evaluationPreviousGoal: evidence-based evaluation of the previous action;
-2. previousGoalStatus: not_applicable on the first step, then success, failure, or uncertain;
-3. memory: short durable facts and exact identifiers only;
-4. nextGoal: one immediate goal;
-5. remainingGoals: the ordered unfinished outcomes from the original request;
-6. exactly one actionName and one JSON object in actionArgumentsJson.
+2. memory: short durable facts and exact identifiers only;
+3. nextGoal: one immediate goal;
+4. exactly one actionName and one JSON object in actionArgumentsJson.
 
-Build remainingGoals from every explicit outcome in the complete original request. Preserve their order and never silently drop an item because an intermediate action succeeded. Remove an item only after a tool result or fresh browser observation proves that outcome. Do not emit parallel step calls. After every action result, evaluate it before choosing the next action. Browser actions normally include controllerVerification from an automatic fresh post-action page read. When it is available and conclusive, use that evidence immediately and do not spend another step on a redundant observation. When it is unavailable or conclusive=false, the next step must be browser_get_page_state, browser_find_semantic_context, or browser_wait_for_page_state before another browser action or successful done. Change tactics when the controller reports a retry or repeated-state fingerprint. When the checkpoint reports repeated failures or a stall, rebuild the approach from remainingGoals instead of retrying the same interaction path. Respect remainingSteps warnings. Do not narrate intermediate progress unless the user needs to make a decision.
+For a request with multiple explicit outcomes, supplement the existing reflection with previousGoalStatus and remainingGoals. Preserve the ledger order and never silently drop an item because an intermediate action succeeded. Remove an item only after a tool result or fresh browser observation proves that outcome. These fields add planning detail without replacing the original evaluationPreviousGoal, memory, nextGoal, or action contract. Do not emit parallel step calls. After every action result, evaluate it before choosing the next action. Browser actions normally include controllerVerification from an automatic fresh post-action page read. When it is available and conclusive, use that evidence immediately and do not spend another step on a redundant observation. When it is unavailable or conclusive=false, the next step must be browser_get_page_state, browser_find_semantic_context, or browser_wait_for_page_state before another browser action or successful done. Change tactics when the controller reports a retry or repeated-state fingerprint. When the checkpoint reports repeated failures or a stall, rebuild the approach from the original request and any available remainingGoals instead of retrying the same interaction path. Respect remainingSteps warnings. Do not narrate intermediate progress unless the user needs to make a decision.
 
-Completion is a strict contract: every tool task must end with another ${AGENT_STEP_TOOL_NAME} call whose actionName is done. A successful done requires remainingGoals=[] and JSON {"success":true,"result":"concise final result","evidence":"observed proof","completedGoals":[{"goal":"one requested outcome","evidence":"fresh observation proving it"}]}. For a concrete blocker or partial result use success=false and retain the unfinished outcomes in remainingGoals. Never substitute a plain-text final answer for done. Never call done immediately after an unverified browser action. After done is recorded, give the user one concise final response and take no more actions.
+Completion keeps the existing strict contract: every tool task must end with another ${AGENT_STEP_TOOL_NAME} call whose actionName is done. For success use JSON {"success":true,"result":"concise final result","evidence":"observed proof","completedGoals":[{"goal":"one requested outcome","evidence":"fresh observation proving it"}]}. When remainingGoals is present, successful done requires it to be empty. For a concrete blocker or partial result use success=false and retain any unfinished outcomes in remainingGoals. Never substitute a plain-text final answer for done. Never call done immediately after an unverified browser action. After done is recorded, give the user one concise final response and take no more actions.
 
 AVAILABLE ACTIONS
 ${buildAgentActionCatalog(actionDeclarations)}`;
@@ -370,13 +366,6 @@ export function parseAgentStepCall(functionCall, availableActions = []) {
     nextGoal: requireShortText(input.nextGoal, "nextGoal"),
     remainingGoals: normalizeRemainingGoals(input.remainingGoals),
   };
-  if (
-    actionName === AGENT_DONE_ACTION_NAME
-    && actionArguments.success === true
-    && !Array.isArray(input.remainingGoals)
-  ) {
-    throw new Error("done success=true requires an explicit remainingGoals=[] ledger.");
-  }
   if (
     actionName === AGENT_DONE_ACTION_NAME
     && actionArguments.success === true

@@ -42,10 +42,8 @@ test("exposes one macro tool with reflection, one action, and done", () => {
   );
   assert.deepEqual(declaration.parameters.required, [
     "evaluationPreviousGoal",
-    "previousGoalStatus",
     "memory",
     "nextGoal",
-    "remainingGoals",
     "actionName",
     "actionArgumentsJson",
   ]);
@@ -63,8 +61,8 @@ test("builds a compact action catalog and strict completion contract", () => {
   assert.match(catalog, /done \{success:boolean, result:string/);
   const instruction = buildAgentProtocolInstruction(actions);
   assert.match(instruction, /reflection-before-action/i);
-  assert.match(instruction, /ordered unfinished outcomes/i);
-  assert.match(instruction, /rebuild the approach from remainingGoals/i);
+  assert.match(instruction, /supplement the existing reflection/i);
+  assert.match(instruction, /original request and any available remainingGoals/i);
   assert.match(instruction, /Never substitute a plain-text final answer for done/i);
   assert.match(instruction, /Do not emit parallel step calls/i);
 });
@@ -173,13 +171,13 @@ test("requires a typed done payload", () => {
       evaluationPreviousGoal: "The requested page change is visible.",
       memory: "All checklist items are complete.",
       nextGoal: "Finish.",
-      remainingGoals: [],
       actionName: "done",
       actionArgumentsJson: '{"success":true,"result":"Finished","evidence":"Visible success state","completedGoals":[{"goal":"Finish the requested change","evidence":"Visible success state"}]}',
     },
   }, actions.map((action) => action.name));
   assert.equal(done.action.input.success, true);
   assert.equal(done.action.input.completedGoals.length, 1);
+  assert.deepEqual(done.reflection.remainingGoals, []);
   assert.throws(
     () => parseAgentStepCall({
       name: AGENT_STEP_TOOL_NAME,
