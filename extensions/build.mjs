@@ -33,6 +33,15 @@ const pageControllerSameOriginIframePlugin = {
   },
 };
 
+const pageControllerCssMotionPlugin = {
+  name: "page-controller-css-motion",
+  setup(buildContext) {
+    buildContext.onResolve({ filter: /^ai-motion$/ }, () => ({
+      path: path.join(extensionRoot, "browser", "css-motion.js"),
+    }));
+  },
+};
+
 await rm(avatarDirectory, { recursive: true, force: true });
 
 await Promise.all([
@@ -75,7 +84,10 @@ await build({
   format: "iife",
   platform: "browser",
   target: ["chrome120"],
-  plugins: [pageControllerSameOriginIframePlugin],
+  plugins: [
+    pageControllerSameOriginIframePlugin,
+    pageControllerCssMotionPlugin,
+  ],
   sourcemap: false,
   minify: false,
   legalComments: "inline",

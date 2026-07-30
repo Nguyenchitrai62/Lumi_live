@@ -74,6 +74,25 @@ test("every local import reachable from a Chrome runtime entrypoint resolves", a
   assert.ok(graphs.every((graph) => graph.size > 0));
 });
 
+test("PageAgent mask does not consume the host page WebGL context quota", async () => {
+  const build = await readFile(new URL("../../build.mjs", import.meta.url), "utf8");
+  const cssMotion = await readFile(
+    new URL("../browser/css-motion.js", import.meta.url),
+    "utf8",
+  );
+  const controllerBundle = await readFile(
+    new URL("../dist/controller.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(build, /page-controller-css-motion/);
+  assert.match(build, /filter:\s*\/\^ai-motion\$\/[\s\S]+browser", "css-motion\.js"/);
+  assert.match(cssMotion, /export class Motion/);
+  assert.doesNotMatch(cssMotion, /getContext|webgl2|WEBGL_lose_context/);
+  assert.match(controllerBundle, /data-lumi-css-motion/);
+  assert.doesNotMatch(controllerBundle, /getContext\("webgl2"/);
+});
+
 test("side panel exposes an upward thinking picker and sends it in Gemini Live setup", async () => {
   const html = await readFile(new URL("side-panel/index.html", extensionRoot), "utf8");
   const styles = await readFile(new URL("side-panel/styles.css", extensionRoot), "utf8");

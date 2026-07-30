@@ -11,623 +11,82 @@
       __defProp(target, name, { get: all[name], enumerable: true });
   };
 
-  // node_modules/ai-motion/build/Motion.js
-  function computeBorderGeometry(pixelWidth, pixelHeight, borderWidth, glowWidth) {
-    const shortSide = Math.max(1, Math.min(pixelWidth, pixelHeight));
-    const borderWidthPx = Math.min(borderWidth, 20);
-    const glowWidthPx = glowWidth;
-    const totalThick = Math.min(borderWidthPx + glowWidthPx, shortSide);
-    const insetX = Math.min(totalThick, Math.floor(pixelWidth / 2));
-    const insetY = Math.min(totalThick, Math.floor(pixelHeight / 2));
-    const toClipX = (x) => x / pixelWidth * 2 - 1;
-    const toClipY = (y) => y / pixelHeight * 2 - 1;
-    const x0 = 0;
-    const x1 = pixelWidth;
-    const y0 = 0;
-    const y1 = pixelHeight;
-    const xi0 = insetX;
-    const xi1 = pixelWidth - insetX;
-    const yi0 = insetY;
-    const yi1 = pixelHeight - insetY;
-    const X0 = toClipX(x0);
-    const X1 = toClipX(x1);
-    const Y0 = toClipY(y0);
-    const Y1 = toClipY(y1);
-    const Xi0 = toClipX(xi0);
-    const Xi1 = toClipX(xi1);
-    const Yi0 = toClipY(yi0);
-    const Yi1 = toClipY(yi1);
-    const u0 = 0;
-    const v0 = 0;
-    const u1 = 1;
-    const v1 = 1;
-    const ui0 = insetX / pixelWidth;
-    const ui1 = 1 - insetX / pixelWidth;
-    const vi0 = insetY / pixelHeight;
-    const vi1 = 1 - insetY / pixelHeight;
-    const positions = new Float32Array([
-      // Top strip
-      X0,
-      Y0,
-      X1,
-      Y0,
-      X0,
-      Yi0,
-      X0,
-      Yi0,
-      X1,
-      Y0,
-      X1,
-      Yi0,
-      // Bottom strip
-      X0,
-      Yi1,
-      X1,
-      Yi1,
-      X0,
-      Y1,
-      X0,
-      Y1,
-      X1,
-      Yi1,
-      X1,
-      Y1,
-      // Left strip
-      X0,
-      Yi0,
-      Xi0,
-      Yi0,
-      X0,
-      Yi1,
-      X0,
-      Yi1,
-      Xi0,
-      Yi0,
-      Xi0,
-      Yi1,
-      // Right strip
-      Xi1,
-      Yi0,
-      X1,
-      Yi0,
-      Xi1,
-      Yi1,
-      Xi1,
-      Yi1,
-      X1,
-      Yi0,
-      X1,
-      Yi1
-    ]);
-    const uvs = new Float32Array([
-      // Top strip
-      u0,
-      v0,
-      u1,
-      v0,
-      u0,
-      vi0,
-      u0,
-      vi0,
-      u1,
-      v0,
-      u1,
-      vi0,
-      // Bottom strip
-      u0,
-      vi1,
-      u1,
-      vi1,
-      u0,
-      v1,
-      u0,
-      v1,
-      u1,
-      vi1,
-      u1,
-      v1,
-      // Left strip
-      u0,
-      vi0,
-      ui0,
-      vi0,
-      u0,
-      vi1,
-      u0,
-      vi1,
-      ui0,
-      vi0,
-      ui0,
-      vi1,
-      // Right strip
-      ui1,
-      vi0,
-      u1,
-      vi0,
-      ui1,
-      vi1,
-      ui1,
-      vi1,
-      u1,
-      vi0,
-      u1,
-      vi1
-    ]);
-    return { positions, uvs };
+  // extensions/lumi-live/browser/css-motion.js
+  function finishedAnimation(animation) {
+    return animation.finished.catch(() => void 0);
   }
-  function compileShader(gl, type, source) {
-    const shader = gl.createShader(type);
-    if (!shader) throw new Error("Failed to create shader");
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      const info = gl.getShaderInfoLog(shader) || "Unknown shader error";
-      gl.deleteShader(shader);
-      throw new Error(info);
-    }
-    return shader;
-  }
-  function createProgram(gl, vertexSource, fragmentSource) {
-    const vs = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
-    const fs = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
-    const program = gl.createProgram();
-    if (!program) throw new Error("Failed to create program");
-    gl.attachShader(program, vs);
-    gl.attachShader(program, fs);
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      const info = gl.getProgramInfoLog(program) || "Unknown link error";
-      gl.deleteProgram(program);
-      gl.deleteShader(vs);
-      gl.deleteShader(fs);
-      throw new Error(info);
-    }
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    return program;
-  }
-  function parseColor(colorStr) {
-    const match = colorStr.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-    if (!match) {
-      throw new Error(`Invalid color format: ${colorStr}`);
-    }
-    const [, r, g, b] = match;
-    return [parseInt(r) / 255, parseInt(g) / 255, parseInt(b) / 255];
-  }
-  var fragmentShaderSource, vertexShaderSource, DEFAULT_COLORS, Motion;
-  var init_Motion = __esm({
-    "node_modules/ai-motion/build/Motion.js"() {
-      /**
-       * AI Motion - WebGL2 animated border with AI-style glow effects
-       *
-       * @author Simon<gaomeng1900@gmail.com>
-       * @license MIT
-       * @repository https://github.com/gaomeng1900/ai-motion
-       */
-      /**
-       * AI Motion - WebGL2 animated border with AI-style glow effects
-       *
-       * @author Simon<gaomeng1900@gmail.com>
-       * @license MIT
-       * @repository https://github.com/gaomeng1900/ai-motion
-       */
-      fragmentShaderSource = `#version 300 es
-precision lowp float;
-in vec2 vUV;
-out vec4 outColor;
-uniform vec2 uResolution;
-uniform float uTime;
-uniform float uBorderWidth;
-uniform float uGlowWidth;
-uniform float uBorderRadius;
-uniform vec3 uColors[4];
-uniform float uGlowExponent;
-uniform float uGlowFactor;
-const float PI = 3.14159265359;
-const float TWO_PI = 2.0 * PI;
-const float HALF_PI = 0.5 * PI;
-const vec4 startPositions = vec4(0.0, PI, HALF_PI, 1.5 * PI);
-const vec4 speeds = vec4(-1.9, -1.9, -1.5, 2.1);
-const vec4 innerRadius = vec4(PI * 0.8, PI * 0.7, PI * 0.3, PI * 0.1);
-const vec4 outerRadius = vec4(PI * 1.2, PI * 0.9, PI * 0.6, PI * 0.4);
-float random(vec2 st) {
-return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123);
-}
-vec2 random2(vec2 st) {
-return vec2(random(st), random(st + 1.0));
-}
-float aaStep(float edge, float d) {
-float width = fwidth(d);
-return smoothstep(edge - width * 0.5, edge + width * 0.5, d);
-}
-float aaFract(float x) {
-float f = fract(x);
-float w = fwidth(x);
-float smooth_f = f * (1.0 - smoothstep(1.0 - w, 1.0, f));
-return smooth_f;
-}
-float sdRoundedBox(in vec2 p, in vec2 b, in float r) {
-vec2 q = abs(p) - b + r;
-return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
-}
-float getInnerGlow(vec2 p, vec2 b, float radius) {
-float dist_x = b.x - abs(p.x);
-float dist_y = b.y - abs(p.y);
-float glow_x = smoothstep(radius, 0.0, dist_x);
-float glow_y = smoothstep(radius, 0.0, dist_y);
-return 1.0 - (1.0 - glow_x) * (1.0 - glow_y);
-}
-float getVignette(vec2 uv) {
-vec2 vignetteUv = uv;
-vignetteUv = vignetteUv * (1.0 - vignetteUv);
-float vignette = vignetteUv.x * vignetteUv.y * 25.0;
-vignette = pow(vignette, 0.16);
-vignette = 1.0 - vignette;
-return vignette;
-}
-float uvToAngle(vec2 uv) {
-vec2 center = vec2(0.5);
-vec2 dir = uv - center;
-return atan(dir.y, dir.x) + PI;
-}
-void main() {
-vec2 uv = vUV;
-vec2 pos = uv * uResolution;
-vec2 centeredPos = pos - uResolution * 0.5;
-vec2 size = uResolution - uBorderWidth;
-vec2 halfSize = size * 0.5;
-float dBorderBox = sdRoundedBox(centeredPos, halfSize, uBorderRadius);
-float border = aaStep(0.0, dBorderBox);
-float glow = getInnerGlow(centeredPos, halfSize, uGlowWidth);
-float vignette = getVignette(uv);
-glow *= vignette;
-float posAngle = uvToAngle(uv);
-vec4 lightCenter = mod(startPositions + speeds * uTime, TWO_PI);
-vec4 angleDist = abs(posAngle - lightCenter);
-vec4 disToLight = min(angleDist, TWO_PI - angleDist) / TWO_PI;
-float intensityBorder[4];
-intensityBorder[0] = 1.0;
-intensityBorder[1] = smoothstep(0.4, 0.0, disToLight.y);
-intensityBorder[2] = smoothstep(0.4, 0.0, disToLight.z);
-intensityBorder[3] = smoothstep(0.2, 0.0, disToLight.w) * 0.5;
-vec3 borderColor = vec3(0.0);
-for(int i = 0; i < 4; i++) {
-borderColor = mix(borderColor, uColors[i], intensityBorder[i]);
-}
-borderColor *= 1.1;
-borderColor = clamp(borderColor, 0.0, 1.0);
-float intensityGlow[4];
-intensityGlow[0] = smoothstep(0.9, 0.0, disToLight.x);
-intensityGlow[1] = smoothstep(0.7, 0.0, disToLight.y);
-intensityGlow[2] = smoothstep(0.4, 0.0, disToLight.z);
-intensityGlow[3] = smoothstep(0.1, 0.0, disToLight.w) * 0.7;
-vec4 breath = smoothstep(0.0, 1.0, sin(uTime * 1.0 + startPositions * PI) * 0.2 + 0.8);
-vec3 glowColor = vec3(0.0);
-glowColor += uColors[0] * intensityGlow[0] * breath.x;
-glowColor += uColors[1] * intensityGlow[1] * breath.y;
-glowColor += uColors[2] * intensityGlow[2] * breath.z;
-glowColor += uColors[3] * intensityGlow[3] * breath.w * glow;
-glow = pow(glow, uGlowExponent);
-glow *= random(pos + uTime) * 0.1 + 1.0;
-glowColor *= glow * uGlowFactor;
-glowColor = clamp(glowColor, 0.0, 1.0);
-vec3 color = mix(glowColor, borderColor + glowColor * 0.2, border);
-float alpha = mix(glow, 1.0, border);
-outColor = vec4(color, alpha);
-}`;
-      vertexShaderSource = `#version 300 es
-in vec2 aPosition;
-in vec2 aUV;
-out vec2 vUV;
-void main() {
-vUV = aUV;
-gl_Position = vec4(aPosition, 0.0, 1.0);
-}`;
-      /**
-       * AI Motion - WebGL2 animated border with AI-style glow effects
-       *
-       * @author Simon<gaomeng1900@gmail.com>
-       * @license MIT
-       * @repository https://github.com/gaomeng1900/ai-motion
-       */
-      DEFAULT_COLORS = [
-        "rgb(57, 182, 255)",
-        "rgb(189, 69, 251)",
-        "rgb(255, 87, 51)",
-        "rgb(255, 214, 0)"
-      ];
+  var LIGHT_BORDER, LIGHT_GLOW, DARK_BORDER, DARK_GLOW, Motion;
+  var init_css_motion = __esm({
+    "extensions/lumi-live/browser/css-motion.js"() {
+      LIGHT_BORDER = "rgba(111, 91, 196, 0.82)";
+      LIGHT_GLOW = "rgba(129, 180, 255, 0.2)";
+      DARK_BORDER = "rgba(174, 150, 255, 0.9)";
+      DARK_GLOW = "rgba(108, 189, 255, 0.24)";
       Motion = class {
-        element;
-        canvas;
-        options;
-        running = false;
-        disposed = false;
-        startTime = 0;
-        lastTime = 0;
-        rafId = null;
-        glr;
-        observer;
         constructor(options = {}) {
-          this.options = {
-            width: options.width ?? 600,
-            height: options.height ?? 600,
-            ratio: options.ratio ?? window.devicePixelRatio ?? 1,
-            borderWidth: options.borderWidth ?? 8,
-            glowWidth: options.glowWidth ?? 200,
-            borderRadius: options.borderRadius ?? 8,
-            mode: options.mode ?? "light",
-            ...options
-          };
-          this.canvas = document.createElement("canvas");
-          if (this.options.classNames) {
-            this.canvas.className = this.options.classNames;
-          }
-          if (this.options.styles) {
-            Object.assign(this.canvas.style, this.options.styles);
-          }
-          this.canvas.style.display = "block";
-          this.canvas.style.transformOrigin = "center";
-          this.canvas.style.pointerEvents = "none";
-          this.element = this.canvas;
-          this.setupGL();
-          if (!this.options.skipGreeting) this.greet();
+          this.disposed = false;
+          this.running = false;
+          this.animation = null;
+          this.element = document.createElement("div");
+          this.element.setAttribute("aria-hidden", "true");
+          this.element.setAttribute("data-lumi-css-motion", "");
+          const dark = options.mode === "dark";
+          Object.assign(this.element.style, {
+            boxSizing: "border-box",
+            display: "block",
+            pointerEvents: "none",
+            border: `2px solid ${dark ? DARK_BORDER : LIGHT_BORDER}`,
+            boxShadow: `inset 0 0 72px 18px ${dark ? DARK_GLOW : LIGHT_GLOW}`,
+            opacity: "0",
+            transformOrigin: "center",
+            ...options.styles
+          });
         }
         start() {
           if (this.disposed) throw new Error("Motion instance has been disposed.");
-          if (this.running) return;
-          if (!this.glr) {
-            console.error("WebGL resources are not initialized.");
-            return;
-          }
           this.running = true;
-          this.startTime = performance.now();
-          this.resize(this.options.width ?? 600, this.options.height ?? 600, this.options.ratio);
-          this.glr.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-          this.glr.gl.useProgram(this.glr.program);
-          this.glr.gl.uniform2f(this.glr.uResolution, this.canvas.width, this.canvas.height);
-          this.checkGLError(this.glr.gl, "start: after initial setup");
-          const loop = () => {
-            if (!this.running || !this.glr) return;
-            this.rafId = requestAnimationFrame(loop);
-            const now = performance.now();
-            const delta = now - this.lastTime;
-            if (delta < 1e3 / 32) return;
-            this.lastTime = now;
-            const t = (now - this.startTime) * 1e-3;
-            this.render(t);
-          };
-          this.rafId = requestAnimationFrame(loop);
         }
         pause() {
           if (this.disposed) throw new Error("Motion instance has been disposed.");
           this.running = false;
-          if (this.rafId !== null) cancelAnimationFrame(this.rafId);
         }
         dispose() {
           if (this.disposed) return;
           this.disposed = true;
           this.running = false;
-          if (this.rafId !== null) cancelAnimationFrame(this.rafId);
-          const { gl, vao, positionBuffer, uvBuffer, program } = this.glr;
-          if (vao) gl.deleteVertexArray(vao);
-          if (positionBuffer) gl.deleteBuffer(positionBuffer);
-          if (uvBuffer) gl.deleteBuffer(uvBuffer);
-          gl.deleteProgram(program);
-          if (this.observer) this.observer.disconnect();
-          this.canvas.remove();
+          this.animation?.cancel();
+          this.animation = null;
+          this.element.remove();
         }
-        resize(width, height, ratio) {
+        resize() {
           if (this.disposed) throw new Error("Motion instance has been disposed.");
-          this.options.width = width;
-          this.options.height = height;
-          if (ratio) this.options.ratio = ratio;
-          if (!this.running) return;
-          const { gl, program, vao, positionBuffer, uvBuffer, uResolution } = this.glr;
-          const dpr = ratio ?? this.options.ratio ?? window.devicePixelRatio ?? 1;
-          const desiredWidth = Math.max(1, Math.floor(width * dpr));
-          const desiredHeight = Math.max(1, Math.floor(height * dpr));
-          this.canvas.style.width = `${width}px`;
-          this.canvas.style.height = `${height}px`;
-          if (this.canvas.width !== desiredWidth || this.canvas.height !== desiredHeight) {
-            this.canvas.width = desiredWidth;
-            this.canvas.height = desiredHeight;
-          }
-          gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-          this.checkGLError(gl, "resize: after viewport setup");
-          const { positions, uvs } = computeBorderGeometry(
-            this.canvas.width,
-            this.canvas.height,
-            this.options.borderWidth * dpr,
-            this.options.glowWidth * dpr
-          );
-          gl.bindVertexArray(vao);
-          gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-          gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
-          const aPosition = gl.getAttribLocation(program, "aPosition");
-          gl.enableVertexAttribArray(aPosition);
-          gl.vertexAttribPointer(aPosition, 2, gl.FLOAT, false, 0, 0);
-          this.checkGLError(gl, "resize: after position buffer update");
-          gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
-          gl.bufferData(gl.ARRAY_BUFFER, uvs, gl.STATIC_DRAW);
-          const aUV = gl.getAttribLocation(program, "aUV");
-          gl.enableVertexAttribArray(aUV);
-          gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 0, 0);
-          this.checkGLError(gl, "resize: after UV buffer update");
-          gl.useProgram(program);
-          gl.uniform2f(uResolution, this.canvas.width, this.canvas.height);
-          gl.uniform1f(this.glr.uBorderWidth, this.options.borderWidth * dpr);
-          gl.uniform1f(this.glr.uGlowWidth, this.options.glowWidth * dpr);
-          gl.uniform1f(this.glr.uBorderRadius, this.options.borderRadius * dpr);
-          this.checkGLError(gl, "resize: after uniform updates");
-          const now = performance.now();
-          this.lastTime = now;
-          const t = (now - this.startTime) * 1e-3;
-          this.render(t);
         }
-        /**
-         * Automatically resizes the canvas to match the dimensions of the given element.
-         * @note using ResizeObserver
-         */
-        autoResize(sourceElement) {
-          if (this.observer) {
-            this.observer.disconnect();
-          }
-          this.observer = new ResizeObserver(() => {
-            const rect = sourceElement.getBoundingClientRect();
-            this.resize(rect.width, rect.height);
-          });
-          this.observer.observe(sourceElement);
+        autoResize() {
+          if (this.disposed) throw new Error("Motion instance has been disposed.");
         }
         fadeIn() {
           if (this.disposed) throw new Error("Motion instance has been disposed.");
-          return new Promise((resolve, reject) => {
-            const animation = this.canvas.animate(
-              [
-                { opacity: 0, transform: "scale(1.2)" },
-                { opacity: 1, transform: "scale(1)" }
-              ],
-              { duration: 300, easing: "ease-out", fill: "forwards" }
-            );
-            animation.onfinish = () => resolve();
-            animation.oncancel = () => reject("canceled");
-          });
+          this.animation?.cancel();
+          this.animation = this.element.animate(
+            [
+              { opacity: 0, transform: "scale(1.01)" },
+              { opacity: 1, transform: "scale(1)" }
+            ],
+            { duration: 180, easing: "ease-out", fill: "forwards" }
+          );
+          return finishedAnimation(this.animation);
         }
         fadeOut() {
           if (this.disposed) throw new Error("Motion instance has been disposed.");
-          return new Promise((resolve, reject) => {
-            const animation = this.canvas.animate(
-              [
-                { opacity: 1, transform: "scale(1)" },
-                { opacity: 0, transform: "scale(1.2)" }
-              ],
-              { duration: 300, easing: "ease-in", fill: "forwards" }
-            );
-            animation.onfinish = () => resolve();
-            animation.oncancel = () => reject("canceled");
-          });
-        }
-        checkGLError(gl, context) {
-          let error = gl.getError();
-          if (error !== gl.NO_ERROR) {
-            console.group(`\u{1F534} WebGL Error in ${context}`);
-            while (error !== gl.NO_ERROR) {
-              const errorName = this.getGLErrorName(gl, error);
-              console.error(`${errorName} (0x${error.toString(16)})`);
-              error = gl.getError();
-            }
-            console.groupEnd();
-          }
-        }
-        getGLErrorName(gl, error) {
-          switch (error) {
-            case gl.INVALID_ENUM:
-              return "INVALID_ENUM";
-            case gl.INVALID_VALUE:
-              return "INVALID_VALUE";
-            case gl.INVALID_OPERATION:
-              return "INVALID_OPERATION";
-            case gl.INVALID_FRAMEBUFFER_OPERATION:
-              return "INVALID_FRAMEBUFFER_OPERATION";
-            case gl.OUT_OF_MEMORY:
-              return "OUT_OF_MEMORY";
-            case gl.CONTEXT_LOST_WEBGL:
-              return "CONTEXT_LOST_WEBGL";
-            default:
-              return "UNKNOWN_ERROR";
-          }
-        }
-        setupGL() {
-          const gl = this.canvas.getContext("webgl2", { antialias: false, alpha: true });
-          if (!gl) {
-            throw new Error("WebGL2 is required but not available.");
-          }
-          const program = createProgram(gl, vertexShaderSource, fragmentShaderSource);
-          this.checkGLError(gl, "setupGL: after createProgram");
-          const vao = gl.createVertexArray();
-          gl.bindVertexArray(vao);
-          this.checkGLError(gl, "setupGL: after VAO creation");
-          const pw = this.canvas.width || 2;
-          const ph = this.canvas.height || 2;
-          const { positions, uvs } = computeBorderGeometry(
-            pw,
-            ph,
-            this.options.borderWidth,
-            this.options.glowWidth
+          this.animation?.cancel();
+          this.animation = this.element.animate(
+            [
+              { opacity: 1, transform: "scale(1)" },
+              { opacity: 0, transform: "scale(1.01)" }
+            ],
+            { duration: 180, easing: "ease-in", fill: "forwards" }
           );
-          const positionBuffer = gl.createBuffer();
-          gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-          gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
-          const aPosition = gl.getAttribLocation(program, "aPosition");
-          gl.enableVertexAttribArray(aPosition);
-          gl.vertexAttribPointer(aPosition, 2, gl.FLOAT, false, 0, 0);
-          this.checkGLError(gl, "setupGL: after position buffer setup");
-          const uvBuffer = gl.createBuffer();
-          gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
-          gl.bufferData(gl.ARRAY_BUFFER, uvs, gl.STATIC_DRAW);
-          const aUV = gl.getAttribLocation(program, "aUV");
-          gl.enableVertexAttribArray(aUV);
-          gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 0, 0);
-          this.checkGLError(gl, "setupGL: after UV buffer setup");
-          const uResolution = gl.getUniformLocation(program, "uResolution");
-          const uTime = gl.getUniformLocation(program, "uTime");
-          const uBorderWidth = gl.getUniformLocation(program, "uBorderWidth");
-          const uGlowWidth = gl.getUniformLocation(program, "uGlowWidth");
-          const uBorderRadius = gl.getUniformLocation(program, "uBorderRadius");
-          const uColors = gl.getUniformLocation(program, "uColors");
-          const uGlowExponent = gl.getUniformLocation(program, "uGlowExponent");
-          const uGlowFactor = gl.getUniformLocation(program, "uGlowFactor");
-          gl.useProgram(program);
-          gl.uniform1f(uBorderWidth, this.options.borderWidth);
-          gl.uniform1f(uGlowWidth, this.options.glowWidth);
-          gl.uniform1f(uBorderRadius, this.options.borderRadius);
-          if (this.options.mode === "dark") {
-            gl.uniform1f(uGlowExponent, 2);
-            gl.uniform1f(uGlowFactor, 1.8);
-          } else {
-            gl.uniform1f(uGlowExponent, 1);
-            gl.uniform1f(uGlowFactor, 1);
-          }
-          const colorVecs = (this.options.colors || DEFAULT_COLORS).map(parseColor);
-          for (let i = 0; i < colorVecs.length; i++) {
-            gl.uniform3f(gl.getUniformLocation(program, `uColors[${i}]`), ...colorVecs[i]);
-          }
-          this.checkGLError(gl, "setupGL: after uniform setup");
-          gl.bindVertexArray(null);
-          gl.bindBuffer(gl.ARRAY_BUFFER, null);
-          this.glr = {
-            gl,
-            program,
-            vao,
-            positionBuffer,
-            uvBuffer,
-            uResolution,
-            uTime,
-            uBorderWidth,
-            uGlowWidth,
-            uBorderRadius,
-            uColors
-          };
-        }
-        render(t) {
-          if (!this.glr) return;
-          const { gl, program, vao, uTime } = this.glr;
-          gl.useProgram(program);
-          gl.bindVertexArray(vao);
-          gl.uniform1f(uTime, t);
-          gl.disable(gl.DEPTH_TEST);
-          gl.disable(gl.CULL_FACE);
-          gl.disable(gl.BLEND);
-          gl.clearColor(0, 0, 0, 0);
-          gl.clear(gl.COLOR_BUFFER_BIT);
-          gl.drawArrays(gl.TRIANGLES, 0, 24);
-          this.checkGLError(gl, "render: after draw call");
-          gl.bindVertexArray(null);
-        }
-        greet() {
-          console.log(
-            `%c\u{1F308} ai-motion ${"0.4.8"} \u{1F308}`,
-            "background: linear-gradient(90deg, #39b6ff, #bd45fb, #ff5733, #ffd600); color: white; text-shadow: 0 0 2px rgba(0, 0, 0, 0.2); font-weight: bold; font-size: 1em; padding: 2px 12px; border-radius: 6px;"
-          );
+          return finishedAnimation(this.animation);
         }
       };
     }
@@ -738,7 +197,7 @@ gl_Position = vec4(aPosition, 0.0, 1.0);
   var SimulatorMask_module_default, cursor_module_default, SimulatorMask;
   var init_SimulatorMask_BHVXyogh = __esm({
     "node_modules/@page-agent/page-controller/dist/lib/SimulatorMask-BHVXyogh.js"() {
-      init_Motion();
+      init_css_motion();
       (function() {
         try {
           if (typeof document != "undefined") {
@@ -3140,7 +2599,7 @@ ${pi.pixels_above > 4 && viewportExpansion !== -1 ? `... ${pi.pixels_above} pixe
   }
 
   // extensions/lumi-live/core/ui-config.js
-  var DEFAULT_FAST_MODE_ENABLED = false;
+  var DEFAULT_FAST_MODE_ENABLED = true;
   var DEFAULT_SHOW_ELEMENT_HIGHLIGHTS = false;
   var BROWSER_CLICK_RIPPLE_DURATION_MS = 300;
   var BROWSER_ACTION_CLEANUP_DELAY_MS = 420;

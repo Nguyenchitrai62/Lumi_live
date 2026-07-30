@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Site Capability Indexer Lab",
+  "version": "0.3.0",
+  "minimum_chrome_version": "120",
+  "description": "A code-only lab for safely mapping website screens, controls, and navigation paths.",
+  "permissions": [
+    "scripting",
+    "storage",
+    "tabs",
+    "tabGroups",
+    "webNavigation",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "file:///*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Site Capability Indexer"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*",
+        "file:///*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

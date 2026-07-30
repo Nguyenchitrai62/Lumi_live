@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Site Capability Indexer Lab</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div class="brand-row">
+        <div class="brand-mark" aria-hidden="true">SI</div>
+        <div>
+          <p class="eyebrow">CODE-ONLY EXPLORATION LAB</p>
+          <h1>Site Capability Indexer</h1>
+        </div>
+        <span class="mode-badge">Không dùng LLM</span>
+      </div>
+      <p class="hero-copy">
+        Lập bản đồ route, màn hình, form và các chuyển trạng thái an toàn của một
+        website bằng crawler xác định. Kết quả được lưu trên máy và có thể tải xuống
+        dưới dạng Markdown.
+      </p>
+    </header>
+
+    <main>
+      <section class="control-card" aria-labelledby="buildTitle">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">BUILD INDEX</p>
+            <h2 id="buildTitle">Bắt đầu từ một URL</h2>
+          </div>
+          <span class="safety-chip">Chỉ khám phá read-only</span>
+        </div>
+
+        <form id="indexForm">
+          <label class="url-field">
+            <span>Website URL</span>
+            <input
+              id="websiteUrl"
+              name="websiteUrl"
+              type="url"
+              placeholder="https://example.com/app"
+              autocomplete="url"
+              required
+            >
+          </label>
+
+          <div class="option-grid">
+            <label>
+              <span>Số trạng thái tối đa</span>
+              <input id="maxStates" type="number" min="5" max="200" value="40">
+            </label>
+            <label>
+              <span>Độ sâu khám phá</span>
+              <input id="maxDepth" type="number" min="1" max="6" value="3">
+            </label>
+            <label>
+              <span>Chờ UI tối đa</span>
+              <select id="settleMs">
+                <option value="450">Nhanh · 450 ms</option>
+                <option value="700" selected>Cân bằng · 700 ms</option>
+                <option value="1200">Chậm · 1.2 giây</option>
+                <option value="2000">Ứng dụng nặng · 2 giây</option>
+              </select>
+            </label>
+            <label>
+              <span>Số worker song song</span>
+              <select id="workerCount" title="Mỗi worker sử dụng một tab nền độc lập">
+                <option value="1">1 worker</option>
+                <option value="2">2 workers</option>
+                <option value="4" selected>4 workers · khuyến nghị</option>
+                <option value="6">6 workers</option>
+                <option value="8">8 workers · tối đa</option>
+              </select>
+            </label>
+            <label class="check-field">
+              <input id="keepTabOpen" type="checkbox">
+              <span>Giữ các tab worker sau khi hoàn tất</span>
+            </label>
+          </div>
+
+          <div class="form-actions">
+            <button class="primary-button" id="startButton" type="submit">
+              Lập chỉ mục
+            </button>
+            <button class="secondary-button" id="stopButton" type="button" disabled>
+              Dừng
+            </button>
+            <p class="form-note">
+              Worker dùng chung một queue; không tự submit form, tạo dữ liệu, tải file,
+              thanh toán hoặc xóa nội dung.
+            </p>
+          </div>
+        </form>
+      </section>
+
+      <section class="run-card" id="runCard" aria-live="polite">
+        <div class="run-topline">
+          <div class="status-cluster">
+            <span class="status-dot" id="statusDot"></span>
+            <div>
+              <p class="status-label" id="statusLabel">Sẵn sàng</p>
+              <p class="status-detail" id="statusDetail">
+                Nhập URL để tạo capability index đầu tiên.
+              </p>
+            </div>
+          </div>
+          <span class="queue-badge" id="queueBadge">0 trong hàng đợi</span>
+        </div>
+        <div
+          class="progress-track"
+          role="progressbar"
+          aria-label="Tiến độ lập chỉ mục"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+          id="progressTrack"
+        >
+          <span id="progressBar"></span>
+        </div>
+        <p class="current-url" id="currentUrl">Chưa có URL đang quét</p>
+        <div class="error-list" id="errorList" hidden></div>
+      </section>
+
+      <section class="result-shell" id="resultSection" hidden>
+        <div class="result-heading">
+          <div>
+            <p class="section-kicker">LOCAL CAPABILITY INDEX</p>
+            <h2 id="resultTitle">Kết quả lập chỉ mục</h2>
+            <p id="resultMeta"></p>
+          </div>
+          <div class="result-actions">
+            <button class="secondary-button" id="downloadButton" type="button">
+              Tải Markdown
+            </button>
+            <button class="ghost-button danger-text" id="clearButton" type="button">
+              Xóa dữ liệu
+            </button>
+          </div>
+        </div>
+
+        <div class="metric-grid">
+          <article>
+            <strong id="screenMetric">0</strong>
+            <span>Màn hình</span>
+          </article>
+          <article>
+            <strong id="transitionMetric">0</strong>
+            <span>Chuyển trạng thái</span>
+          </article>
+          <article>
+            <strong id="featureMetric">0</strong>
+            <span>Tính năng an toàn</span>
+          </article>
+          <article>
+            <strong id="blockedMetric">0</strong>
+            <span>Control không click</span>
+          </article>
+        </div>
+
+        <div class="view-tabs" role="tablist" aria-label="Chế độ xem kết quả">
+          <button class="view-tab is-active" type="button" role="tab" aria-selected="true" data-view="screens">
+            Màn hình
+          </button>
+          <button class="view-tab" type="button" role="tab" aria-selected="false" data-view="transitions">
+            Luồng chuyển
+          </button>
+          <button class="view-tab" type="button" role="tab" aria-selected="false" data-view="markdown">
+            Markdown
+          </button>
+        </div>
+
+        <div class="view-panel" id="screensView" data-panel="screens">
+          <div class="screen-list" id="screenList"></div>
+        </div>
+        <div class="view-panel" id="transitionsView" data-panel="transitions" hidden>
+          <div class="transition-list" id="transitionList"></div>
+        </div>
+        <div class="view-panel" id="markdownView" data-panel="markdown" hidden>
+          <pre class="markdown-preview" id="markdownPreview"></pre>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      Dữ liệu được lưu trong storage riêng của extension. Capability index chỉ dùng
+      để định hướng; khi thao tác thật vẫn phải quét lại DOM hiện tại.
+    </footer>
+  </div>
+
+  <script type="module" src="index.js"></script>
+</body>
+</html>

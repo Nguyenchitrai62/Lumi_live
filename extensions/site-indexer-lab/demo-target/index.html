@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Atlas Workspace</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <a class="logo" href="index.html">Atlas</a>
+    <nav aria-label="Primary navigation">
+      <a href="projects.html">Projects</a>
+      <a href="settings.html">Settings</a>
+      <button id="workspaceMenu" type="button" aria-haspopup="menu" aria-expanded="false">
+        Workspace menu
+      </button>
+    </nav>
+  </header>
+
+  <main>
+    <p class="eyebrow">DEMO WORKSPACE</p>
+    <h1>Team overview</h1>
+    <p>A safe local target for testing route and UI-state indexing.</p>
+
+    <section>
+      <div role="tablist" aria-label="Overview sections">
+        <button type="button" role="tab" aria-selected="true" data-tab="activity">
+          Recent activity
+        </button>
+        <button type="button" role="tab" aria-selected="false" data-tab="metrics">
+          Project metrics
+        </button>
+      </div>
+      <div id="activityPanel" role="tabpanel">
+        <h2>Recent activity</h2>
+        <p>Three projects changed this week.</p>
+      </div>
+      <div id="metricsPanel" role="tabpanel" hidden>
+        <h2>Project metrics</h2>
+        <p>Eight active projects and two archived projects.</p>
+      </div>
+    </section>
+
+    <button id="helpButton" type="button" aria-haspopup="dialog">View help</button>
+    <button type="button">Create project</button>
+
+    <div id="menuPanel" role="menu" hidden>
+      <a role="menuitem" href="projects.html">View all projects</a>
+      <button role="menuitem" type="button">Upload project file</button>
+      <button role="menuitem" type="button">Log out</button>
+    </div>
+  </main>
+
+  <dialog id="helpDialog" aria-labelledby="helpTitle">
+    <h2 id="helpTitle">Workspace help</h2>
+    <p>Use Projects to inspect work or Settings to view preferences.</p>
+    <button id="closeHelp" type="button">Close help</button>
+  </dialog>
+
+  <script src="demo.js"></script>
+</body>
+</html>

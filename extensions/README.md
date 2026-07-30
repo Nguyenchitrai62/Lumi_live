@@ -19,3 +19,8 @@ npm run build:extension
 Load `extensions/lumi-live` in `chrome://extensions`; do not load the outer `extensions` directory.
 
 `lumi-live/browser/controller.js` is bundled into `lumi-live/dist/controller.js`. Runtime code, pages, and tests are grouped by domain under `background`, `browser`, `core`, `live`, `mcp`, `offscreen`, `settings`, `side-panel`, and `tests`.
+
+`site-indexer-lab` is a separate code-only Manifest V3 experiment for mapping
+website routes, read-only UI states, forms, and safe transitions before that
+capability is integrated into Lumi Live. Load that folder independently; see
+[`site-indexer-lab/README.md`](./site-indexer-lab/README.md).

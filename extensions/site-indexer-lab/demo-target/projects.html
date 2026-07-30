@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Atlas Projects</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <a class="logo" href="index.html">Atlas</a>
+    <nav aria-label="Primary navigation">
+      <a href="index.html">Overview</a>
+      <a href="settings.html">Settings</a>
+    </nav>
+  </header>
+  <main>
+    <p class="eyebrow">PROJECT DIRECTORY</p>
+    <h1>Projects</h1>
+    <form aria-label="Project filters">
+      <label>
+        Search projects
+        <input name="query" type="search" placeholder="Project name">
+      </label>
+      <label>
+        Status
+        <select name="status">
+          <option>Active</option>
+          <option>Archived</option>
+        </select>
+      </label>
+      <button type="submit">Apply filters</button>
+    </form>
+    <section>
+      <h2>Active projects</h2>
+      <article>
+        <h3>Hicas research</h3>
+        <button type="button" aria-expanded="false" data-project-details>
+          View project details
+        </button>
+        <div hidden>
+          <p>Document indexing and browser automation research.</p>
+          <button type="button">Delete project</button>
+        </div>
+      </article>
+    </section>
+  </main>
+  <script src="demo.js"></script>
+</body>
+</html>
