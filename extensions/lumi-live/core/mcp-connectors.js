@@ -36,6 +36,36 @@ export const MCP_CONNECTORS = Object.freeze([
         autocomplete: "off",
       }),
     ]),
+    modalDescription: "Enter any link from your Redmine server and the API key from My account.",
+    modalNote: "Links to projects, issues, and time entries are reduced to the Redmine base address automatically.",
+    checkingLabel: "Checking Redmine...",
+    checkingMessage: "Validating the URL and API key...",
+  }),
+  Object.freeze({
+    id: "hicas",
+    name: "Hicas",
+    icon: "../icons/connectors/hicas.png",
+    description: "Connect a Hicas MCP server with its MCP key.",
+    fields: Object.freeze([
+      Object.freeze({
+        name: "baseUrl",
+        label: "Hicas MCP URL",
+        type: "url",
+        placeholder: "https://mcp-hawee.hicas.vn/mcp",
+        autocomplete: "url",
+      }),
+      Object.freeze({
+        name: "mcpKey",
+        label: "Hicas MCP key",
+        type: "password",
+        placeholder: "Paste your MCP key",
+        autocomplete: "off",
+      }),
+    ]),
+    modalDescription: "Enter the Hicas MCP endpoint and its MCP key.",
+    modalNote: "Use https://mcp-hawee.hicas.vn/mcp. Lumi appends the key as MCP_KEY automatically and keeps it out of the displayed URL.",
+    checkingLabel: "Checking Hicas...",
+    checkingMessage: "Validating the URL and MCP key...",
   }),
 ]);
 

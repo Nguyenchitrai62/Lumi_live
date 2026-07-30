@@ -1,6 +1,18 @@
 import { getCapturedTabAsset } from "./captured-tab-assets.js";
 
 const REDMINE_REQUEST_TIMEOUT_MS = 20_000;
+const REDMINE_UI_ROUTES = new Set([
+  "activity",
+  "boards",
+  "issues",
+  "my",
+  "news",
+  "projects",
+  "search",
+  "time_entries",
+  "users",
+  "wiki",
+]);
 
 export function normalizeRedmineBaseUrl(rawUrl) {
   let url;
@@ -17,7 +29,13 @@ export function normalizeRedmineBaseUrl(rawUrl) {
   }
   url.search = "";
   url.hash = "";
-  url.pathname = url.pathname.replace(/\/+$/g, "");
+  const pathSegments = url.pathname.split("/").filter(Boolean);
+  const uiRouteIndex = pathSegments.findIndex((segment) =>
+    REDMINE_UI_ROUTES.has(segment.toLowerCase()));
+  const baseSegments = uiRouteIndex >= 0
+    ? pathSegments.slice(0, uiRouteIndex)
+    : pathSegments;
+  url.pathname = baseSegments.length ? `/${baseSegments.join("/")}` : "/";
   return url.href.replace(/\/+$/g, "");
 }
 

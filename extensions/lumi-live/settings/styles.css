@@ -107,6 +107,8 @@ body.is-mcp-tools-view .mcp-tools-view { opacity: 1; pointer-events: auto; trans
 .mcp-connector-heading strong { font-size: 14px; }
 .mcp-connector-mark { display: grid; place-items: center; flex: 0 0 auto; width: 36px; height: 36px; border: 1px solid rgba(50, 43, 64, .11); border-radius: 10px; background: #fff; box-shadow: 0 7px 15px rgba(57, 44, 92, .1); }
 .mcp-connector-mark img { display: block; width: 24px; height: 24px; object-fit: contain; }
+.mcp-connector[data-connector-id="hicas"] .mcp-connector-mark img,
+#mcpConnectorModal[data-connector-id="hicas"] .mcp-connector-mark img { width: 32px; height: auto; object-fit: contain; }
 .mcp-connector-badge { border-radius: 999px; padding: 3px 7px; color: var(--lavender); background: rgba(119, 93, 198, .09); font-size: 9px; font-weight: 900; }
 .mcp-connector-description { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 .mcp-connector-status { margin: 5px 0 0; color: var(--mint); font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
@@ -142,6 +144,7 @@ body.is-mcp-connector-modal-open { overflow: hidden; }
 .mcp-empty-state { display: flex; align-items: center; gap: 13px; margin-top: 20px; border: 1px dashed rgba(119, 93, 198, .25); border-radius: 16px; padding: 18px; color: var(--muted); background: rgba(119, 93, 198, .035); }
 .mcp-empty-icon, .mcp-server-icon { display: grid; place-items: center; flex: 0 0 auto; width: 38px; height: 38px; border: 1px solid rgba(50, 43, 64, .11); border-radius: 12px; background: #fff; box-shadow: 0 8px 18px rgba(57, 44, 92, .1); }
 .mcp-empty-icon img, .mcp-server-icon img { display: block; width: 25px; height: 25px; object-fit: contain; }
+.mcp-server[data-connector-id="hicas"] .mcp-server-icon img { width: 32px; height: auto; object-fit: contain; }
 .mcp-empty-state strong { display: block; color: var(--ink); font-size: 14px; }
 .mcp-empty-state p { margin: 4px 0 0; font-size: 11px; }
 .mcp-server-list { display: grid; gap: 10px; margin-top: 20px; }
@@ -161,7 +164,13 @@ body.is-mcp-connector-modal-open { overflow: hidden; }
 .mcp-server[data-state="error"] .mcp-server-status { color: var(--danger); }
 .mcp-server[data-state="warning"] .mcp-server-status { color: var(--warning); background: rgba(166, 111, 22, .1); }
 .mcp-server[data-state="disabled"] .mcp-server-status { color: var(--muted); background: rgba(117, 109, 134, .12); }
-.mcp-server-url { display: block; max-width: 100%; margin-top: 7px; border-radius: 8px; padding: 6px 8px; color: var(--ink); background: rgba(119,93,198,.055); font: 11px/1.5 ui-monospace, "Cascadia Code", monospace; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.mcp-server-url { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; max-width: 100%; margin-top: 7px; border: 1px solid transparent; border-radius: 8px; padding: 6px 8px; color: var(--ink); background: rgba(119,93,198,.055); cursor: copy; text-align: left; }
+.mcp-server-url:hover { border-color: rgba(119,93,198,.25); color: var(--lavender); background: rgba(119,93,198,.1); }
+.mcp-server-url:focus-visible { outline: 3px solid rgba(119,93,198,.2); outline-offset: 2px; }
+.mcp-server-url code { min-width: 0; font: 11px/1.5 ui-monospace, "Cascadia Code", monospace; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.mcp-server-copy-icon { display: grid; place-items: center; flex: 0 0 auto; width: 24px; height: 24px; border-radius: 7px; color: var(--lavender); background: rgba(119,93,198,.1); font: 900 14px/1 system-ui, sans-serif; }
+.mcp-server-url[data-copied="true"] .mcp-server-copy-icon { color: var(--mint); background: rgba(62,158,125,.12); }
+.mcp-server-url[data-copy-error="true"] .mcp-server-copy-icon { color: var(--danger); background: rgba(189,82,108,.12); }
 .mcp-server-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 9px; color: var(--muted); }
 .mcp-server-meta span { display: inline-flex; align-items: center; }
 .mcp-server-meta .mcp-meta-count, .mcp-server-meta .mcp-meta-available { min-height: 28px; border-radius: 999px; padding: 0 10px; font-size: 11px; font-weight: 950; }

@@ -9,7 +9,6 @@ export function createBrowserToolRunner({
   collectVerification,
   setRunning,
   setStatus,
-  refreshTarget,
 }) {
   return async function runBrowserTool(tool, args) {
     setRunning(true);
@@ -46,7 +45,6 @@ export function createBrowserToolRunner({
       throw error;
     } finally {
       setRunning(false);
-      void refreshTarget();
     }
   };
 }

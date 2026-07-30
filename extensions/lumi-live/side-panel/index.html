@@ -22,7 +22,18 @@
         </div>
         <div class="top-actions" role="group" aria-label="Lumi controls">
           <span id="translateBadge" class="badge badge-translate" hidden>Translate</span>
-          <span id="liveBadge" class="badge badge-offline">Offline</span>
+          <button id="chatHistoryButton" class="icon-button top-chat-button" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="chatHistoryDialog" aria-label="Open chat history" title="Chat history">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12a9 9 0 1 0 3-6.7L3 8m0-5v5h5M12 7v5l3 2" />
+            </svg>
+            <span id="activeChatTitle" class="sr-only">New chat</span>
+          </button>
+          <button id="newChatButton" class="icon-button top-chat-button" type="button" aria-label="Start a new chat" title="New chat">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            <span class="sr-only">New chat</span>
+          </button>
           <button id="fastModeButton" class="icon-button fast-mode-button" type="button" aria-pressed="false" aria-label="Enable Fast mode" title="Enable Fast mode">
             <span class="fast-mode-icon" aria-hidden="true">&#9889;</span>
             <span class="fast-mode-label">Fast</span>
@@ -41,44 +52,29 @@
         </div>
       </header>
 
-      <section class="target-card" aria-live="polite">
-        <span id="targetDot" class="target-dot" aria-hidden="true"></span>
-        <div class="target-copy">
-          <small>PAGEAGENT TARGET</small>
-          <strong id="targetTitle">No tab connected</strong>
-          <span id="targetHint">Switch to a web page and Lumi will follow it.</span>
-        </div>
-        <span id="connectTabButton" class="connect-status" role="status">Auto</span>
-      </section>
-
       <section class="chat-stage" aria-label="Conversation with Lumi">
-        <header class="conversation-toolbar">
-          <button id="chatHistoryButton" class="conversation-selector" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="chatHistoryDialog" title="Open chat history">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 6h16M4 12h10M4 18h13" />
-            </svg>
-            <span id="activeChatTitle">New chat</span>
-            <span class="conversation-selector-chevron" aria-hidden="true">⌄</span>
-          </button>
-          <button id="newChatButton" class="new-chat-button" type="button" aria-label="Start a new chat" title="Start a new chat">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-            <span>New chat</span>
-          </button>
-        </header>
-        <section id="mcpToolNotice" class="mcp-tool-notice" role="alert" aria-live="assertive" hidden>
-          <span class="mcp-tool-notice-icon" aria-hidden="true">!</span>
-          <div class="mcp-tool-notice-copy">
-            <strong id="mcpToolNoticeTitle">MCP tool warning</strong>
-            <p id="mcpToolNoticeMessage"></p>
-          </div>
-          <div class="mcp-tool-notice-actions">
-            <button id="mcpToolNoticeSecondary" class="mcp-tool-notice-secondary" type="button" hidden>Keep enabled</button>
-            <button id="mcpToolNoticeTertiary" class="mcp-tool-notice-tertiary" type="button" hidden>Always allow</button>
-            <button id="mcpToolNoticePrimary" class="mcp-tool-notice-primary" type="button">OK</button>
-          </div>
-        </section>
+        <div class="chat-alert-stack">
+          <section id="taskFailureNotice" class="task-failure-notice" role="alert" aria-live="assertive" aria-atomic="true" hidden>
+            <span class="task-failure-notice-icon" aria-hidden="true">!</span>
+            <div class="task-failure-notice-copy">
+              <strong id="taskFailureNoticeTitle">Action chain interrupted</strong>
+              <p id="taskFailureNoticeMessage"></p>
+            </div>
+            <button id="dismissTaskFailureNoticeButton" type="button" aria-label="Dismiss action error" title="Dismiss">×</button>
+          </section>
+          <section id="mcpToolNotice" class="mcp-tool-notice" role="alert" aria-live="assertive" hidden>
+            <span class="mcp-tool-notice-icon" aria-hidden="true">!</span>
+            <div class="mcp-tool-notice-copy">
+              <strong id="mcpToolNoticeTitle">MCP tool warning</strong>
+              <p id="mcpToolNoticeMessage"></p>
+            </div>
+            <div class="mcp-tool-notice-actions">
+              <button id="mcpToolNoticeSecondary" class="mcp-tool-notice-secondary" type="button" hidden>Keep enabled</button>
+              <button id="mcpToolNoticeTertiary" class="mcp-tool-notice-tertiary" type="button" hidden>Always allow</button>
+              <button id="mcpToolNoticePrimary" class="mcp-tool-notice-primary" type="button">OK</button>
+            </div>
+          </section>
+        </div>
         <section id="transcript" class="transcript" aria-live="polite">
           <article class="message message-lumi">
             <span>Lumi</span>
@@ -210,7 +206,7 @@
               id="messageInput"
               rows="1"
               maxlength="4000"
-              placeholder="Type a message to Lumi…"
+              placeholder="Message Lumi…"
             ></textarea>
           </div>
           <button

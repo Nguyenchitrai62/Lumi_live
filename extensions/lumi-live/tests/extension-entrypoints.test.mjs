@@ -89,6 +89,16 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(html, /id="messageQueue"/);
   assert.match(html, /id="messageQueueSteer"/);
   assert.match(html, /id="messageQueueRemove"/);
+  assert.match(html, /id="taskFailureNotice"/);
+  assert.match(html, /placeholder="Message Lumi…"/);
+  assert.doesNotMatch(html, /id="liveBadge"|>Offline<|id="targetTitle"|class="target-card"|PAGEAGENT TARGET|id="targetHint"|id="connectTabButton"/);
+  const topbar = html.slice(html.indexOf('<header class="topbar">'), html.indexOf("</header>") + 9);
+  const topActions = topbar.slice(topbar.indexOf('<div class="top-actions"'), topbar.indexOf("</div>", topbar.indexOf('<div class="top-actions"')) + 6);
+  assert.match(topActions, /id="chatHistoryButton" class="icon-button top-chat-button"/);
+  assert.match(topActions, /id="newChatButton" class="icon-button top-chat-button"/);
+  assert.doesNotMatch(topbar, /conversation-toolbar/);
+  assert.doesNotMatch(styles, /\.target-card|\.target-copy|\.connect-status|\.conversation-toolbar|\.conversation-selector/);
+  assert.doesNotMatch(controller, /targetCard|targetHint|connectTabButton|refreshTarget|TARGET_REFRESH_INTERVAL_MS/);
   assert.match(styles, /\.thinking-menu[^}]+bottom:\s*calc\(100%/);
   assert.match(styles, /\.thinking-summary-chevron[^}]+var\(--ui-motion-disclosure\)/);
   assert.match(styles, /\.mcp-activity-chevron[^}]+var\(--ui-motion-disclosure\)/);
@@ -100,6 +110,8 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.doesNotMatch(styles, /is-typing|transcript-caret-blink/);
   assert.match(styles, /\.message-queue-steer/);
   assert.match(styles, /\.connection-notice-backdrop[^}]+place-items:\s*center/);
+  assert.match(styles, /\.message-form textarea:focus-visible\s*\{[^}]+outline:\s*0/);
+  assert.match(controller, /syncTaskFailureNotice\(event,\s*change\)/);
   assert.match(controller, /thinkingConfig:\s*buildThinkingConfig\(sessionThinkingLevel\)/);
   assert.match(controller, /chrome\.runtime\.getManifest\(\)\.version/);
   assert.match(controller, /tools:\s*\[\{ functionDeclarations \}\]/);
@@ -123,9 +135,18 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /response\.goAway/);
   assert.match(controller, /scheduleAutomaticSessionReconnect/);
   assert.doesNotMatch(controller, /armSessionRotation|SESSION_CONNECTION_ROTATION_MS/);
-  assert.match(controller, /reconnectRequiredForUserWork/);
-  assert.match(controller, /Gemini Live disconnected while idle/);
+  assert.doesNotMatch(
+    controller,
+    /stopSession|restartSessionWithContext|reconnectRequiredForUserWork|Gemini Live disconnected while idle/,
+  );
+  assert.doesNotMatch(controller, /MAX_AUTOMATIC_SESSION_RECONNECT_ATTEMPTS/);
   assert.match(controller, /!userTurnAuthorized && hasTurnPayload/);
+  assert.match(controller, /const hasActionableTurnPayload = Boolean/);
+  assert.match(controller, /if \(hasActionableTurnPayload\) panelAudio\.stopPlayback\(\)/);
+  assert.doesNotMatch(
+    controller,
+    /Ignored a Gemini Live turn because no user input authorized it/,
+  );
   assert.match(
     controller,
     /!resumedExistingSession && conversationHistory\.length/,
@@ -139,14 +160,27 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(reconnectSource, /predecessorSocket:\s*previousSocket/);
   assert.match(reconnectSource, /if \(!reconnectInBackground\)\s*\{\s*setSessionStatus\("connecting"/);
   assert.match(reconnectSource, /background:\s*reconnectInBackground,\s*discardOldContext/);
-  assert.match(controller, /shouldRefreshLiveContext\(response\.usageMetadata\)/);
+  assert.doesNotMatch(controller, /shouldRefreshLiveContext\(response\.usageMetadata\)/);
   assert.match(controller, /discardOldContext \? "" : sessionResumptionHandle/);
   assert.match(controller, /pendingSessionHandoffSocket\s*=\s*sessionSocket/);
   assert.match(controller, /predecessorSocket\.close\(1000,\s*"Gemini Live handoff complete"\)/);
+  assert.match(
+    controller,
+    /!expected && !isGeminiKeyIssue\(reason\) && shouldMaintainGeminiSession/,
+  );
+  assert.match(
+    controller,
+    /reason \|\| "Gemini Live transport closed\.",\s*\{ allowInFlight: true \}/,
+  );
+  assert.match(
+    controller,
+    /serverRotationPending && !sessionHasInFlightWork\(\)[^]*delayMs: 0/,
+  );
   const unloadSource = controller.slice(
     controller.indexOf('window.addEventListener("unload"'),
     controller.indexOf('window.addEventListener("focus"'),
   );
+  assert.match(unloadSource, /websocket\?\.close\(\)/);
   assert.match(unloadSource, /cleanupMedia\(\)/);
   assert.doesNotMatch(unloadSource, /clearConversationContext\(\)/);
   assert.match(controller, /getLiveModelPartTranscriptRole\(part\)/);
@@ -162,10 +196,15 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   assert.match(controller, /EARLY_CONNECTION_DROP_MS\s*=\s*3000/);
   assert.match(controller, /performance\.now\(\) - sessionReadyAt <= EARLY_CONNECTION_DROP_MS/);
   assert.match(controller, /showReconnectNotice\(message,\s*\{ earlyDisconnect: disconnectedSoonAfterConnect \}\)/);
-  assert.match(controller, /!reconnectRequiredForUserWork\s*&&\s*sessionSocket\.lumiSetupComplete/);
   assert.match(controller, /earlyDisconnect \? "Check Settings" : "Open Settings"/);
   assert.match(controller, /connectionNoticeSettings[^]*openSettings\(\)/);
-  assert.match(controller, /if \(savedKey && DEFAULT_AUTO_CONNECT_ENABLED\) await autoStartSessionIfReady\(\)/);
+  assert.match(controller, /initialConnectionPromise = autoStartSessionIfReady\(\)/);
+  assert.ok(
+    controller.indexOf("initialConnectionPromise = autoStartSessionIfReady()")
+      < controller.indexOf("await avatarController.applyMode"),
+  );
+  assert.match(controller, /NEW_CHAT_CONTEXT_BOUNDARY/);
+  assert.match(controller, /function sendPendingConversationBoundary\(\)/);
   const queueSource = controller.slice(
     controller.indexOf("function queueUserMessage"),
     controller.indexOf("function steerQueuedUserMessage"),
@@ -216,6 +255,8 @@ test("side panel connects chat without requiring a microphone and remembers mic 
   assert.match(toggleSource, /\[MICROPHONE_ENABLED_STORAGE_KEY\]: true/);
   assert.match(toggleSource, /\[MICROPHONE_ENABLED_STORAGE_KEY\]: false/);
   assert.match(toggleSource, /panelAudio\.stopMicrophone\(\)/);
+  assert.match(controller, /function canUseMicrophoneControl\(\)[^]*sessionStatus === "ready" \|\| sessionStatus === "idle"/);
+  assert.match(toggleSource, /sessionStatus === "idle"[^]*autoStartSessionIfReady\(\)/);
   assert.match(audioController, /async function prepareOutput\(\)/);
   assert.match(audioController, /function isUserSpeechActive\(\)/);
   assert.match(audioController, /function stopMicrophone\(\)/);
@@ -231,7 +272,7 @@ test("side panel keeps Lumi's layout while improving contrast and primary contro
   const formEnd = html.indexOf("</form>", formStart);
   const messageForm = html.slice(formStart, formEnd);
 
-  assert.match(html, /<span id="connectTabButton" class="connect-status" role="status">Auto<\/span>/);
+  assert.doesNotMatch(html, /target-card|connectTabButton|PAGEAGENT TARGET/);
   assert.doesNotMatch(html, /class="voice-controls"/);
   assert.match(messageForm, /id="imageAttachmentButton"/);
   assert.match(messageForm, /id="messageInput"/);
@@ -298,7 +339,15 @@ test("captures visual context only when the agent requests it and renders rich c
   assert.match(controller, /sendJson\(\{\s*realtimeInput:\s*\{\s*video:\s*frame\s*\}\s*\}\)/);
   assert.match(controller, /sendJson\(\{\s*realtimeInput:\s*\{\s*text:\s*modelText\s*\}\s*\}\)/);
   assert.match(controller, /await sendRuntime\("prepare_browser_prompt"\)/);
-  assert.match(controller, /if \(!videoSent \|\| !textSent\)[^]*failedSocket\.close\(4002/);
+  assert.match(
+    controller,
+    /if \(!videoSent \|\| !textSent\)[^]*The connection stays open for retry/,
+  );
+  const failedMessageSendSource = controller.slice(
+    controller.indexOf("if (!videoSent || !textSent)"),
+    controller.indexOf("if (boundaryPrompt) pendingConversationBoundary = false"),
+  );
+  assert.doesNotMatch(failedMessageSendSource, /\.close\(|cleanupMedia\(/);
   const speechStartCallback = controller.match(
     /onUserSpeechStart:\s*\(\) => \{[^]*?\r?\n  \},\r?\n  sendJson/,
   )?.[0] || "";
@@ -338,7 +387,7 @@ test("opens a requested website even when the current tab cannot host PageAgent"
   assert.doesNotMatch(openTabSource, /needs a controllable current page/);
 });
 
-test("settings ships OAuth connectors, a Redmine popup, app icons, and a temporary server toggle", async () => {
+test("settings ships OAuth and URL-key connectors, app icons, URL copy, and a temporary server toggle", async () => {
   const html = await readFile(new URL("settings/index.html", extensionRoot), "utf8");
   const controller = await readFile(
     new URL("settings/mcp-settings-controller.js", extensionRoot),
@@ -361,8 +410,9 @@ test("settings ships OAuth connectors, a Redmine popup, app icons, and a tempora
   assert.match(html, /icons\/connectors\/mcp\.svg/);
   assert.match(controller, /mcp_set_server_enabled/);
   assert.match(controller, /connectOauthConnector/);
-  assert.match(controller, /connector\.id === "redmine"/);
+  assert.match(controller, /connector\?\.fields\?\.length/);
   assert.match(controller, /connector\?\.auth === "oauth-dcr"/);
+  assert.match(controller, /copyMcpServerUrl/);
   assert.match(controller, /availableConnectors[\s\S]*!mcpServers\.some/);
   assert.match(controller, /connector\?\.icon \|\| DEFAULT_MCP_ICON/);
   assert.match(controller, /event\.target === elements\.mcpAddModal/);

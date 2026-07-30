@@ -14,6 +14,7 @@ import {
   MAX_INITIAL_CURRENT_USER_CHARS,
   MAX_INITIAL_HISTORY_CHARS,
   MAX_INITIAL_HISTORY_TURNS,
+  NEW_CHAT_CONTEXT_BOUNDARY,
   normalizeThinkingLevel,
   retainImportantTurnText,
   shouldRefreshLiveContext,
@@ -105,7 +106,7 @@ test("uses the configured Gemini Live thinking level and normalizes invalid valu
   });
 });
 
-test("uses resumable sockets without server-side context compression", () => {
+test("uses resumable sockets with server-side context compression", () => {
   assert.deepEqual(buildSessionLifecycleConfig(), {
     sessionResumption: {},
   });
@@ -114,14 +115,16 @@ test("uses resumable sockets without server-side context compression", () => {
   });
   assert.deepEqual(buildSessionHandshakeConfig(), {
     sessionResumption: {},
+    contextWindowCompression: { slidingWindow: {} },
     historyConfig: { initialHistoryInClientContent: true },
   });
   assert.deepEqual(buildSessionHandshakeConfig(" resume-handle "), {
     sessionResumption: { handle: "resume-handle" },
+    contextWindowCompression: { slidingWindow: {} },
   });
   assert.equal(
     Object.hasOwn(buildSessionHandshakeConfig(), "contextWindowCompression"),
-    false,
+    true,
   );
   assert.deepEqual(
     [1, 2, 3, 4, 5, 8].map(automaticSessionReconnectDelayMs),
@@ -151,6 +154,9 @@ test("grounds self-references and searches in the Lumi Live product identity", (
   assert.match(instruction, /CODE-ENFORCED TASK PROTOCOL/i);
   assert.match(instruction, /reflection-before-action/i);
   assert.match(instruction, /plain-text final answer for done/i);
+  assert.ok(instruction.includes(NEW_CHAT_CONTEXT_BOUNDARY));
+  assert.match(instruction, /update the context silently/i);
+  assert.match(instruction, /do not answer or call tools for the boundary itself/i);
   assert.ok(BUILTIN_TOOLS.some((tool) => tool.name === "live_translate"));
   assert.doesNotMatch(instruction, /Talk to a AI Agent That Controls Your Active Tab/i);
 });

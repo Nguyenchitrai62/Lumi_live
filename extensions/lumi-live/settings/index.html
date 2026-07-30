@@ -204,16 +204,16 @@
       <form id="mcpConnectorModalForm" class="mcp-connector-modal" role="dialog" aria-modal="true" aria-labelledby="mcpConnectorModalTitle">
         <div class="mcp-connector-modal-head">
           <span class="mcp-connector-mark" aria-hidden="true">
-            <img src="../icons/connectors/redmine.svg" alt="" />
+            <img id="mcpConnectorModalIcon" src="../icons/connectors/mcp.svg" alt="" />
           </span>
           <div>
             <span class="eyebrow">CONNECT WORK TOOL</span>
-            <h2 id="mcpConnectorModalTitle">Connect Redmine</h2>
+            <h2 id="mcpConnectorModalTitle">Connect work tool</h2>
           </div>
         </div>
-        <p class="mcp-connector-modal-description">Enter the address of your Redmine server and the API key from My account.</p>
+        <p id="mcpConnectorModalDescription" class="mcp-connector-modal-description"></p>
         <div id="mcpConnectorModalFields" class="mcp-connector-modal-fields"></div>
-        <p class="mcp-connector-modal-note">The URL may include a custom Redmine base path. REST API must be enabled.</p>
+        <p id="mcpConnectorModalNote" class="mcp-connector-modal-note"></p>
         <p id="mcpConnectorModalStatus" class="mcp-connector-modal-status" role="status"></p>
         <div class="mcp-connector-modal-actions">
           <button id="cancelConnectorModalButton" class="secondary" type="button">Cancel</button>

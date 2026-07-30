@@ -13,13 +13,17 @@ import {
   createMcpService,
 } from "../background/mcp-service.js";
 import {
+  buildHicasMcpUrl,
+  normalizeHicasMcpUrl,
+} from "../background/hicas-mcp-client.js";
+import {
   normalizeRedmineBaseUrl,
   RedmineMcpClient,
 } from "../background/redmine-mcp-client.js";
 import { saveCapturedTabAsset } from "../background/captured-tab-assets.js";
 
 test("ships the expected extension-only connector catalog", () => {
-  assert.deepEqual(MCP_CONNECTORS.map((connector) => connector.id), ["notion", "jira", "redmine"]);
+  assert.deepEqual(MCP_CONNECTORS.map((connector) => connector.id), ["notion", "jira", "redmine", "hicas"]);
   const notion = getMcpConnector("notion");
   assert.equal(notion.endpoint, "https://mcp.notion.com/mcp");
   assert.equal(notion.auth, "oauth-dcr");
@@ -30,6 +34,8 @@ test("ships the expected extension-only connector catalog", () => {
   assert.equal(jira.icon, "../icons/connectors/jira.svg");
   assert.equal(getMcpConnector("redmine").icon, "../icons/connectors/redmine.svg");
   assert.deepEqual(getMcpConnector("redmine").fields.map((field) => field.name), ["baseUrl", "apiKey"]);
+  assert.equal(getMcpConnector("hicas").icon, "../icons/connectors/hicas.png");
+  assert.deepEqual(getMcpConnector("hicas").fields.map((field) => field.name), ["baseUrl", "mcpKey"]);
 });
 
 test("temporarily disabled MCP servers keep their record without loading tools", async () => {
@@ -228,10 +234,101 @@ test("normalizes custom Redmine base URLs without leaking credentials", () => {
     normalizeRedmineBaseUrl("https://redmine.example.com/company/redmine/"),
     "https://redmine.example.com/company/redmine",
   );
+  assert.equal(
+    normalizeRedmineBaseUrl("https://redmine.anybim.vn/projects/ai-hicas-r-d/time_entries"),
+    "https://redmine.anybim.vn",
+  );
+  assert.equal(
+    normalizeRedmineBaseUrl("https://redmine.example.com/company/redmine/issues/42?tab=history"),
+    "https://redmine.example.com/company/redmine",
+  );
   assert.throws(
     () => normalizeRedmineBaseUrl("https://user:secret@redmine.example.com"),
     /credentials/i,
   );
+});
+
+test("builds a Hicas MCP endpoint from a clean display URL and a separate key", () => {
+  assert.equal(
+    normalizeHicasMcpUrl("https://mcp-hawee.hicas.vn/projects/example?MCP_KEY=do-not-keep"),
+    "https://mcp-hawee.hicas.vn/mcp",
+  );
+  const endpoint = new URL(buildHicasMcpUrl(
+    "https://mcp-hawee.hicas.vn/a/deep/link",
+    "test key/with symbols",
+  ));
+  assert.equal(endpoint.origin, "https://mcp-hawee.hicas.vn");
+  assert.equal(endpoint.pathname, "/mcp");
+  assert.equal(endpoint.searchParams.get("MCP_KEY"), "test key/with symbols");
+});
+
+test("Hicas stores its key separately while every MCP request uses the generated endpoint", async () => {
+  const originalChrome = globalThis.chrome;
+  const originalFetch = globalThis.fetch;
+  const localValues = {};
+  const requestUrls = [];
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          const names = Array.isArray(keys) ? keys : [keys];
+          return Object.fromEntries(names
+            .filter((key) => Object.hasOwn(localValues, key))
+            .map((key) => [key, localValues[key]]));
+        },
+        async set(values) {
+          Object.assign(localValues, values);
+        },
+        async remove(keys) {
+          for (const key of Array.isArray(keys) ? keys : [keys]) delete localValues[key];
+        },
+      },
+      session: {
+        async get() {
+          return {};
+        },
+        async set() {},
+      },
+    },
+  };
+  globalThis.fetch = async (input, options = {}) => {
+    const url = new URL(String(input));
+    requestUrls.push(url);
+    const payload = JSON.parse(options.body);
+    if (payload.method === "notifications/initialized") {
+      return new Response(null, { status: 202 });
+    }
+    const result = payload.method === "initialize"
+      ? {
+          protocolVersion: "2025-06-18",
+          serverInfo: { name: "Hicas Test", version: "1" },
+        }
+      : { tools: [] };
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: payload.id, result }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const service = createMcpService();
+    const result = await service.connectMcpConnector("hicas", {
+      baseUrl: "https://mcp-hawee.hicas.vn/mcp",
+      mcpKey: "test-hicas-key",
+    });
+    assert.equal(result.url, "https://mcp-hawee.hicas.vn/mcp");
+    assert.ok(requestUrls.every((url) =>
+      url.pathname === "/mcp" && url.searchParams.get("MCP_KEY") === "test-hicas-key"));
+    assert.equal(JSON.stringify(localValues[STORAGE_KEYS.mcpServers]).includes("test-hicas-key"), false);
+    const [server] = localValues[STORAGE_KEYS.mcpServers];
+    assert.equal(
+      localValues[STORAGE_KEYS.mcpConnectorCredentials][server.id].mcpKey,
+      "test-hicas-key",
+    );
+  } finally {
+    globalThis.chrome = originalChrome;
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Redmine adapter publishes Gemini-compatible MCP tools and authenticates with the API key header", async () => {

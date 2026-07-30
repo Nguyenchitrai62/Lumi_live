@@ -84,7 +84,11 @@ test("side panel gates chat behind a persistent Stop translation control", async
   assert.match(app, /LIVE_TRANSLATION_CHAT_LOCK_STATES = new Set/);
   assert.match(app, /function isLiveTranslationChatLocked\(\)/);
   assert.match(app, /elements\.messageInput\.disabled = textSendPending \|\| translationLocked/);
-  assert.match(app, /elements\.muteButton\.disabled = translationLocked \|\| sessionStatus !== "ready"/);
+  assert.match(app, /elements\.muteButton\.disabled = !canUseMicrophoneControl\(\)/);
+  assert.match(
+    app,
+    /function canUseMicrophoneControl\(\)[^]*!isLiveTranslationChatLocked\(\)[^]*sessionStatus === "ready" \|\| sessionStatus === "idle"/,
+  );
   assert.match(app, /panelAudio\.stopMicrophone\(\)[^]*audioStreamEnd: true/);
   assert.match(app, /async function stopLiveTranslationFromUi\(\)[^]*cancelCurrentTurn\(\)[^]*await stopLiveTranslationSession\(\)/);
   assert.match(app, /setLiveTranslationBadge\("off"\)[^]*You can chat with Lumi again/);

@@ -3,6 +3,7 @@ import { getMcpConnector } from "../core/mcp-connectors.js";
 import { prepareGeminiMcpTool } from "../mcp/gemini-tool-schema.js";
 import { McpHttpClient, normalizeMcpUrl } from "../mcp/client.js";
 import { createMcpConnectorAuth } from "./mcp-connector-auth.js";
+import { buildHicasMcpUrl, normalizeHicasMcpUrl } from "./hicas-mcp-client.js";
 import { normalizeRedmineBaseUrl, RedmineMcpClient } from "./redmine-mcp-client.js";
 
 const MCP_URL_STORAGE_KEY = STORAGE_KEYS.legacyMcpUrl;
@@ -45,7 +46,9 @@ function normalizeMcpServerRecord(value) {
   try {
     url = connectorId === "redmine"
       ? normalizeRedmineBaseUrl(value.url)
-      : normalizeMcpUrl(value.url);
+      : connectorId === "hicas"
+        ? normalizeHicasMcpUrl(value.url)
+        : normalizeMcpUrl(value.url);
   } catch {
     return null;
   }
@@ -295,6 +298,10 @@ async function connectMcpRecord(record, force = false) {
     const credential = await connectorAuth.getCredential(record.id);
     if (!credential?.apiKey) throw new Error("This Redmine connector is missing its API key. Remove it and connect again.");
     client = new RedmineMcpClient(record.url, credential.apiKey);
+  } else if (record.connectorId === "hicas") {
+    const credential = await connectorAuth.getCredential(record.id);
+    if (!credential?.mcpKey) throw new Error("This Hicas connector is missing its MCP key. Remove it and connect again.");
+    client = new McpHttpClient(buildHicasMcpUrl(record.url, credential.mcpKey));
   } else if (connector?.auth === "oauth-dcr") {
     client = new McpHttpClient(record.url, {
       getAccessToken: (options) => connectorAuth.getAccessToken(record.id, options),
@@ -362,6 +369,15 @@ async function connectMcpConnector(connectorId, config = {}) {
         connectorId: connector.id,
         kind: "redmine-api-key",
         apiKey,
+      });
+    } else if (connector.id === "hicas") {
+      url = normalizeHicasMcpUrl(config.baseUrl);
+      const mcpKey = String(config.mcpKey || "").trim();
+      if (!mcpKey) throw new Error("Enter the Hicas MCP key before connecting.");
+      await connectorAuth.setCredential(id, {
+        connectorId: connector.id,
+        kind: "hicas-mcp-key",
+        mcpKey,
       });
     } else {
       url = connector.endpoint;

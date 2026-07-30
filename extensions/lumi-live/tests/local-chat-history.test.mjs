@@ -198,7 +198,7 @@ test("wires New chat, the saved-session dialog, switching, deletion, and clearin
   assert.match(panelController, /async function activateChatSession\(sessionId\)/);
   assert.match(panelController, /async function deleteChatSession\(sessionId\)/);
   assert.match(panelController, /findReusableBlankChatSession/);
-  assert.match(panelController, /Lumi will connect when you send a message/);
+  assert.match(panelController, /Connection stays active/);
   assert.doesNotMatch(panelController, /window\.confirm/);
   assert.doesNotMatch(panelController, /reconnectAfterChatSessionChange/);
   const newChatSource = panelController.slice(
@@ -206,8 +206,15 @@ test("wires New chat, the saved-session dialog, switching, deletion, and clearin
     panelController.indexOf("async function activateChatSession"),
   );
   assert.match(newChatSource, /findReusableBlankChatSession/);
-  assert.doesNotMatch(newChatSource, /autoStartSessionIfReady|startSession\(\)/);
-  assert.match(panelController, /await restoreLocalChatHistory\(\)/);
+  assert.match(newChatSource, /cancelConversationWorkForChatChange\(\)/);
+  assert.match(newChatSource, /clearConversationContext\(\)/);
+  assert.doesNotMatch(
+    newChatSource,
+    /stopSession|autoStartSessionIfReady|websocket(?:\?|)\.close|cleanupMedia/,
+  );
+  assert.match(panelController, /restoreLocalChatHistory\(\)/);
+  assert.match(panelController, /pendingConversationBoundary = true/);
+  assert.match(panelController, /sendPendingConversationBoundary\(\)/);
   assert.match(panelController, /await chatHistoryStore\.clear\(\)/);
   assert.match(panelStyles, /\.chat-history-dialog/);
   assert.match(panelStyles, /\.chat-confirmation-dialog/);

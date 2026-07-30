@@ -12,6 +12,7 @@ let currentMcpToolAlertSignature = "";
 let dismissedMcpToolAlertSignature = "";
 let mcpAddModalReturnFocus = null;
 let connectorModalReturnFocus = null;
+let activeCredentialConnectorId = "";
 
 const MCP_PERMISSION_OPTIONS = [
   { mode: "allow", label: "Always allow", icon: "\u2713" },
@@ -93,6 +94,7 @@ function renderMcpConnectors() {
   const rows = availableConnectors.map((connector) => {
     const row = document.createElement("article");
     row.className = "mcp-connector";
+    row.dataset.connectorId = connector.id;
 
     const mark = document.createElement("span");
     mark.className = "mcp-connector-mark";
@@ -107,7 +109,7 @@ function renderMcpConnectors() {
     name.textContent = connector.name;
     const badge = document.createElement("span");
     badge.className = "mcp-connector-badge";
-    badge.textContent = connector.id === "redmine" ? "URL + API key" : "Secure sign-in";
+    badge.textContent = connector.fields?.length ? "URL + key" : "Secure sign-in";
     heading.append(name, badge);
 
     const description = document.createElement("p");
@@ -153,16 +155,26 @@ function closeConnectorModal({ restoreFocus = true } = {}) {
   document.body.classList.remove("is-mcp-connector-modal-open");
   elements.settingsShell.inert = false;
   elements.mcpConnectorModalFields.replaceChildren();
+  activeCredentialConnectorId = "";
+  delete elements.mcpConnectorModal.dataset.connectorId;
   setConnectorModalStatus("", "");
   if (restoreFocus) connectorModalReturnFocus?.focus();
   connectorModalReturnFocus = null;
 }
 
-function openRedmineModal(returnFocus) {
-  const connector = MCP_CONNECTORS.find((item) => item.id === "redmine");
+function openCredentialConnectorModal(connectorId, returnFocus) {
+  const connector = MCP_CONNECTORS.find((item) => item.id === connectorId);
+  if (!connector?.fields?.length) return;
   if (!connector || mcpServers.some((server) => server.connectorId === connector.id)) return;
+  activeCredentialConnectorId = connector.id;
+  elements.mcpConnectorModal.dataset.connectorId = connector.id;
   connectorModalReturnFocus = returnFocus || document.activeElement;
   elements.mcpConnectorModalFields.replaceChildren();
+  elements.mcpConnectorModalIcon.src = connector.icon || DEFAULT_MCP_ICON;
+  elements.mcpConnectorModalTitle.textContent = `Connect ${connector.name}`;
+  elements.mcpConnectorModalDescription.textContent = connector.modalDescription || connector.description;
+  elements.mcpConnectorModalNote.textContent = connector.modalNote || "";
+  elements.mcpConnectorModalNote.hidden = !connector.modalNote;
 
   for (const field of connector.fields) {
     const label = document.createElement("label");
@@ -181,6 +193,7 @@ function openRedmineModal(returnFocus) {
   elements.confirmConnectorButton.disabled = false;
   elements.cancelConnectorModalButton.disabled = false;
   elements.confirmConnectorButton.dataset.busy = "";
+  elements.confirmConnectorButton.textContent = `Connect ${connector.name}`;
   setConnectorModalStatus("", "");
   elements.mcpConnectorModal.hidden = false;
   document.body.classList.add("is-mcp-connector-modal-open");
@@ -372,6 +385,7 @@ function renderMcpServers() {
     const state = server.uiState || getMcpServerUiState(server);
     item.className = "mcp-server";
     item.dataset.serverId = server.id;
+    item.dataset.connectorId = server.connectorId || "";
     item.dataset.state = state;
     item.setAttribute("role", "listitem");
     item.tabIndex = 0;
@@ -400,10 +414,20 @@ function renderMcpServers() {
         : state === "error" ? "Error" : state === "disabled" ? "Disabled" : "Saved";
     title.append(name, status);
 
-    const url = document.createElement("code");
+    const url = document.createElement("button");
+    url.type = "button";
     url.className = "mcp-server-url";
-    url.title = server.url;
-    url.textContent = server.url;
+    url.dataset.action = "copy-url";
+    url.dataset.serverId = server.id;
+    url.title = `Copy ${server.url}`;
+    url.setAttribute("aria-label", `Copy MCP URL ${server.url}`);
+    const urlText = document.createElement("code");
+    urlText.textContent = server.url;
+    const copyIcon = document.createElement("span");
+    copyIcon.className = "mcp-server-copy-icon";
+    copyIcon.setAttribute("aria-hidden", "true");
+    copyIcon.textContent = "\u29c9";
+    url.append(urlText, copyIcon);
 
     const metadata = document.createElement("div");
     metadata.className = "mcp-server-meta";
@@ -500,10 +524,10 @@ async function connectMcp(event) {
   }
 }
 
-async function connectRedmine(event) {
+async function connectCredentialConnector(event) {
   event.preventDefault();
-  const connector = MCP_CONNECTORS.find((item) => item.id === "redmine");
-  if (!connector) return;
+  const connector = MCP_CONNECTORS.find((item) => item.id === activeCredentialConnectorId);
+  if (!connector?.fields?.length) return;
   const config = Object.fromEntries(
     [...new FormData(elements.mcpConnectorModalForm)]
       .map(([name, value]) => [name, String(value).trim()]),
@@ -511,8 +535,8 @@ async function connectRedmine(event) {
   elements.confirmConnectorButton.disabled = true;
   elements.cancelConnectorModalButton.disabled = true;
   elements.confirmConnectorButton.dataset.busy = "true";
-  elements.confirmConnectorButton.textContent = "Checking Redmine...";
-  setConnectorModalStatus("", "Validating the URL and API key...");
+  elements.confirmConnectorButton.textContent = connector.checkingLabel || `Checking ${connector.name}...`;
+  setConnectorModalStatus("", connector.checkingMessage || "Validating the connection details...");
   try {
     const result = await sendRuntime("mcp_connect_connector", {
       connectorId: connector.id,
@@ -528,7 +552,7 @@ async function connectRedmine(event) {
     elements.confirmConnectorButton.disabled = false;
     elements.cancelConnectorModalButton.disabled = false;
     elements.confirmConnectorButton.dataset.busy = "";
-    elements.confirmConnectorButton.textContent = "Connect Redmine";
+    elements.confirmConnectorButton.textContent = `Connect ${connector.name}`;
     setConnectorModalStatus(
       "error",
       error instanceof Error ? error.message : `Could not connect ${connector.name}.`,
@@ -671,6 +695,48 @@ async function loadMcpServers(refresh = false) {
   renderMcpServers();
 }
 
+async function copyMcpServerUrl(serverId, button) {
+  const server = mcpServers.find((item) => item.id === serverId);
+  if (!server?.url) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(server.url);
+    } else {
+      const input = document.createElement("textarea");
+      input.value = server.url;
+      input.setAttribute("readonly", "");
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.append(input);
+      input.select();
+      const copied = document.execCommand("copy");
+      input.remove();
+      if (!copied) throw new Error("Clipboard access is unavailable.");
+    }
+    const icon = button.querySelector(".mcp-server-copy-icon");
+    if (icon) icon.textContent = "\u2713";
+    button.dataset.copied = "true";
+    button.title = "Copied MCP URL";
+    window.setTimeout(() => {
+      if (!button.isConnected) return;
+      if (icon) icon.textContent = "\u29c9";
+      button.dataset.copied = "";
+      button.title = `Copy ${server.url}`;
+    }, 1400);
+  } catch {
+    const icon = button.querySelector(".mcp-server-copy-icon");
+    if (icon) icon.textContent = "!";
+    button.dataset.copyError = "true";
+    button.title = "Could not copy. Try again.";
+    window.setTimeout(() => {
+      if (!button.isConnected) return;
+      if (icon) icon.textContent = "\u29c9";
+      button.dataset.copyError = "";
+      button.title = `Copy ${server.url}`;
+    }, 1800);
+  }
+}
+
 elements.showAddMcpButton.addEventListener("click", () => {
   toggleMcpAddForm(elements.mcpAddModal.hidden);
 });
@@ -689,7 +755,7 @@ elements.mcpConnectorList.addEventListener("click", (event) => {
   if (!button || button.disabled) return;
   if (button.dataset.action === "open-connector") {
     const connector = MCP_CONNECTORS.find((item) => item.id === button.dataset.connectorId);
-    if (connector?.id === "redmine") openRedmineModal(button);
+    if (connector?.fields?.length) openCredentialConnectorModal(connector.id, button);
     else if (connector?.auth === "oauth-dcr") void connectOauthConnector(button, connector);
   }
 });
@@ -698,7 +764,7 @@ elements.mcpConnectorModalForm.addEventListener("input", () => {
     setConnectorModalStatus("", "");
   }
 });
-elements.mcpConnectorModalForm.addEventListener("submit", (event) => void connectRedmine(event));
+elements.mcpConnectorModalForm.addEventListener("submit", (event) => void connectCredentialConnector(event));
 elements.cancelConnectorModalButton.addEventListener("click", () => closeConnectorModal());
 elements.mcpConnectorModal.addEventListener("click", (event) => {
   if (event.target === elements.mcpConnectorModal) closeConnectorModal();
@@ -713,6 +779,10 @@ elements.mcpServerList.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
   if (button) {
     if (button.disabled) return;
+    if (button.dataset.action === "copy-url") {
+      void copyMcpServerUrl(button.dataset.serverId, button);
+      return;
+    }
     if (button.dataset.action === "reconnect") void reconnectMcp(button.dataset.serverId);
     if (button.dataset.action === "remove") void removeMcp(button.dataset.serverId);
     return;
