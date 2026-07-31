@@ -3,6 +3,7 @@ import { createMcpPanelController } from "./mcp-panel-controller.js";
 import { createSharedTabAudioController } from "./shared-tab-audio-controller.js";
 import { createBrowserToolRunner } from "./browser-tool-runner.js";
 import { createFastModeController } from "./fast-mode-controller.js";
+import { createResilientRuntimePort } from "./lifecycle-port.js";
 import {
   createAvatarController,
   normalizeAvatarMode,
@@ -79,6 +80,7 @@ import {
 } from "../live/agent-protocol.js";
 import { createTaskOrchestrator } from "../live/task-orchestrator.js";
 import { createTaskStepView } from "./task-step-view.js";
+import { createRecordedFlowPanel } from "./recorded-flow-panel.js";
 import { collectAutomaticBrowserVerification } from "./browser-action-verification.js";
 import {
   shouldRenderStandaloneToolActivity,
@@ -120,7 +122,10 @@ const LIVE_TRANSLATION_CHAT_LOCK_STATES = new Set([
   "stopping",
 ]);
 applyUiConfig();
-const sidePanelLifecyclePort = chrome.runtime.connect({ name: "lumi_live_side_panel" });
+const sidePanelLifecyclePort = createResilientRuntimePort({
+  connect: (connectInfo) => chrome.runtime.connect(connectInfo),
+  name: "lumi_live_side_panel",
+});
 const chatHistoryStore = createLocalChatHistoryStore({
   storageArea: chrome.storage.local,
   storageKey: CHAT_HISTORY_STORAGE_KEY,
@@ -3352,6 +3357,7 @@ async function sendText(
   {
     attachment = null,
     clearComposer = true,
+    displayTextOverride = "",
     render = true,
     remember = true,
   } = {},
@@ -3392,7 +3398,9 @@ async function sendText(
     syncMessageComposer();
     return false;
   }
-  const displayText = clean || `Image · ${selectedAttachment.name}`;
+  const displayText = String(displayTextOverride || "").trim()
+    || clean
+    || `Image · ${selectedAttachment.name}`;
   const userRequestText = clean || "Please inspect the attached image and respond with the most helpful relevant analysis.";
   const targetTabId = Number(promptContext?.target?.tabId);
   const boundaryPrompt = buildPendingConversationBoundaryPrompt();
@@ -3611,6 +3619,17 @@ fastModeController = createFastModeController({
   },
 });
 
+const recordedFlowPanel = createRecordedFlowPanel({
+  confirmAction: requestChatConfirmation,
+  sendRuntime,
+  runAgentFlow: (flow, prompt) => sendText(prompt, {
+    displayTextOverride: `Run saved flow “${flow.name}”`,
+  }),
+  setStatus: (message) => {
+    elements.statusLine.textContent = message;
+  },
+});
+
 async function togglePetals() {
   const enabled = elements.petalsButton.getAttribute("aria-pressed") !== "true";
   applyPetals(enabled);
@@ -3810,12 +3829,13 @@ elements.messageForm.addEventListener("submit", (event) => {
 });
 window.addEventListener("unload", () => {
   intentionalClose = true;
-  sidePanelLifecyclePort.disconnect();
+  sidePanelLifecyclePort.dispose();
   petalEmitter.stop();
   websocket?.close();
   cleanupMedia();
   void flushActiveChatSnapshotPersist();
   fastModeController.dispose();
+  recordedFlowPanel.dispose();
   panelAudio.dispose();
   avatarController.dispose();
 });
@@ -3928,6 +3948,7 @@ async function initialize() {
       FAST_MODE_STORAGE_KEY,
     ]),
     restoreLocalChatHistory(),
+    recordedFlowPanel.initialize(),
   ]);
   const savedKey = String(stored[API_KEY_STORAGE_KEY] || "").trim();
   microphoneEnabled = stored[MICROPHONE_ENABLED_STORAGE_KEY] === true;

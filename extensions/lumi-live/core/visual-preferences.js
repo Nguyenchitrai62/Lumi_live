@@ -7,9 +7,9 @@ import {
 
 export const DEFAULT_VISUAL_PREFERENCES = Object.freeze({
   fastMode: DEFAULT_FAST_MODE_ENABLED,
-  showElementHighlights: DEFAULT_SHOW_ELEMENT_HIGHLIGHTS,
-  scrollDurationMs: PAGE_SCROLL_DURATION_MS,
-  typingDurationMs: FORM_INPUT_REVEAL_DURATION_MS,
+  showElementHighlights: DEFAULT_FAST_MODE_ENABLED ? false : DEFAULT_SHOW_ELEMENT_HIGHLIGHTS,
+  scrollDurationMs: DEFAULT_FAST_MODE_ENABLED ? 0 : PAGE_SCROLL_DURATION_MS,
+  typingDurationMs: DEFAULT_FAST_MODE_ENABLED ? 0 : FORM_INPUT_REVEAL_DURATION_MS,
 });
 
 export function normalizeVisualPreferences(value = {}) {
@@ -22,8 +22,8 @@ export function normalizeVisualPreferences(value = {}) {
       ? false
       : typeof value.showElementHighlights === "boolean"
       ? value.showElementHighlights
-      : DEFAULT_VISUAL_PREFERENCES.showElementHighlights,
-    scrollDurationMs: fastMode ? 0 : DEFAULT_VISUAL_PREFERENCES.scrollDurationMs,
-    typingDurationMs: fastMode ? 0 : DEFAULT_VISUAL_PREFERENCES.typingDurationMs,
+      : DEFAULT_SHOW_ELEMENT_HIGHLIGHTS,
+    scrollDurationMs: fastMode ? 0 : PAGE_SCROLL_DURATION_MS,
+    typingDurationMs: fastMode ? 0 : FORM_INPUT_REVEAL_DURATION_MS,
   };
 }

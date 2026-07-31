@@ -95,8 +95,9 @@ export function createFastWorkspace({
     return tabs.find((tab) => Number.isInteger(tab.id)) || null;
   }
 
-  async function release() {
+  async function release({ shouldRelease = () => true } = {}) {
     const tabs = await listTabs();
+    if (!shouldRelease()) return state();
     const tabIds = tabs.map((tab) => tab.id).filter(Number.isInteger);
     if (tabIds.length) await tabsApi.ungroup(tabIds).catch(() => {});
     await persist(null);

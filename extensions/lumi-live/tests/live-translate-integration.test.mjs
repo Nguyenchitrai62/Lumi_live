@@ -26,7 +26,8 @@ test("toolbar action only toggles the side panel while video audio capture stays
   assert.match(worker, /chrome\.windows\.onFocusChanged\.addListener/);
   assert.match(worker, /releaseCaptureForDifferentTab\(tab\?\.id \?\? null\)/);
   assert.match(worker, /port\.name !== "lumi_live_side_panel"/);
-  assert.doesNotMatch(worker, /chrome\.sidePanel\.onOpened|chrome\.sidePanel\.onClosed/);
+  assert.match(worker, /Boolean\(chrome\.sidePanel\.onClosed\?\.addListener\)/);
+  assert.match(worker, /chrome\.sidePanel\.onOpened\?\.addListener/);
   assert.doesNotMatch(app, /chooseDesktopMedia|desktopCapture/);
 });
 

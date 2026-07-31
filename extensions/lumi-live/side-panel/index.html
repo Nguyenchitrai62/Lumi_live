@@ -34,6 +34,10 @@
             </svg>
             <span class="sr-only">New chat</span>
           </button>
+          <button id="flowRecordButton" class="icon-button flow-record-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="flowPanel" aria-label="Open QC recorder" title="QC recorder">
+            <span class="flow-record-dot" aria-hidden="true"></span>
+            <span class="flow-record-label">Record</span>
+          </button>
           <button id="fastModeButton" class="icon-button fast-mode-button" type="button" aria-pressed="false" aria-label="Enable Fast mode" title="Enable Fast mode">
             <span class="fast-mode-icon" aria-hidden="true">&#9889;</span>
             <span class="fast-mode-label">Fast</span>
@@ -145,6 +149,52 @@
           <button id="chatConfirmationConfirm" class="is-danger" type="button">Delete</button>
         </div>
       </dialog>
+
+      <section id="flowPanel" class="flow-panel-backdrop" hidden>
+        <aside class="flow-panel" aria-labelledby="flowPanelTitle">
+          <header class="flow-panel-header">
+            <div>
+              <small>QC ACTION RECORDER</small>
+              <h2 id="flowPanelTitle">QC recorder</h2>
+            </div>
+            <button id="flowPanelClose" type="button" aria-label="Close QC recorder" title="Close">×</button>
+          </header>
+
+          <div class="flow-recorder-toolbar">
+            <button id="flowPanelRecordButton" class="flow-panel-record" type="button">Start recording</button>
+          </div>
+          <p id="flowRecordingStatus" class="flow-recording-status" data-state="empty">
+            Start recording and interact with the web page normally.
+          </p>
+          <p class="flow-autosave-note"><span aria-hidden="true">✓</span> Every recorded action and prompt is saved automatically.</p>
+
+          <label class="flow-name-field" for="flowNameInput">
+            <span>Flow name</span>
+            <input id="flowNameInput" type="text" maxlength="120" placeholder="Create project with permissions" disabled />
+          </label>
+
+          <section class="flow-draft-section" aria-labelledby="flowDraftTitle">
+            <header>
+              <h3 id="flowDraftTitle">Steps</h3>
+              <span id="flowStepCount">0 steps</span>
+            </header>
+            <ol id="flowStepList" class="flow-step-list"></ol>
+            <p id="flowStepEmpty" class="flow-empty">Clicks are recorded as steps. Consecutive form inputs are automatically recorded as one batch step.</p>
+          </section>
+
+          <div class="flow-draft-actions">
+            <button id="flowRunDraftButton" class="is-primary" type="button" disabled>Run current flow with agent</button>
+          </div>
+
+          <section class="flow-library-section" aria-labelledby="flowLibraryTitle">
+            <header>
+              <h3 id="flowLibraryTitle">Saved flows</h3>
+            </header>
+            <div id="flowLibraryList" class="flow-library-list"></div>
+            <p id="flowLibraryEmpty" class="flow-empty">No saved flows yet.</p>
+          </section>
+        </aside>
+      </section>
 
       <footer class="composer-area">
         <section

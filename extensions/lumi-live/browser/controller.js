@@ -35,6 +35,8 @@ import {
   buildSemanticAnchorContext,
   MAX_SEMANTIC_ANCHORS,
 } from "./semantic-anchor-context.js";
+import { createFlowRecorder } from "./flow-recorder.js";
+import { EXTENSION_EVENTS } from "../core/extension-config.js";
 
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
 const GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
@@ -56,6 +58,12 @@ if (!globalThis[GLOBAL_KEY]) {
   globalThis[GLOBAL_KEY] = runtime;
 
   const mediaElementAudio = createMediaElementAudioController();
+  const flowRecorder = createFlowRecorder({
+    emit: (payload) => chrome.runtime.sendMessage({
+      type: EXTENSION_EVENTS.flowRecordedStep,
+      ...payload,
+    }),
+  });
 
   function getController() {
     if (!runtime.controller) {
@@ -590,6 +598,14 @@ if (!globalThis[GLOBAL_KEY]) {
         await pageController.cleanUpHighlights();
       }
       return { success: true, visualPreferences: runtime.visualPreferences };
+    }
+
+    if (tool === "bridge_flow_record_start") {
+      return flowRecorder.start(args.sessionId);
+    }
+
+    if (tool === "bridge_flow_record_stop") {
+      return flowRecorder.stop();
     }
 
     const pageController = getController();

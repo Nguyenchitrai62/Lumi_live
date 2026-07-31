@@ -117,6 +117,24 @@ test("releases only the workspace grouping and keeps its tabs open", async () =>
   assert.equal(workspace.state().active, false);
 });
 
+test("aborts a stale lifecycle release before ungrouping tabs", async () => {
+  const fakes = createChromeFakes();
+  const workspace = createFastWorkspace({
+    tabsApi: fakes.tabsApi,
+    tabGroupsApi: fakes.tabGroupsApi,
+    storageArea: fakes.storageArea,
+    storageKey: "workspace",
+  });
+
+  await workspace.initialize();
+  await workspace.addTab(1);
+  await workspace.release({ shouldRelease: () => false });
+
+  assert.equal(fakes.tabs.get(1).groupId, 20);
+  assert.equal(fakes.storage.workspace, 20);
+  assert.equal(workspace.state().active, true);
+});
+
 test("drops a stale persisted group during service-worker restore", async () => {
   const fakes = createChromeFakes({ storedGroupId: 99 });
   const workspace = createFastWorkspace({

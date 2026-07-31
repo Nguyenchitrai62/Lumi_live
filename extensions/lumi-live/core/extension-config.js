@@ -1,4 +1,6 @@
 export const EXTENSION_EVENTS = Object.freeze({
+  flowRecordedStep: "lumi_live_flow_recorded_step",
+  flowRecordingChanged: "lumi_live_flow_recording_changed",
   lifecycle: "lumi_live_lifecycle",
   request: "lumi_live_request",
   targetChanged: "lumi_live_target_changed",
@@ -14,6 +16,8 @@ export const STORAGE_KEYS = Object.freeze({
   fastMode: "lumiFastMode",
   fastWorkspaceGroupId: "lumiFastWorkspaceGroupId",
   fallingPetals: "lumiFallingPetals",
+  recordedFlowDraft: "lumiRecordedFlowDraft",
+  recordedFlows: "lumiRecordedFlows",
   legacyMcpUrl: "lumiMcpServerUrl",
   mcpDisabledTools: "lumiDisabledMcpTools",
   mcpConnectorCredentials: "lumiMcpConnectorCredentials",

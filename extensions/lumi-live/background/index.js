@@ -7,6 +7,7 @@ import { EXTENSION_EVENTS, STORAGE_KEYS } from "../core/extension-config.js";
 import { normalizeVisualPreferences } from "../core/visual-preferences.js";
 import { saveCapturedTabAsset } from "./captured-tab-assets.js";
 import { createFastWorkspace } from "./fast-workspace.js";
+import { createSidePanelLifecycle } from "./side-panel-lifecycle.js";
 import {
   collectWindowOpenCallsInPage,
   findWindowOpenNewTabUrl,
@@ -20,6 +21,7 @@ import {
   localFileName,
   normalizeUploadFilePaths,
 } from "../browser/file-upload.js";
+import { createRecordedFlowService } from "./recorded-flow-service.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
@@ -36,6 +38,8 @@ const TAB_CAPTURE_RETRY_DELAY_MS = 550;
 const WINDOW_OPEN_PROBE_KEY = "__LUMI_WINDOW_OPEN_PROBE__";
 const CLICK_NEW_TAB_WATCH_MS = 2500;
 const FILE_CHOOSER_WAIT_MS = 10000;
+const RECORDED_FLOWS_STORAGE_KEY = STORAGE_KEYS.recordedFlows;
+const RECORDED_FLOW_DRAFT_STORAGE_KEY = STORAGE_KEYS.recordedFlowDraft;
 
 let connectedTabId = null;
 let fastModeEnabled = false;
@@ -45,8 +49,6 @@ let listedTabIds = new Set();
 let listedTabsExpireAt = 0;
 let activeBrowserAction = null;
 let creatingOffscreenDocument = null;
-const sidePanelPorts = new Set();
-let sidePanelLifecycleWork = Promise.resolve();
 const {
   addMcpServer,
   callMcpTool,
@@ -63,6 +65,12 @@ const {
   setMcpToolPolicy,
 } = createMcpService();
 const fastWorkspace = createFastWorkspace({ storageKey: FAST_WORKSPACE_STORAGE_KEY });
+const recordedFlows = createRecordedFlowService({
+  localStorageArea: chrome.storage.local,
+  sessionStorageArea: chrome.storage.session,
+  flowsStorageKey: RECORDED_FLOWS_STORAGE_KEY,
+  draftStorageKey: RECORDED_FLOW_DRAFT_STORAGE_KEY,
+});
 
 async function loadTarget() {
   const stored = await chrome.storage.session.get(TARGET_STORAGE_KEY);
@@ -73,13 +81,80 @@ async function loadTarget() {
 
 async function loadBackgroundState() {
   const [, stored] = await Promise.all([
-    Promise.all([loadTarget(), fastWorkspace.initialize()]),
+    Promise.all([loadTarget(), fastWorkspace.initialize(), recordedFlows.initialize()]),
     chrome.storage.local.get(FAST_MODE_STORAGE_KEY),
   ]);
   fastModeEnabled = normalizeVisualPreferences({
     fastMode: stored[FAST_MODE_STORAGE_KEY],
   }).fastMode;
-  if (sidePanelPorts.size === 0) await fastWorkspace.release();
+}
+
+function broadcastFlowRecordingChanged(draft = recordedFlows.snapshot()) {
+  void recordedFlows.list().then((flows) => chrome.runtime.sendMessage({
+    type: EXTENSION_EVENTS.flowRecordingChanged,
+    draft,
+    flows,
+  })).catch(() => {});
+}
+
+async function startFlowRecording() {
+  let tab = connectedTabId
+    ? await chrome.tabs.get(connectedTabId).catch(() => null)
+    : await getActiveTab();
+  if (!tab?.id || !isControllablePage(tab.url)) tab = await getActiveTab();
+  if (!tab?.id || !isControllablePage(tab.url)) {
+    throw new Error("Open an http, https, or permitted file page before recording a flow.");
+  }
+  if (!await ensureController(tab.id, 5)) {
+    throw new Error("Lumi could not prepare the active page for action recording.");
+  }
+  const sessionId = crypto.randomUUID();
+  const draft = await recordedFlows.start({
+    sessionId,
+    tabId: tab.id,
+    startUrl: sanitizeActiveContextUrl(tab.url || ""),
+    startTitle: tab.title || "",
+  });
+  try {
+    const result = await sendControllerBridge(tab.id, "bridge_flow_record_start", { sessionId });
+    if (result?.success === false) {
+      throw new Error(result.error || "The page action recorder could not start.");
+    }
+  } catch (error) {
+    await recordedFlows.clearDraft();
+    throw error;
+  }
+  broadcastFlowRecordingChanged(draft);
+  return { draft, tab: serializeTab(tab) };
+}
+
+async function stopFlowRecording() {
+  const draft = recordedFlows.snapshot();
+  if (!draft) return { draft: null };
+  if (draft.recording && Number.isInteger(draft.tabId)) {
+    await sendControllerBridge(draft.tabId, "bridge_flow_record_stop").catch(() => null);
+  }
+  const stopped = await recordedFlows.stop();
+  broadcastFlowRecordingChanged(stopped);
+  return { draft: stopped };
+}
+
+async function resumeFlowRecording(tabId) {
+  if (!recordedFlows.isRecordingTab(tabId)) return;
+  const sessionId = recordedFlows.sessionId();
+  if (!sessionId) return;
+  await sendControllerBridge(tabId, "bridge_flow_record_start", { sessionId }).catch(() => null);
+}
+
+async function handleRecordedFlowStep(message, sender) {
+  const tabId = sender.tab?.id;
+  if (
+    !Number.isInteger(tabId)
+    || !recordedFlows.isRecordingTab(tabId)
+    || message.sessionId !== recordedFlows.sessionId()
+  ) return;
+  const draft = await recordedFlows.append(message.step);
+  broadcastFlowRecordingChanged(draft);
 }
 
 const ready = loadBackgroundState();
@@ -191,41 +266,54 @@ async function startPreparedTranslation(status, tab, message) {
   }
 }
 
+const hasNativeSidePanelCloseEvents = Boolean(chrome.sidePanel.onClosed?.addListener);
+const sidePanelLifecycle = createSidePanelLifecycle({
+  nativeCloseEvents: hasNativeSidePanelCloseEvents,
+  async onOpened({ isCurrent }) {
+    await ready;
+    if (!isCurrent()) return;
+    if (fastModeEnabled) await activateFastWorkspace();
+    if (!isCurrent()) return;
+    await chrome.runtime.sendMessage({
+      type: PANEL_LIFECYCLE_MESSAGE,
+      state: "opened",
+    }).catch(() => {});
+    notifyTargetChanged();
+  },
+  async onClosed({ isCurrent }) {
+    await ready;
+    if (!isCurrent()) return;
+    await chrome.runtime.sendMessage({
+      type: PANEL_LIFECYCLE_MESSAGE,
+      state: "closed",
+    }).catch(() => {});
+    if (!isCurrent()) return;
+    await releaseTranslationCapture().catch(() => {});
+    if (!isCurrent()) return;
+    if (fastModeEnabled) {
+      fastPromptTargetTabId = null;
+      fastLastActiveWorkspaceTabId = null;
+    }
+    await fastWorkspace.release({ shouldRelease: isCurrent });
+    if (!isCurrent()) return;
+    if (fastModeEnabled) await setConnectedTab(null);
+    notifyTargetChanged();
+  },
+});
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "lumi_live_side_panel") return;
-  const firstOpenPanel = sidePanelPorts.size === 0;
-  sidePanelPorts.add(port);
-  if (firstOpenPanel) {
-    sidePanelLifecycleWork = sidePanelLifecycleWork.catch(() => {}).then(async () => {
-      await ready;
-      if (fastModeEnabled) await activateFastWorkspace();
-      await chrome.runtime.sendMessage({
-        type: PANEL_LIFECYCLE_MESSAGE,
-        state: "opened",
-      }).catch(() => {});
-      notifyTargetChanged();
-    });
-  }
-  port.onDisconnect.addListener(() => {
-    sidePanelPorts.delete(port);
-    if (sidePanelPorts.size > 0) return;
-    sidePanelLifecycleWork = sidePanelLifecycleWork.catch(() => {}).then(async () => {
-      await ready;
-      await chrome.runtime.sendMessage({
-        type: PANEL_LIFECYCLE_MESSAGE,
-        state: "closed",
-      }).catch(() => {});
-      await releaseTranslationCapture().catch(() => {});
-      if (fastModeEnabled) {
-        fastPromptTargetTabId = null;
-        fastLastActiveWorkspaceTabId = null;
-      }
-      await fastWorkspace.release();
-      if (fastModeEnabled) await setConnectedTab(null);
-      notifyTargetChanged();
-    });
-  });
+  sidePanelLifecycle.connect(port);
 });
+
+if (hasNativeSidePanelCloseEvents) {
+  chrome.sidePanel.onOpened?.addListener(() => {
+    void sidePanelLifecycle.nativeOpened();
+  });
+  chrome.sidePanel.onClosed.addListener(() => {
+    sidePanelLifecycle.nativeClosed();
+  });
+}
 
 function isWebPage(url = "") {
   return /^https?:\/\//i.test(url);
@@ -369,7 +457,7 @@ async function applyFastModeEnabled(
   enabled,
   {
     preferredTabId = null,
-    activateWorkspace = sidePanelPorts.size > 0,
+    activateWorkspace = sidePanelLifecycle.isOpen,
   } = {},
 ) {
   fastModeEnabled = enabled === true;
@@ -1641,6 +1729,57 @@ async function handleMessage(message) {
   if (message.command === "release_tab_audio") {
     return releaseTranslationCapture();
   }
+  if (message.command === "flow_record_status") {
+    const currentDraft = recordedFlows.snapshot();
+    if (currentDraft?.recording && Number.isInteger(currentDraft.tabId)) {
+      const tab = await chrome.tabs.get(currentDraft.tabId).catch(() => null);
+      if (tab?.id && isControllablePage(tab.url) && await ensureController(tab.id, 3)) {
+        await resumeFlowRecording(tab.id);
+      }
+    }
+    return {
+      draft: recordedFlows.snapshot(),
+      flows: await recordedFlows.list(),
+    };
+  }
+  if (message.command === "flow_record_start") return startFlowRecording();
+  if (message.command === "flow_record_stop") return stopFlowRecording();
+  if (message.command === "flow_record_update") {
+    const draft = await recordedFlows.updateDraft({
+      name: message.name,
+      stepId: message.stepId,
+      prompt: message.prompt,
+      move: message.move,
+      remove: message.remove === true,
+    });
+    broadcastFlowRecordingChanged(draft);
+    return { draft };
+  }
+  if (message.command === "flow_record_save") {
+    await stopFlowRecording();
+    const result = await recordedFlows.saveDraft();
+    broadcastFlowRecordingChanged(result.draft);
+    return result;
+  }
+  if (message.command === "flow_record_open") {
+    if (recordedFlows.snapshot()?.recording) {
+      throw new Error("Stop the current recording before opening another flow.");
+    }
+    const draft = await recordedFlows.load(message.flowId);
+    broadcastFlowRecordingChanged(draft);
+    return { draft };
+  }
+  if (message.command === "flow_record_delete") {
+    const flows = await recordedFlows.remove(message.flowId);
+    broadcastFlowRecordingChanged();
+    return { flows, draft: recordedFlows.snapshot() };
+  }
+  if (message.command === "flow_record_clear") {
+    await stopFlowRecording();
+    await recordedFlows.clearDraft();
+    broadcastFlowRecordingChanged(null);
+    return { draft: null };
+  }
   if (message.command === "browser_tool") {
     return executeBrowserTool(message.tool, message.args || {});
   }
@@ -1682,6 +1821,9 @@ async function handleMessage(message) {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   void releaseTranslationCapture(tabId).catch(() => {});
+  if (recordedFlows.isRecordingTab(tabId)) {
+    void recordedFlows.stop().then((draft) => broadcastFlowRecordingChanged(draft));
+  }
   if (tabId === fastPromptTargetTabId) fastPromptTargetTabId = null;
   if (tabId === fastLastActiveWorkspaceTabId) fastLastActiveWorkspaceTabId = null;
   if (tabId !== connectedTabId) return;
@@ -1689,6 +1831,26 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     fastModeEnabled ? resolveFastWorkspaceTarget() : followActiveTab()
   ));
 });
+
+function recordInPageNavigation(details) {
+  if (
+    details.frameId !== 0
+    || !isControllablePage(details.url)
+  ) return;
+  setTimeout(() => {
+    if (!recordedFlows.isRecordingTab(details.tabId)) return;
+    void chrome.tabs.get(details.tabId).then(async (tab) => {
+      const draft = await recordedFlows.recordNavigation({
+        url: sanitizeActiveContextUrl(details.url),
+        title: tab.title || details.url,
+      });
+      broadcastFlowRecordingChanged(draft);
+    }).catch(() => {});
+  }, 120);
+}
+
+chrome.webNavigation.onHistoryStateUpdated.addListener(recordInPageNavigation);
+chrome.webNavigation.onReferenceFragmentUpdated.addListener(recordInPageNavigation);
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading") {
@@ -1706,6 +1868,14 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       const controllerReady = await ensureController(tabId, 5);
       if (tabId !== connectedTabId) return;
       if (controllerReady) await chrome.action.setBadgeText({ tabId, text: "ON" });
+      if (controllerReady && recordedFlows.isRecordingTab(tabId)) {
+        await resumeFlowRecording(tabId);
+        const draft = await recordedFlows.recordNavigation({
+          url: sanitizeActiveContextUrl(tab.url || ""),
+          title: tab.title || "",
+        });
+        broadcastFlowRecordingChanged(draft);
+      }
       notifyTargetChanged();
     }).catch(() => {});
     return;
@@ -1716,6 +1886,14 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     const controllerReady = await ensureController(tabId, 5);
     if (tabId !== connectedTabId) return;
     if (controllerReady) await chrome.action.setBadgeText({ tabId, text: "ON" });
+    if (controllerReady && recordedFlows.isRecordingTab(tabId)) {
+      await resumeFlowRecording(tabId);
+      const draft = await recordedFlows.recordNavigation({
+        url: sanitizeActiveContextUrl(tab.url || ""),
+        title: tab.title || "",
+      });
+      broadcastFlowRecordingChanged(draft);
+    }
     notifyTargetChanged();
   }).catch(() => {});
 });
@@ -1769,16 +1947,23 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 });
 
 void ready.then(async () => {
-  if (fastModeEnabled) {
-    if (sidePanelPorts.size === 0) await fastWorkspace.release();
-    return;
-  }
+  if (fastModeEnabled) return;
   await followActiveTab();
 }).catch(() => {
   void setConnectedTab(null);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === EXTENSION_EVENTS.flowRecordedStep && sender.id === chrome.runtime.id) {
+    ready
+      .then(() => handleRecordedFlowStep(message, sender))
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : "Could not record this browser action.",
+      }));
+    return true;
+  }
   if (message?.type === EXTENSION_EVENTS.translationState && message.state === "error") {
     void sendOffscreenCommand("translation_status")
       .then((status) => {
@@ -1791,7 +1976,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   if (message?.type !== MESSAGE_TYPE || sender.id !== chrome.runtime.id) return false;
-  handleMessage(message)
+  ready.then(() => handleMessage(message))
     .then((result) => sendResponse({ ok: true, result }))
     .catch((error) => sendResponse({
       ok: false,

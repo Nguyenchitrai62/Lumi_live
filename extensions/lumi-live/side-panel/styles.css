@@ -78,6 +78,14 @@ body.petals-off .petal-field { opacity: 0; }
 .top-chat-button { color: var(--lavender-deep); }
 .top-chat-button svg { width: 18px; height: 18px; overflow: visible; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .top-chat-button:hover, .top-chat-button[aria-expanded="true"] { border-color: rgba(128,104,207,.34); background: rgba(128,104,207,.1); }
+.flow-record-button { width: auto; min-width: 68px; grid-auto-flow: column; gap: 6px; padding: 0 10px; color: var(--danger); }
+.flow-record-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px rgba(180,72,96,.11); }
+.flow-record-label { font-size: 10px; font-weight: 950; letter-spacing: .035em; text-transform: uppercase; }
+.flow-record-button.is-recording { color: #fff; border-color: transparent; background: var(--danger); box-shadow: 0 7px 18px rgba(180,72,96,.25); }
+.flow-record-button.is-recording .flow-record-dot { background: #fff; box-shadow: 0 0 0 4px rgba(255,255,255,.18); animation: flow-record-pulse 1.15s ease-in-out infinite; }
+.flow-library-button { color: var(--lavender-deep); }
+.flow-library-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.flow-library-button:hover, .flow-library-button[aria-expanded="true"] { border-color: rgba(128,104,207,.34); background: rgba(128,104,207,.1); }
 .fast-mode-button { position: relative; width: auto; min-width: 58px; grid-auto-flow: column; gap: 4px; overflow: visible; padding: 0 9px; color: #4b5563; border-color: #d1d5db; background: var(--surface); box-shadow: none; }
 .fast-mode-icon { font-size: 15px; line-height: 1; }
 .fast-mode-label { font-size: 10px; font-weight: 950; letter-spacing: .04em; text-transform: uppercase; }
@@ -167,6 +175,63 @@ body.petals-off .petal-field { opacity: 0; }
 .chat-confirmation-actions button:focus-visible { outline: 2px solid var(--lavender); outline-offset: 2px; }
 @keyframes chat-history-enter { from { opacity: .72; transform: translateX(-22px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes chat-history-backdrop-enter { from { opacity: 0; } to { opacity: 1; } }
+.flow-panel-backdrop { position: fixed; z-index: 45; inset: 0; background: rgba(25,20,35,.62); backdrop-filter: blur(6px); }
+.flow-panel-backdrop[hidden] { display: none; }
+.flow-panel { position: absolute; inset: 0; overflow-y: auto; padding: 16px 14px 28px; color: var(--ink); background: #f8f6fd; box-shadow: 0 24px 70px rgba(39,29,66,.34); scrollbar-color: rgba(83,58,159,.55) transparent; scrollbar-width: thin; }
+.flow-panel-header { position: sticky; z-index: 3; top: -16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -2px -2px 14px; border-bottom: 1px solid var(--line-strong); padding: 14px 2px 12px; background: rgba(248,246,253,.97); backdrop-filter: blur(16px); }
+.flow-panel-header small { display: block; margin-bottom: 3px; color: var(--lavender-deep); font-size: 9.5px; font-weight: 950; letter-spacing: .11em; }
+.flow-panel-header h2 { margin: 0; font-size: 18px; letter-spacing: -.035em; }
+.flow-panel-header button { display: grid; flex: 0 0 auto; place-items: center; width: 40px; height: 40px; border: 1px solid var(--line-strong); border-radius: 11px; background: var(--surface-strong); cursor: pointer; font-size: 20px; }
+.flow-recorder-toolbar { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.flow-recorder-toolbar button, .flow-draft-actions button { min-height: 42px; border: 1px solid var(--line); border-radius: 11px; padding: 0 12px; background: var(--surface); cursor: pointer; font-size: 11px; font-weight: 900; }
+.flow-recorder-toolbar .flow-panel-record { border-color: #a93c55; color: #fff; background: #b44860; box-shadow: 0 8px 20px rgba(180,72,96,.2); }
+.flow-recorder-toolbar .flow-panel-record.is-recording { border-color: transparent; color: #fff; background: var(--danger); }
+.flow-recording-status { margin: 10px 2px 6px; color: var(--muted); font-size: 11.5px; font-weight: 650; line-height: 1.45; }
+.flow-recording-status[data-state="recording"] { color: var(--danger); font-weight: 800; }
+.flow-autosave-note { display: flex; align-items: center; gap: 6px; margin: 0 2px 14px; color: #276d57; font-size: 10.5px; font-weight: 750; }
+.flow-autosave-note span { display: grid; place-items: center; width: 17px; height: 17px; border-radius: 50%; color: #fff; background: #2f9474; font-size: 10px; }
+.flow-name-field { display: grid; gap: 5px; margin-bottom: 14px; }
+.flow-name-field span, .flow-step-prompt > span { color: var(--muted); font-size: 10px; font-weight: 900; letter-spacing: .035em; text-transform: uppercase; }
+.flow-name-field input, .flow-step-prompt textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: 10px; color: var(--ink); background: var(--surface-strong); }
+.flow-name-field input { min-height: 42px; padding: 0 11px; font-size: 12px; }
+.flow-draft-section, .flow-library-section { border: 1px solid var(--line-strong); border-radius: 15px; padding: 11px; background: #fff; box-shadow: 0 5px 18px rgba(55,42,86,.06); }
+.flow-draft-section > header, .flow-library-section > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.flow-draft-section h3, .flow-library-section h3 { margin: 0; font-size: 13px; }
+.flow-draft-section > header span { color: var(--muted); font-size: 10px; font-weight: 850; }
+.flow-step-list { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.flow-step { border: 1px solid var(--line-strong); border-radius: 12px; padding: 10px; background: #fbfaff; }
+.flow-step:focus-within { border-color: rgba(108,83,188,.58); box-shadow: 0 0 0 3px rgba(108,83,188,.1); }
+.flow-step > header { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: start; gap: 8px; }
+.flow-step-number { display: grid; place-items: center; width: 25px; height: 25px; border-radius: 8px; color: var(--lavender-deep); background: rgba(128,104,207,.12); font-size: 10px; font-weight: 950; }
+.flow-step-copy { display: grid; gap: 3px; min-width: 0; }
+.flow-step-copy strong { overflow-wrap: anywhere; color: var(--ink); font-size: 12px; line-height: 1.35; }
+.flow-step-copy small { overflow: hidden; color: var(--muted); font-size: 10px; font-weight: 600; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.flow-step-controls { display: flex; align-items: center; gap: 4px; }
+.flow-step-controls button { min-height: 28px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-weight: 850; }
+.flow-step-controls .flow-step-add-prompt { min-width: 76px; padding: 0 8px; color: var(--lavender-deep); background: rgba(108,83,188,.08); font-size: 9.5px; white-space: nowrap; }
+.flow-step-controls .flow-step-add-prompt[aria-expanded="true"] { border-color: transparent; color: #fff; background: var(--lavender); }
+.flow-step-controls .flow-step-add-prompt:focus-visible { outline: 2px solid var(--lavender); outline-offset: 2px; }
+.flow-step-controls .flow-step-delete { display: grid; place-items: center; width: 28px; padding: 0; color: var(--muted); background: transparent; font-size: 15px; }
+.flow-step-controls .flow-step-delete:hover { color: var(--danger); background: rgba(180,72,96,.1); }
+.flow-step-prompt { display: grid; gap: 6px; margin-top: 10px; border: 1px solid rgba(108,83,188,.24); border-radius: 11px; padding: 9px; background: rgba(108,83,188,.055); }
+.flow-step-prompt[hidden] { display: none; }
+.flow-step-prompt textarea { min-height: 68px; max-height: 150px; resize: vertical; padding: 9px 10px; font-size: 11.5px; line-height: 1.45; }
+.flow-step-prompt textarea:focus { border-color: var(--lavender); outline: 3px solid rgba(108,83,188,.14); }
+.flow-empty { margin: 12px 4px; color: var(--muted); font-size: 11px; line-height: 1.5; text-align: center; }
+.flow-empty[hidden] { display: none; }
+.flow-draft-actions { display: grid; grid-template-columns: 1fr; gap: 7px; margin: 10px 0 16px; }
+.flow-draft-actions .is-primary, .flow-library-actions .is-primary { border-color: transparent; color: #fff; background: linear-gradient(135deg,#765bc5,#563da3); }
+.flow-draft-actions .is-danger, .flow-library-actions .is-danger { color: var(--danger); }
+.flow-library-list { display: grid; gap: 8px; }
+.flow-library-item { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px; border: 1px solid var(--line-strong); border-radius: 11px; padding: 9px; background: var(--surface-strong); }
+.flow-library-item > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.flow-library-item strong { overflow: hidden; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.flow-library-item small { color: var(--muted); font-size: 9.5px; }
+.flow-library-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.flow-library-actions button { min-height: 31px; border: 1px solid var(--line); border-radius: 8px; padding: 0 8px; background: transparent; cursor: pointer; font-size: 9.5px; font-weight: 900; }
+.flow-library-actions .is-primary { border: 0; }
+.flow-panel button:disabled, .flow-panel input:disabled, .flow-panel textarea:disabled { opacity: .55; cursor: not-allowed; }
+.flow-panel :is(input,textarea):focus-visible { border-color: var(--lavender); outline: 3px solid var(--focus-ring); outline-offset: 1px; }
 .message { width: fit-content; max-width: 94%; margin-bottom: 11px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 6px 18px rgba(61, 50, 89, .07); }
 .message span { display: block; margin-bottom: 4px; font-size: 10.5px; font-weight: 900; }
 .message p, .message-content { margin: 0; font-size: 13.5px; line-height: 1.58; overflow-wrap: anywhere; }
@@ -502,6 +567,13 @@ body.vtuber-expanded .transcript { opacity: 0; visibility: hidden; }
   .connection-notice { background: rgba(41,34,55,.98); }
   .connection-notice .connection-notice-settings { color: #c9bcf3; }
   .chat-history-dialog { background: rgba(31,26,42,.99); }
+  .flow-panel { background: #1f1a2a; }
+  .flow-panel-header { background: rgba(31,26,42,.97); }
+  .flow-draft-section, .flow-library-section { background: #292237; }
+  .flow-step { background: #30283f; }
+  .flow-step-prompt { border-color: rgba(189,170,251,.25); background: rgba(189,170,251,.075); }
+  .flow-autosave-note { color: #8dd9bd; }
+  .flow-step-controls .flow-step-add-prompt { color: #ded4ff; background: rgba(189,170,251,.12); }
   .chat-confirmation-dialog { background: rgba(41,34,55,.99); }
   .chat-session-row:hover { background: rgba(189,170,251,.07); }
   .chat-session-row.is-active { background: rgba(189,170,251,.13); }
@@ -557,16 +629,26 @@ body.vtuber-expanded .transcript { opacity: 0; visibility: hidden; }
   .icon-button { width: 34px; height: 34px; }
   .fast-mode-button { min-width: 34px; padding: 0; }
   .fast-mode-label { display: none; }
+  #avatarModeButton, #petalsButton { display: none; }
   .badge { padding: 5px 7px; font-size: 9px; }
   .live-translation-panel { grid-template-columns: auto minmax(0,1fr); }
   .live-translation-panel button { grid-column: 1 / -1; width: 100%; min-height: 40px; }
   .agent-step-reflection { grid-template-columns: 1fr; }
   .agent-step-summary { grid-template-columns: auto minmax(0,1fr) auto auto; }
   .agent-step-retry { display: none; }
+  .flow-step > header { grid-template-columns: auto minmax(0,1fr); }
+  .flow-step-controls { grid-column: 2; justify-self: end; }
 }
 
 @media (max-width: 520px) {
   .brand > span, .extension-version { display: none; }
+  .brand img { width: 32px; height: 32px; }
+  .top-actions { gap: 3px; }
+  .top-actions .icon-button { width: 34px; height: 34px; border-radius: 10px; }
+  .flow-record-button { min-width: 34px; padding: 0; }
+  .flow-record-label { display: none; }
+  .fast-mode-button { min-width: 34px; padding: 0; }
+  .fast-mode-label { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -650,6 +732,7 @@ body.fast-mode .chat-history-dialog, body.fast-mode .chat-history-dialog::backdr
 }
 
 @keyframes background-wash-drift { 0%, 100% { transform: translate(-4%, 2%) scale(.94); } 50% { transform: translate(7%, -4%) scale(1.06); } }
+@keyframes flow-record-pulse { 50% { opacity: .45; transform: scale(.78); } }
 @keyframes fast-mode-engage { 0% { transform: scale(.9); } 42% { transform: scale(1.08); } 100% { transform: scale(1); } }
 @keyframes fast-mode-ring { from { opacity: .9; transform: scale(.82); } to { opacity: 0; transform: scale(1.24); } }
 @media (prefers-reduced-motion: reduce) {
