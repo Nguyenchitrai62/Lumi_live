@@ -497,9 +497,19 @@ async function prepareBrowserPrompt() {
     };
   }
 
+  const activeTab = await getActiveTab();
+  if (activeTab?.id && isControllablePage(activeTab.url)) {
+    const workspaceGroup = await fastWorkspace.getGroup();
+    const canJoinActiveWorkspace = !workspaceGroup
+      || workspaceGroup.windowId === activeTab.windowId;
+    if (canJoinActiveWorkspace && !await fastWorkspace.containsTab(activeTab.id)) {
+      await fastWorkspace.addTab(activeTab.id);
+    }
+  }
+
   const workspaceTabs = await fastWorkspace.listTabs();
-  const activeWorkspaceTab = workspaceTabs.find(
-    (tab) => tab.active && isControllablePage(tab.url),
+  const promptedActiveTab = workspaceTabs.find(
+    (tab) => tab.id === activeTab?.id && isControllablePage(tab.url),
   );
   const lastActiveWorkspaceTab = workspaceTabs.find(
     (tab) => tab.id === fastLastActiveWorkspaceTabId && isControllablePage(tab.url),
@@ -507,7 +517,7 @@ async function prepareBrowserPrompt() {
   const connectedWorkspaceTab = workspaceTabs.find(
     (tab) => tab.id === connectedTabId && isControllablePage(tab.url),
   );
-  const tab = activeWorkspaceTab
+  const tab = promptedActiveTab
     || lastActiveWorkspaceTab
     || connectedWorkspaceTab
     || workspaceTabs.find((candidate) => isControllablePage(candidate.url))
@@ -525,7 +535,7 @@ async function prepareBrowserPrompt() {
   }
 
   fastPromptTargetTabId = tab.id;
-  if (activeWorkspaceTab?.id === tab.id) fastLastActiveWorkspaceTabId = tab.id;
+  if (promptedActiveTab?.id === tab.id) fastLastActiveWorkspaceTabId = tab.id;
   await setConnectedTab(tab.id);
   const controllerReady = await ensureController(tab.id, 4);
   return {

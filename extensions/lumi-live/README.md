@@ -91,7 +91,7 @@ The build copies the source atlas from `public/avatars/pixel` and the layered VT
 
 ## Browser and MCP tools
 
-- **PAGEAGENT TARGET** follows the active HTTP, HTTPS, or permitted `file://` tab automatically in Normal mode. Fast mode pins it to the dedicated **Agent Space** tab group instead.
+- **PAGEAGENT TARGET** follows the active HTTP, HTTPS, or permitted `file://` tab automatically in Normal mode. Fast mode pins it to the dedicated **Agent Space** tab group instead. If a prompt is sent while a controllable tab outside that group is active in the same Chrome window, Lumi first moves that tab into **Agent Space** and locks the turn to it.
 - Page element guides are optional and disabled by default.
 - Tab listing and switching include every tab Chrome exposes in the relevant Normal-mode window or Fast workspace window; the result identifies the group and current agent target. In Normal mode, switching activates the destination and new destinations keep the existing Google Search transition behavior. In Fast mode, switching changes only the workspace target, and new destinations open inactive inside **Agent Space** without the Google sequence. In standard mode, every page-scroll call is animated over 1 second with an on-screen direction/progress HUD and form text is revealed over 0.5 seconds. Fast mode performs both immediately. A `text` target reveals matching rendered content, while `position=0` is the exact top, `position=0.5` the middle, and `position=1` the exact bottom.
 - While Lumi is generating or running a browser/MCP tool, the send button becomes a circular stop control. Cancelling interrupts the Gemini turn, stops playback and visual actions, and aborts active MCP requests without ending the voice session.

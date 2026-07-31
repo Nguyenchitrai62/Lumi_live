@@ -62,6 +62,10 @@ test("wires Fast mode through settings, the side panel, the workspace, and the p
   assert.match(worker, /FAST_MODE_STORAGE_KEY/);
   assert.match(worker, /if \(fastModeEnabled\) return;/);
   assert.match(worker, /message\.command === "prepare_browser_prompt"/);
+  assert.match(worker, /const activeTab = await getActiveTab\(\)/);
+  assert.match(worker, /!await fastWorkspace\.containsTab\(activeTab\.id\)/);
+  assert.match(worker, /await fastWorkspace\.addTab\(activeTab\.id\)/);
+  assert.match(worker, /tab\.id === activeTab\?\.id/);
   assert.match(worker, /restriction: "workspace_tabs_only"/);
   assert.match(worker, /\? \{ groupId: workspaceGroup\.id \}/);
   assert.match(worker, /Fast mode can switch only to tabs already inside Agent Space/);
