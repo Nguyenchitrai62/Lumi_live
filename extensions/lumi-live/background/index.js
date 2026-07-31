@@ -269,17 +269,6 @@ async function startPreparedTranslation(status, tab, message) {
 const hasNativeSidePanelCloseEvents = Boolean(chrome.sidePanel.onClosed?.addListener);
 const sidePanelLifecycle = createSidePanelLifecycle({
   nativeCloseEvents: hasNativeSidePanelCloseEvents,
-  async onOpened({ isCurrent }) {
-    await ready;
-    if (!isCurrent()) return;
-    if (fastModeEnabled) await activateFastWorkspace();
-    if (!isCurrent()) return;
-    await chrome.runtime.sendMessage({
-      type: PANEL_LIFECYCLE_MESSAGE,
-      state: "opened",
-    }).catch(() => {});
-    notifyTargetChanged();
-  },
   async onClosed({ isCurrent }) {
     await ready;
     if (!isCurrent()) return;
@@ -451,6 +440,22 @@ async function activateFastWorkspace(preferredTabId = null) {
   await setConnectedTab(tab.id);
   const controllerReady = await ensureController(tab.id, 4);
   return { tab: await chrome.tabs.get(tab.id), controllerReady };
+}
+
+async function restoreOrActivateFastWorkspace() {
+  const existingGroup = await fastWorkspace.getGroup();
+  if (existingGroup) return resolveFastWorkspaceTarget();
+
+  // If Chrome discarded stale group metadata between panel documents, restore
+  // the persisted agent target instead of adopting whichever unrelated tab
+  // happens to be active when the panel initializes.
+  if (Number.isInteger(connectedTabId)) {
+    const persistedTarget = await chrome.tabs.get(connectedTabId).catch(() => null);
+    if (persistedTarget?.id && isControllablePage(persistedTarget.url)) {
+      return activateFastWorkspace(persistedTarget.id);
+    }
+  }
+  return activateFastWorkspace();
 }
 
 async function applyFastModeEnabled(
@@ -1628,6 +1633,17 @@ async function executeBrowserTool(tool, args = {}) {
 }
 
 async function handleMessage(message) {
+  if (message.command === "initialize_side_panel") {
+    if (!fastModeEnabled) return { mode: "normal", workspace: null };
+    const target = await restoreOrActivateFastWorkspace();
+    notifyTargetChanged();
+    return {
+      mode: "fast",
+      workspace: fastWorkspace.state({ windowId: target?.tab?.windowId }),
+      target: target?.tab ? serializeTab(target.tab) : null,
+      controllerReady: Boolean(target?.controllerReady),
+    };
+  }
   if (message.command === "connect_active_tab") return getStatus();
   if (message.command === "disconnect_tab") return getStatus();
   if (message.command === "get_status") return getStatus();
@@ -1853,6 +1869,46 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(recordInPageNavigation);
 chrome.webNavigation.onReferenceFragmentUpdated.addListener(recordInPageNavigation);
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (Object.hasOwn(changeInfo, "groupId")) {
+    void ready.then(async () => {
+      if (!fastModeEnabled) return;
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      const workspaceGroupId = fastWorkspace.state().groupId;
+      const joinedWorkspace = Number.isInteger(workspaceGroupId)
+        && tab?.groupId === workspaceGroupId;
+
+      if (joinedWorkspace) {
+        await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
+        if (!tab.active) {
+          notifyTargetChanged();
+          return;
+        }
+        fastPromptTargetTabId = tabId;
+        fastLastActiveWorkspaceTabId = tabId;
+        if (!isControllablePage(tab.url)) {
+          await setConnectedTab(null);
+          notifyTargetChanged();
+          return;
+        }
+        await setConnectedTab(tabId);
+        const controllerReady = await ensureController(tabId, 5);
+        if (tabId !== connectedTabId) return;
+        if (controllerReady) await chrome.action.setBadgeText({ tabId, text: "ON" });
+        notifyTargetChanged();
+        return;
+      }
+
+      const wasPromptTarget = tabId === fastPromptTargetTabId;
+      const wasLastActiveTarget = tabId === fastLastActiveWorkspaceTabId;
+      const wasConnectedTarget = tabId === connectedTabId;
+      if (!wasPromptTarget && !wasLastActiveTarget && !wasConnectedTarget) return;
+      if (wasPromptTarget) fastPromptTargetTabId = null;
+      if (wasLastActiveTarget) fastLastActiveWorkspaceTabId = null;
+      if (wasConnectedTarget) await setConnectedTab(null);
+      await resolveFastWorkspaceTarget();
+      notifyTargetChanged();
+    }).catch(() => {});
+  }
   if (changeInfo.status === "loading") {
     void releaseTranslationCapture(tabId).catch(() => {});
     return;

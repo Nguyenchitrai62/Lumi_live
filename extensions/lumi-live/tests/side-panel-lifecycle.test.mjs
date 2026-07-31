@@ -57,11 +57,13 @@ test("does not treat a temporary port disconnect as a native side-panel close", 
 
 test("cancels legacy close cleanup when the panel reconnects during the grace period", async () => {
   const timers = createTimers();
+  let opened = 0;
   let closed = 0;
   const lifecycle = createSidePanelLifecycle({
     closeGraceMs: 10,
     setTimer: timers.setTimer,
     clearTimer: timers.clearTimer,
+    onOpened: async () => { opened += 1; },
     onClosed: async () => { closed += 1; },
   });
   const firstPort = createPort();
@@ -74,6 +76,7 @@ test("cancels legacy close cleanup when the panel reconnects during the grace pe
   timers.runAll();
   await lifecycle.waitForIdle();
 
+  assert.equal(opened, 1);
   assert.equal(closed, 0);
   assert.equal(lifecycle.isOpen, true);
 });
@@ -99,6 +102,32 @@ test("runs cleanup after Chrome confirms that the side panel closed", async () =
 
   assert.equal(closed, 1);
   assert.equal(lifecycle.isOpen, false);
+});
+
+test("reports one reopen when the Port connects before Chrome's native opened event", async () => {
+  const timers = createTimers();
+  let opened = 0;
+  const lifecycle = createSidePanelLifecycle({
+    nativeCloseEvents: true,
+    closeGraceMs: 10,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+    onOpened: async () => { opened += 1; },
+  });
+  const firstPort = createPort();
+
+  lifecycle.connect(firstPort);
+  await lifecycle.waitForIdle();
+  firstPort.disconnect();
+  lifecycle.nativeClosed();
+  timers.runAll();
+  await lifecycle.waitForIdle();
+  lifecycle.connect(createPort());
+  lifecycle.nativeOpened();
+  await lifecycle.waitForIdle();
+
+  assert.equal(opened, 2);
+  assert.equal(lifecycle.isOpen, true);
 });
 
 test("keeps another side-panel instance open when one window closes", async () => {
@@ -149,6 +178,7 @@ test("invalidates queued close work when the panel reopens", async () => {
   lifecycle.nativeClosed();
   timers.runAll();
   lifecycle.connect(createPort());
+  lifecycle.nativeOpened();
   resolveFirstOpen();
   await lifecycle.waitForIdle();
 

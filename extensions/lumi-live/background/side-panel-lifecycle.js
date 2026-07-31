@@ -13,6 +13,7 @@ export function createSidePanelLifecycle({
   let generation = 0;
   let closeTimerId = null;
   let closePending = false;
+  let nativeReopenPending = false;
   let lifecycleWork = Promise.resolve();
 
   function enqueue(work) {
@@ -26,11 +27,20 @@ export function createSidePanelLifecycle({
     closeTimerId = null;
   }
 
-  function markOpened() {
+  function markOpened({ nativeEvent = false } = {}) {
+    const wasOpen = open;
     const interruptedClose = closePending;
     cancelScheduledClose();
     closePending = false;
-    if (open && !interruptedClose) return lifecycleWork;
+    const shouldNotifyOpened = !wasOpen || (nativeEvent && nativeReopenPending);
+    if (nativeEvent || !wasOpen) nativeReopenPending = false;
+    if (!shouldNotifyOpened) {
+      // A runtime Port reconnect only restores the service-worker transport. It
+      // must not replay feature-level "panel opened" work. Still invalidate a
+      // close callback that may already be queued behind other lifecycle work.
+      if (interruptedClose) generation += 1;
+      return lifecycleWork;
+    }
     open = true;
     const currentGeneration = ++generation;
     return enqueue(() => onOpened({
@@ -48,6 +58,7 @@ export function createSidePanelLifecycle({
         if (generation !== currentGeneration) return;
         if (ports.size > 0) {
           closePending = false;
+          nativeReopenPending = false;
           return;
         }
         closePending = false;
@@ -77,10 +88,11 @@ export function createSidePanelLifecycle({
   }
 
   function nativeOpened() {
-    return markOpened();
+    return markOpened({ nativeEvent: true });
   }
 
   function nativeClosed() {
+    nativeReopenPending = true;
     scheduleClosed();
   }
 

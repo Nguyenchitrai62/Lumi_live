@@ -3962,6 +3962,7 @@ async function initialize() {
       ? stored[FAST_MODE_STORAGE_KEY]
       : DEFAULT_FAST_MODE_ENABLED,
   );
+  const workspaceInitializationPromise = sendRuntime("initialize_side_panel").catch(() => null);
   const storedPetals = stored[PETALS_STORAGE_KEY];
   applyPetals(typeof storedPetals === "boolean"
     ? storedPetals
@@ -3976,6 +3977,7 @@ async function initialize() {
     await chrome.storage.local.set({ [AVATAR_MODE_STORAGE_KEY]: storedAvatarMode });
   }
   panelAudio.startAnimations();
+  await workspaceInitializationPromise;
   let initialConnectionPromise = Promise.resolve(false);
   if (!savedKey) {
     const message = "Add a Gemini API key in Lumi Settings before connecting.";

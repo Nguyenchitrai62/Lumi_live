@@ -74,6 +74,32 @@ test("every local import reachable from a Chrome runtime entrypoint resolves", a
   assert.ok(graphs.every((graph) => graph.size > 0));
 });
 
+test("Fast workspace reconnect and manual tab grouping stay background-safe", async () => {
+  const worker = await readFile(new URL("background/index.js", extensionRoot), "utf8");
+  const controller = await readFile(new URL("side-panel/index.js", extensionRoot), "utf8");
+  const lifecycleSetupSource = worker.slice(
+    worker.indexOf("const sidePanelLifecycle = createSidePanelLifecycle"),
+    worker.indexOf("chrome.runtime.onConnect.addListener"),
+  );
+  const restoreSource = worker.slice(
+    worker.indexOf("async function restoreOrActivateFastWorkspace"),
+    worker.indexOf("async function applyFastModeEnabled"),
+  );
+  const panelInitializationSource = worker.slice(
+    worker.indexOf('if (message.command === "initialize_side_panel")'),
+    worker.indexOf('if (message.command === "connect_active_tab")'),
+  );
+
+  assert.doesNotMatch(lifecycleSetupSource, /onOpened|activateFastWorkspace/);
+  assert.match(restoreSource, /const existingGroup = await fastWorkspace\.getGroup\(\)/);
+  assert.match(restoreSource, /activateFastWorkspace\(persistedTarget\.id\)/);
+  assert.match(panelInitializationSource, /restoreOrActivateFastWorkspace\(\)/);
+  assert.match(controller, /sendRuntime\("initialize_side_panel"\)/);
+  assert.match(worker, /Object\.hasOwn\(changeInfo, "groupId"\)/);
+  assert.match(worker, /tab\?\.groupId === workspaceGroupId/);
+  assert.match(worker, /fastPromptTargetTabId = tabId/);
+});
+
 test("PageAgent mask does not consume the host page WebGL context quota", async () => {
   const build = await readFile(new URL("../../build.mjs", import.meta.url), "utf8");
   const cssMotion = await readFile(
