@@ -6,15 +6,20 @@ import {
   createVideoAnalysisService,
   extractInteractionText,
   formatTranscriptFile,
+  formatVideoSummaryMarkdown,
   formatVideoTimestamp,
   mergeVideoAnalysisSources,
   normalizeVideoAnalysisResult,
   parseCaptionPayload,
   parseHlsPlaylist,
+  parseStoredTranscriptSegments,
   rankDirectMediaCandidates,
+  videoIdentityKey,
 } from "../background/video-analysis-service.js";
 import {
+  prepareVideoAnalysisAgentResult,
   VIDEO_ANALYSIS_MODEL,
+  VIDEO_ANALYSIS_MODELS,
   VIDEO_ANALYZE_TOOL_NAME,
 } from "../live/video-analysis.js";
 import {
@@ -80,6 +85,7 @@ test("normalizes transcript timestamps and downloadable plain text", () => {
   const result = normalizeVideoAnalysisResult({
     summary: "  Summary  ",
     language: "en",
+    chapters: [{ start: "00:00", end: "00:10", title: "Context", summary: "Introduces the subject" }],
     segments: [{ start: "00:01", end: "00:03", speaker: "A", text: "Hello" }],
     importantSegments: [{ start: "00:01", end: "00:03", title: "Opening", reason: "Sets context" }],
   });
@@ -91,6 +97,46 @@ test("normalizes transcript timestamps and downloadable plain text", () => {
   });
   assert.match(transcript, /^Example\nSource: https:\/\/example\.com\/video\nLanguage: en/);
   assert.match(transcript, /\[00:01 - 00:03\] A: Hello/);
+  assert.match(formatVideoSummaryMarkdown(result), /## Content timeline/);
+  assert.match(formatVideoSummaryMarkdown(result), /From 00:00 to 00:10 — Context:/);
+});
+
+test("identifies the same video across playback URLs and restores stored transcript segments", () => {
+  assert.equal(
+    videoIdentityKey("https://www.youtube.com/watch?v=abc123&t=90"),
+    videoIdentityKey("https://youtu.be/abc123?si=share"),
+  );
+  assert.notEqual(
+    videoIdentityKey("https://www.youtube.com/watch?v=abc123"),
+    videoIdentityKey("https://www.youtube.com/watch?v=other456"),
+  );
+  assert.equal(
+    videoIdentityKey("https://www.facebook.com/reel/1554671672755534?mibextid=share"),
+    "facebook:1554671672755534",
+  );
+  assert.deepEqual(parseStoredTranscriptSegments([
+    "Example",
+    "Language: en",
+    "",
+    "[00:00 - 00:03] Narrator: First idea",
+    "[00:03 - 00:06] Second idea",
+  ].join("\n")), [
+    { start: "00:00", end: "00:03", speaker: "Narrator", text: "First idea" },
+    { start: "00:03", end: "00:06", speaker: "Speaker", text: "Second idea" },
+  ]);
+});
+
+test("renders Vietnamese summary chapters as one ordered timeline starting at zero", () => {
+  const markdown = formatVideoSummaryMarkdown({
+    language: "vi",
+    summary: "Video giải thích hai chủ đề chính.",
+    chapters: [
+      { start: "00:20", end: "00:30", title: "Phần hai", summary: "Thảo luận chủ đề thứ hai." },
+      { start: "00:05", end: "00:15", title: "Giới thiệu", summary: "Giới thiệu chủ đề đầu tiên." },
+    ],
+  });
+  assert.match(markdown, /Từ 00:00 đến 00:15 — Giới thiệu:/);
+  assert.match(markdown, /Từ 00:15 đến 00:30 — Phần hai:/);
 });
 
 test("extracts Interactions API text and prefers complete safe media URLs", () => {
@@ -396,6 +442,9 @@ test("sends a public YouTube URL directly to Gemini 3.5 Flash-Lite", async () =>
   const modelResult = {
     summary: "A concise summary.",
     language: "en",
+    chapters: [
+      { start: "00:00", end: "00:05", title: "Opening", summary: "Introduces the topic." },
+    ],
     segments: [
       { start: "00:00", end: "00:05", speaker: "Narrator", text: "Opening statement" },
     ],
@@ -441,9 +490,237 @@ test("sends a public YouTube URL directly to Gemini 3.5 Flash-Lite", async () =>
     schema: requests[0].body.response_format.schema,
   });
   assert.equal(requests[0].body.response_format.schema.type, "object");
+  assert.equal(requests[0].body.response_format.schema.properties.chapters.minItems, 1);
+  assert.match(requests[0].body.input[1].text, /context-aware editorial pass/i);
   assert.equal(result.sourceMethod, "youtube_url");
   assert.equal(result.summary, "A concise summary.");
+  assert.match(result.summaryMarkdown, /Nội dung theo từng phần/);
+  assert.match(result.summaryMarkdown, /Từ 00:00 đến 00:05/);
   assert.match(result.transcriptDownload.text, /Opening statement/);
+});
+
+test("builds a concise summary from a generated transcript and hides transcript detail", async () => {
+  const storage = createMemoryStorage();
+  const requests = [];
+  let currentUrl = "https://www.youtube.com/watch?v=summary123";
+  const service = createVideoAnalysisService({
+    chromeApi: {
+      scripting: {
+        async executeScript() {
+          return [{ result: {
+            found: true,
+            pageTitle: "Chaptered video",
+            pageUrl: currentUrl,
+            media: { kind: "video", duration: 600 },
+            captionTracks: [],
+            mediaCandidates: [],
+          } }];
+        },
+      },
+      storage: { local: storage.area },
+    },
+    fetchImpl: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      requests.push(request);
+      const isTranscriptPass = Boolean(request.response_format.schema.properties.segments);
+      const output = isTranscriptPass
+        ? {
+            language: "en",
+            segments: [
+              { start: "00:00", end: "02:30", speaker: "Narrator", text: "The speaker establishes the problem." },
+              { start: "02:30", end: "10:00", speaker: "Narrator", text: "The speaker explains the solution." },
+            ],
+          }
+        : {
+            summary: "A concise overview.",
+            language: "en",
+            chapters: [
+              { start: "00:00", end: "02:30", title: "Setup", summary: "Establishes the central problem." },
+              { start: "02:30", end: "10:00", title: "Solution", summary: "Explains the proposed solution." },
+            ],
+            importantSegments: [],
+          };
+      return new Response(JSON.stringify({
+        outputText: JSON.stringify(output),
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+    getTargetTab: async () => ({
+      id: 18,
+      title: "Chaptered video",
+      url: currentUrl,
+    }),
+    storageKey: "analyses",
+  });
+  const result = await service.analyze({ apiKey: "test-key", args: { action: "summary" } });
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].response_format.schema.properties.chapters, undefined);
+  assert.ok(requests[0].response_format.schema.properties.segments);
+  assert.match(requests[0].input[1].text, /context-aware editorial pass/i);
+  assert.match(requests[1].input[0].text, /The speaker establishes the problem/);
+  assert.equal(requests[1].response_format.schema.properties.segments, undefined);
+  assert.match(requests[1].input[1].text, /abstractive, concise outline/i);
+  assert.match(requests[1].input[1].text, /exactly one short sentence/i);
+  assert.match(requests[1].input[1].text, /first section must start at 00:00/i);
+  assert.equal(Object.hasOwn(result, "transcript"), false);
+  assert.equal(result.transcriptDownload, null);
+  assert.equal(result.transcriptSourceQuality, "model_context_corrected");
+  assert.equal(result.chapters.length, 2);
+  assert.match(result.summaryMarkdown, /From 02:30 to 10:00 — Solution:/);
+
+  const repeated = await service.analyze({ apiKey: "test-key", args: { action: "summary" } });
+  assert.equal(requests.length, 3);
+  assert.equal(requests[2].input[0].type, "text");
+  assert.match(requests[2].input[0].text, /The speaker establishes the problem/);
+  assert.equal(repeated.sourceMethod, "stored_transcript");
+  assert.equal(repeated.transcriptReused, true);
+  assert.equal(repeated.transcriptSourceQuality, "stored_transcript");
+
+  currentUrl = "https://www.youtube.com/watch?v=different456";
+  const differentVideo = await service.analyze({ apiKey: "test-key", args: { action: "summary" } });
+  assert.equal(requests.length, 5);
+  assert.equal(requests[3].input[0].uri, currentUrl);
+  assert.equal(differentVideo.sourceMethod, "youtube_url");
+  assert.equal(differentVideo.transcriptReused, false);
+});
+
+test("gives the Live agent only the complete timestamped summary presentation", () => {
+  const result = prepareVideoAnalysisAgentResult({
+    success: true,
+    summary: "A short summary that must not replace the timeline.",
+    summaryMarkdown: "## Nội dung theo từng phần\n\n- **Từ 00:00 đến 00:15 — Mở đầu:** Giới thiệu chủ đề.",
+    chapters: [{ start: "00:00", end: "00:15", title: "Mở đầu", summary: "Giới thiệu chủ đề." }],
+    importantSegments: [],
+    transcriptDownload: { text: "private download payload" },
+  }, { action: "summary" });
+  assert.match(result.presentationMarkdown, /Từ 00:00 đến 00:15/);
+  assert.match(result.presentationInstruction, /rendered directly/i);
+  assert.equal(Object.hasOwn(result, "summary"), false);
+  assert.equal(Object.hasOwn(result, "summaryMarkdown"), false);
+  assert.equal(Object.hasOwn(result, "chapters"), false);
+  assert.equal(Object.hasOwn(result, "transcriptDownload"), false);
+});
+
+test("immediately fails over between Flash-Lite models but retries 3.5 first on every new prompt", async () => {
+  const storage = createMemoryStorage();
+  const requestedModels = [];
+  const service = createVideoAnalysisService({
+    chromeApi: {
+      scripting: {
+        async executeScript() {
+          return [{ result: {
+            found: true,
+            pageTitle: "Failover video",
+            pageUrl: "https://www.youtube.com/watch?v=failover123",
+            media: { kind: "video", duration: 120 },
+            captionTracks: [],
+            mediaCandidates: [],
+          } }];
+        },
+      },
+      storage: { local: storage.area },
+    },
+    fetchImpl: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      requestedModels.push(request.model);
+      if (requestedModels.length === 1) {
+        return new Response(JSON.stringify({
+          error: {
+            code: 429,
+            status: "RESOURCE_EXHAUSTED",
+            message: "TPM quota exceeded for this model.",
+            details: [{ retryDelay: "42s" }],
+          },
+        }), { status: 429, headers: { "content-type": "application/json" } });
+      }
+      const isTranscriptPass = Boolean(request.response_format.schema.properties.segments);
+      return new Response(JSON.stringify({
+        outputText: JSON.stringify(isTranscriptPass
+          ? {
+              language: "en",
+              segments: [{ start: "00:00", end: "02:00", speaker: "Narrator", text: "The video was analyzed." }],
+            }
+          : {
+              summary: "Failover succeeded.",
+              language: "en",
+              chapters: [{ start: "00:00", end: "02:00", title: "Complete video", summary: "Explains the video's main idea." }],
+              importantSegments: [],
+            }),
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+    getTargetTab: async () => ({
+      id: 19,
+      title: "Failover video",
+      url: "https://www.youtube.com/watch?v=failover123",
+    }),
+    storageKey: "analyses",
+  });
+
+  const first = await service.analyze({ apiKey: "test-key", args: { action: "summary" } });
+  const second = await service.analyze({ apiKey: "test-key", args: { action: "summary" } });
+
+  assert.deepEqual(VIDEO_ANALYSIS_MODELS, ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]);
+  assert.deepEqual(requestedModels, [
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
+  ]);
+  assert.equal(first.model, "gemini-3.1-flash-lite");
+  assert.deepEqual(first.modelAttempts, VIDEO_ANALYSIS_MODELS);
+  assert.equal(first.modelFallbackUsed, true);
+  assert.equal(second.model, "gemini-3.5-flash-lite");
+  assert.deepEqual(second.modelAttempts, ["gemini-3.5-flash-lite"]);
+  assert.equal(second.modelFallbackUsed, false);
+});
+
+test("reports an error only after both video models are rate-limited", async () => {
+  const storage = createMemoryStorage();
+  const requestedModels = [];
+  const service = createVideoAnalysisService({
+    chromeApi: {
+      scripting: {
+        async executeScript() {
+          return [{ result: {
+            found: true,
+            pageTitle: "Limited video",
+            pageUrl: "https://www.youtube.com/watch?v=limited123",
+            media: { kind: "video", duration: 120 },
+            captionTracks: [],
+            mediaCandidates: [],
+          } }];
+        },
+      },
+      storage: { local: storage.area },
+    },
+    fetchImpl: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      requestedModels.push(request.model);
+      return new Response(JSON.stringify({
+        error: {
+          code: 429,
+          status: "RESOURCE_EXHAUSTED",
+          message: `${request.model} RPM quota exceeded.`,
+        },
+      }), { status: 429, headers: { "content-type": "application/json" } });
+    },
+    getTargetTab: async () => ({
+      id: 20,
+      title: "Limited video",
+      url: "https://www.youtube.com/watch?v=limited123",
+    }),
+    storageKey: "analyses",
+  });
+
+  await assert.rejects(
+    service.analyze({ apiKey: "test-key", args: { action: "summary" } }),
+    (error) => {
+      assert.equal(error.code, "ALL_VIDEO_MODELS_RATE_LIMITED");
+      assert.deepEqual(error.models, VIDEO_ANALYSIS_MODELS);
+      assert.match(error.message, /Both Gemini video models are currently rate-limited/);
+      return true;
+    },
+  );
+  assert.deepEqual(requestedModels, VIDEO_ANALYSIS_MODELS);
 });
 
 test("remuxes a small Facebook MP4 audio container to inline AAC for Gemini", async () => {
@@ -507,6 +784,9 @@ test("remuxes a small Facebook MP4 audio container to inline AAC for Gemini", as
         assert.equal(request.input[0].mime_type, "audio/aac");
         assert.equal(request.input[0].data, "AQIDBA==");
         assert.equal(Object.hasOwn(request.input[0], "uri"), false);
+        assert.equal(request.response_format.schema.properties.chapters, undefined);
+        assert.match(request.input[1].text, /context-aware editorial pass/i);
+        assert.match(request.input[1].text, /\[không rõ\]/i);
         assert.equal(request.response_format.mime_type, "application/json");
         return new Response(JSON.stringify({
           steps: [
@@ -734,5 +1014,6 @@ test("publishes the built-in video tool and its routing guidance", () => {
   assert.match(instruction, /summarize, transcribe, extract subtitles/i);
   assert.match(instruction, /downloadable transcript/i);
   assert.match(instruction, /Gemini 3\.5 Flash-Lite/i);
+  assert.match(instruction, /Gemini 3\.1 Flash-Lite/i);
   assert.match(instruction, /action=inspect/i);
 });

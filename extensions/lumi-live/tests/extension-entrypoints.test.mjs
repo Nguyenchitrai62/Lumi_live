@@ -312,6 +312,7 @@ test("side panel connects chat without requiring a microphone and remembers mic 
 
 test("side panel keeps Lumi's layout while improving contrast and primary control ergonomics", async () => {
   const html = await readFile(new URL("side-panel/index.html", extensionRoot), "utf8");
+  const controller = await readFile(new URL("side-panel/index.js", extensionRoot), "utf8");
   const styles = await readFile(new URL("side-panel/styles.css", extensionRoot), "utf8");
   const formStart = html.indexOf('<form id="messageForm"');
   const formEnd = html.indexOf("</form>", formStart);
@@ -329,6 +330,16 @@ test("side panel keeps Lumi's layout while improving contrast and primary contro
   assert.match(styles, /\.message-form\s*\{[^}]*grid-template-columns:\s*auto minmax\(0,1fr\) auto auto;/);
   assert.match(styles, /\.message-form button\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;/);
   assert.match(styles, /\.chat-session-delete\s*\{[^}]*opacity:\s*\.62;/);
+  assert.match(controller, /function appendMessageTimestamp\(/);
+  assert.match(controller, /function beginTurnWork\(/);
+  assert.match(controller, /function finishTurnWork\(/);
+  assert.match(controller, /function createVideoSummaryPresentationMessage\(/);
+  assert.match(controller, /directVideoPresentationTurnSequence === turnExecutionSequence/);
+  assert.match(controller, /prepareVideoAnalysisAgentResult\(result, args\)/);
+  assert.match(styles, /\.message \.message-meta/);
+  assert.match(styles, /\.turn-work-status/);
+  assert.match(styles, /@keyframes turn-work-dot/);
+  assert.match(styles, /body\.fast-mode \.agent-step-card\[data-state="running"\] \.agent-step-marker::after\s*\{[^}]*animation-duration:[^}]*animation-iteration-count:\s*infinite/);
   assert.match(styles, /@media \(prefers-contrast: more\)/);
   assert.match(styles, /@media \(forced-colors: active\)/);
 });

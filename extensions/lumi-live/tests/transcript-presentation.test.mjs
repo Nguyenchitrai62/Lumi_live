@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   findCommonCharacterPrefix,
+  formatMessageTimestamp,
+  formatTurnDuration,
   getLiveModelPartTranscriptRole,
   isScrollAtBottom,
 } from "../side-panel/transcript-presentation.js";
@@ -78,6 +80,13 @@ test("routes only real Live model text to a visible transcript role", () => {
     getLiveModelPartTranscriptRole({ thought: true, text: "   " }),
     null,
   );
+});
+
+test("formats message timestamps and whole-prompt processing durations", () => {
+  assert.match(formatMessageTimestamp(Date.now()), /\d{1,2}.*\d{2}/);
+  assert.equal(formatTurnDuration(23_200), "23 giây");
+  assert.equal(formatTurnDuration(68_000), "1 phút 8 giây");
+  assert.equal(formatTurnDuration(120_000), "2 phút");
 });
 
 test("transcript follow activates only at the actual bottom", () => {

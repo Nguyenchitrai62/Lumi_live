@@ -33,10 +33,16 @@ import {
   LIVE_TRANSLATE_TOOL_NAME,
   normalizeLiveTranslationLanguageCode,
 } from "../live/translate.js";
-import { VIDEO_ANALYSIS_MODEL, VIDEO_ANALYZE_TOOL_NAME } from "../live/video-analysis.js";
+import {
+  prepareVideoAnalysisAgentResult,
+  VIDEO_ANALYSIS_MODEL,
+  VIDEO_ANALYZE_TOOL_NAME,
+} from "../live/video-analysis.js";
 import { mergeTranscriptText } from "../live/audio-utils.js";
 import {
   findCommonCharacterPrefix,
+  formatMessageTimestamp,
+  formatTurnDuration,
   getLiveModelPartTranscriptRole,
   getTranscriptRevealDurationMs,
   isScrollAtBottom,
@@ -277,6 +283,8 @@ let thinkingCollapseFrameId = null;
 let transcriptAutoFollow = true;
 let transcriptProgrammaticScroll = false;
 let transcriptProgrammaticScrollTimerId = null;
+let activeTurnWork = null;
+let directVideoPresentationTurnSequence = null;
 
 let petalsEnabled = DEFAULT_FALLING_PETALS_ENABLED;
 let fastModeController = null;
@@ -322,6 +330,8 @@ const panelAudio = createPanelAudioController({
     userTurnAuthorized = true;
     sendPendingConversationBoundary();
     turnExecutionSequence += 1;
+    directVideoPresentationTurnSequence = null;
+    beginTurnWork(turnExecutionSequence);
     taskOrchestrator.cancelTask("The task was interrupted by a new voice request.");
     activeTurnUserRequest = "";
     finalizeTranscript("user");
@@ -800,6 +810,7 @@ function completeTurnCancellation() {
   if (!turnCancellationPending) return;
   clearTurnCancellationTimers();
   resetPendingTurnExecution();
+  finishTurnWork({ cancelled: true });
   turnCancellationPending = false;
   setAgentTurnActive(false);
   elements.statusLine.textContent = "Current action stopped. Waiting silently for your next instruction.";
@@ -1044,6 +1055,11 @@ async function restoreActiveChatSessionSnapshot(session) {
   elements.transcript.innerHTML = sanitizeStoredTranscriptHtml(
     snapshot.transcriptHtml,
   );
+  for (const row of elements.transcript.querySelectorAll('.turn-work-status[data-state="working"]')) {
+    row.dataset.state = "cancelled";
+    const label = row.querySelector(".turn-work-label");
+    if (label) label.textContent = "Phiên xử lý đã kết thúc sau";
+  }
   if (snapshot.taskHistory.length) {
     taskOrchestrator.restore(snapshot.taskHistory);
   }
@@ -1751,7 +1767,101 @@ function revealTranscriptText(message, targetText) {
   message.revealFrameId = requestAnimationFrame(revealFrame);
 }
 
-function createMessage(role, text, { attachment = null } = {}) {
+function appendMessageTimestamp(article, timestamp = Date.now()) {
+  const footer = document.createElement("footer");
+  footer.className = "message-meta";
+  const time = document.createElement("time");
+  const date = new Date(Number(timestamp) || Date.now());
+  time.dateTime = date.toISOString();
+  time.textContent = formatMessageTimestamp(date.getTime());
+  footer.append(time);
+  article.append(footer);
+  return footer;
+}
+
+function ensureTurnWorkIndicator(work = activeTurnWork) {
+  if (!work) return null;
+  const userMessage = elements.transcript.querySelector(
+    `.message-user[data-turn-sequence="${work.turnSequence}"]`,
+  );
+  if (work.row?.isConnected) {
+    // Voice turns can begin before the final user transcript bubble exists.
+    // Move the live status beneath that bubble as soon as it is rendered.
+    if (userMessage && work.row.previousElementSibling !== userMessage) userMessage.after(work.row);
+    return work.row;
+  }
+  const row = document.createElement("section");
+  row.className = "turn-work-status";
+  row.dataset.state = "working";
+  row.dataset.turnSequence = String(work.turnSequence);
+  row.setAttribute("role", "status");
+  row.setAttribute("aria-live", "polite");
+  const animation = document.createElement("span");
+  animation.className = "turn-work-animation";
+  animation.setAttribute("aria-hidden", "true");
+  animation.append(
+    document.createElement("i"),
+    document.createElement("i"),
+    document.createElement("i"),
+  );
+  const label = document.createElement("strong");
+  label.className = "turn-work-label";
+  label.textContent = "Lumi đang xử lý";
+  const duration = document.createElement("span");
+  duration.className = "turn-work-duration";
+  duration.textContent = formatTurnDuration(performance.now() - work.startedAt);
+  const chevron = document.createElement("span");
+  chevron.className = "turn-work-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  row.append(animation, label, duration, chevron);
+  if (userMessage) userMessage.after(row);
+  else elements.transcript.append(row);
+  work.row = row;
+  work.label = label;
+  work.duration = duration;
+  scrollTranscriptToLatest({ smooth: true });
+  scheduleActiveChatSnapshotPersist();
+  return row;
+}
+
+function beginTurnWork(turnSequence) {
+  if (activeTurnWork) finishTurnWork({ cancelled: true });
+  const work = {
+    turnSequence: Number(turnSequence),
+    startedAt: performance.now(),
+    startedWallTime: Date.now(),
+    timerId: null,
+    row: null,
+    label: null,
+    duration: null,
+  };
+  activeTurnWork = work;
+  ensureTurnWorkIndicator(work);
+  work.timerId = setInterval(() => {
+    if (activeTurnWork !== work) return;
+    ensureTurnWorkIndicator(work);
+    if (work.duration) {
+      work.duration.textContent = formatTurnDuration(performance.now() - work.startedAt);
+    }
+  }, 1000);
+  return work;
+}
+
+function finishTurnWork({ cancelled = false } = {}) {
+  const work = activeTurnWork;
+  if (!work) return null;
+  activeTurnWork = null;
+  clearInterval(work.timerId);
+  ensureTurnWorkIndicator(work);
+  const durationMs = Math.max(0, performance.now() - work.startedAt);
+  if (work.row) work.row.dataset.state = cancelled ? "cancelled" : "complete";
+  if (work.label) work.label.textContent = cancelled ? "Đã dừng sau" : "Xử lý trong";
+  if (work.duration) work.duration.textContent = formatTurnDuration(durationMs);
+  scheduleActiveChatSnapshotPersist();
+  return { durationMs, turnSequence: work.turnSequence };
+}
+
+function createMessage(role, text, { attachment = null, createdAt = Date.now() } = {}) {
   if (role === "thinking") {
     const details = document.createElement("details");
     details.className = "message-thinking";
@@ -1801,6 +1911,7 @@ function createMessage(role, text, { attachment = null } = {}) {
   }
   const article = document.createElement("article");
   article.className = `message message-${role}`;
+  article.dataset.turnSequence = String(turnExecutionSequence);
   if (role === "user" && attachment) article.classList.add("message-attachment");
   const author = document.createElement("span");
   author.textContent = role === "lumi" ? "Lumi" : "You";
@@ -1816,7 +1927,9 @@ function createMessage(role, text, { attachment = null } = {}) {
     article.append(image);
   }
   article.append(content);
+  appendMessageTimestamp(article, createdAt);
   elements.transcript.append(article);
+  if (role === "user") ensureTurnWorkIndicator();
   scrollTranscriptToLatest();
   return { article, content, role, text, visibleText: text };
 }
@@ -1876,9 +1989,25 @@ function createTranscriptDownloadMessage(downloadInfo, analysis) {
   scheduleActiveChatSnapshotPersist();
 }
 
+function createVideoSummaryPresentationMessage(markdown) {
+  const presentation = String(markdown || "").trim();
+  if (!presentation) return false;
+  finalizeTranscript("lumi");
+  directVideoPresentationTurnSequence = turnExecutionSequence;
+  const message = createMessage("lumi", presentation);
+  renderMarkdown(message.content, presentation);
+  message.visibleText = presentation;
+  rememberConversationTurn("lumi", presentation);
+  scheduleCompletedThinkingCollapse();
+  scheduleActiveChatSnapshotPersist();
+  scrollTranscriptToLatest({ smooth: true });
+  return true;
+}
+
 function updateTranscript(role, incoming) {
   const clean = String(incoming || "").trim();
   if (!clean) return;
+  if (role === "lumi" && directVideoPresentationTurnSequence === turnExecutionSequence) return;
   if (role === "thinking" && currentTurnHasTaskStepView()) return;
   if (role === "lumi") lumiContentSequence += 1;
   if (!partialMessages[role]) {
@@ -2339,8 +2468,10 @@ async function runVideoAnalysisTool(args = {}) {
     if (result?.transcriptDownload?.text) {
       createTranscriptDownloadMessage(result.transcriptDownload, result);
     }
-    const sanitized = { ...result };
-    delete sanitized.transcriptDownload;
+    if (["summary", "both"].includes(String(args.action || "summary"))) {
+      createVideoSummaryPresentationMessage(result?.summaryMarkdown);
+    }
+    const sanitized = prepareVideoAnalysisAgentResult(result, args);
     elements.statusLine.textContent = result?.sourceMethod?.includes("caption")
       ? `Used the video's existing captions · ${result.sourceTitle || "current video"}.`
       : `Analyzed ${result.sourceTitle || "the current video"} with ${result.model || VIDEO_ANALYSIS_MODEL}.`;
@@ -2667,6 +2798,7 @@ async function handleServerMessage(event, sourceSocket) {
     finalizeTranscript("lumi");
     finalizeTranscript("thinking");
     setAgentTurnActive(false);
+    finishTurnWork({ cancelled: true });
     if (wasUserCancellation) {
       elements.statusLine.textContent = "Current action cancelled. Lumi is ready for your next request.";
     }
@@ -2919,6 +3051,7 @@ async function handleServerMessage(event, sourceSocket) {
       finalizeTranscript("lumi");
       finalizeTranscript("thinking");
       setAgentTurnActive(false);
+      finishTurnWork({ cancelled: wasUserCancellation });
       userTurnAuthorized = false;
       activeTurnUserRequest = "";
       if (wasUserCancellation) {
@@ -3338,6 +3471,7 @@ function cleanupMedia({ cancelActiveTask = true } = {}) {
   setLiveTranslationBadge("off");
   panelAudio.closeSession();
   responseAudioGate.reset();
+  finishTurnWork({ cancelled: true });
   websocket = null;
   isMuted = true;
   microphoneWarning = "";
@@ -3498,6 +3632,8 @@ async function sendText(
 
   activeTurnUserRequest = userRequestText;
   turnExecutionSequence += 1;
+  directVideoPresentationTurnSequence = null;
+  beginTurnWork(turnExecutionSequence);
   if (suppressServerOutputUntilNextUserTurn) markFreshUserInputStarted();
   responseAudioGate.reset();
   finalizeTranscript("user");

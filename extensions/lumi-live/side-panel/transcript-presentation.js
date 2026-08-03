@@ -34,6 +34,22 @@ export function getLiveModelPartTranscriptRole(part) {
   return part.thought === true ? "thinking" : "lumi";
 }
 
+export function formatMessageTimestamp(timestamp = Date.now()) {
+  const date = new Date(Number(timestamp) || Date.now());
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+export function formatTurnDuration(durationMs) {
+  const totalSeconds = Math.max(0, Math.round((Number(durationMs) || 0) / 1000));
+  if (totalSeconds < 60) return `${totalSeconds} giây`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds ? `${minutes} phút ${seconds} giây` : `${minutes} phút`;
+}
+
 export function isScrollAtBottom({
   scrollHeight = 0,
   scrollTop = 0,
