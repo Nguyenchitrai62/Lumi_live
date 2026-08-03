@@ -537,6 +537,8 @@ body.vtuber-expanded .transcript { opacity: 0; visibility: hidden; }
 .message-send-icon { font-size: 20px; line-height: 1; transform: translateY(-1px); }
 .message-cancel-icon { position: relative; display: none; width: 18px; height: 18px; border: 2px solid currentColor; border-radius: 50%; }
 .message-cancel-icon::after { content: ""; position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; border-radius: 1px; background: currentColor; transform: translate(-50%,-50%); }
+.message-form button[data-mode="send"] .message-send-icon { display: inline-flex; }
+.message-form button[data-mode="send"] .message-cancel-icon { display: none; }
 .message-form button[data-mode="cancel"] { border-radius: 50%; background: linear-gradient(145deg,#dc7890,#bc4f69); box-shadow: 0 0 0 0 rgba(206,107,130,.32); animation: message-cancel-pulse var(--ui-motion-cancel-pulse) ease-out infinite; }
 .message-form button[data-mode="cancel"] .message-send-icon { display: none; }
 .message-form button[data-mode="cancel"] .message-cancel-icon { display: block; }

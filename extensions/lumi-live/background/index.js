@@ -6,7 +6,11 @@ import {
 import { EXTENSION_EVENTS, STORAGE_KEYS } from "../core/extension-config.js";
 import { normalizeVisualPreferences } from "../core/visual-preferences.js";
 import { saveCapturedTabAsset } from "./captured-tab-assets.js";
-import { createFastWorkspace } from "./fast-workspace.js";
+import {
+  createFastWorkspace,
+  filterPromptLockedTabs,
+  selectPromptWorkspaceTab,
+} from "./fast-workspace.js";
 import { createSidePanelLifecycle } from "./side-panel-lifecycle.js";
 import {
   collectWindowOpenCallsInPage,
@@ -76,6 +80,14 @@ const videoAnalysis = createVideoAnalysisService({
   chromeApi: chrome,
   storageKey: STORAGE_KEYS.videoAnalyses,
   getTargetTab: async () => {
+    if (fastModeEnabled && Number.isInteger(fastPromptTargetTabId)) {
+      const lockedTab = await chrome.tabs.get(fastPromptTargetTabId).catch(() => null);
+      if (
+        lockedTab?.id
+        && isControllablePage(lockedTab.url)
+        && await fastWorkspace.containsTab(lockedTab.id)
+      ) return lockedTab;
+    }
     const activeTab = await getActiveTab();
     if (activeTab?.id && /^https?:\/\//i.test(activeTab.url || "")) return activeTab;
     const status = await getStatus();
@@ -523,17 +535,11 @@ async function prepareBrowserPrompt() {
   const promptedActiveTab = workspaceTabs.find(
     (tab) => tab.id === activeTab?.id && isControllablePage(tab.url),
   );
-  const lastActiveWorkspaceTab = workspaceTabs.find(
-    (tab) => tab.id === fastLastActiveWorkspaceTabId && isControllablePage(tab.url),
-  );
-  const connectedWorkspaceTab = workspaceTabs.find(
-    (tab) => tab.id === connectedTabId && isControllablePage(tab.url),
-  );
-  const tab = promptedActiveTab
-    || lastActiveWorkspaceTab
-    || connectedWorkspaceTab
-    || workspaceTabs.find((candidate) => isControllablePage(candidate.url))
-    || null;
+  const tab = selectPromptWorkspaceTab(workspaceTabs, {
+    activeTabId: promptedActiveTab?.id,
+    lastActiveTabId: fastLastActiveWorkspaceTabId,
+    connectedTabId,
+  });
   if (!tab?.id) {
     fastPromptTargetTabId = null;
     await setConnectedTab(null);
@@ -542,7 +548,7 @@ async function prepareBrowserPrompt() {
       workspace: fastWorkspace.state(),
       target: null,
       controllerReady: false,
-      restriction: "workspace_tabs_only",
+      restriction: "single_prompt_tab",
     };
   }
 
@@ -555,7 +561,7 @@ async function prepareBrowserPrompt() {
     workspace: fastWorkspace.state({ windowId: tab.windowId }),
     target: serializeTab(await chrome.tabs.get(tab.id)),
     controllerReady,
-    restriction: "workspace_tabs_only",
+    restriction: "single_prompt_tab",
   };
 }
 
@@ -1176,7 +1182,9 @@ async function listBrowserTabs() {
   const tabs = await chrome.tabs.query(fastModeEnabled && workspaceGroup?.id !== undefined
     ? { groupId: workspaceGroup.id }
     : { windowId: focusedWindow.windowId ?? focusedWindow.id });
-  const listedTabs = tabs.filter((tab) => Number.isInteger(tab.id));
+  const listedTabs = fastModeEnabled
+    ? filterPromptLockedTabs(tabs, fastPromptTargetTabId)
+    : tabs.filter((tab) => Number.isInteger(tab.id));
   listedTabIds = new Set(listedTabs.map((tab) => tab.id));
   listedTabsExpireAt = Date.now() + 30000;
   return {
@@ -1547,6 +1555,9 @@ async function switchBrowserTab(args = {}, action) {
   const tab = await chrome.tabs.get(tabId);
   const controllable = isControllablePage(tab.url);
   if (fastModeEnabled) {
+    if (Number.isInteger(fastPromptTargetTabId) && tabId !== fastPromptTargetTabId) {
+      throw new Error("This prompt is locked to one Agent Space tab. Other workspace tabs are unavailable until the next user prompt.");
+    }
     if (!controllable) {
       throw new Error("Fast workspace can control only http, https, or permitted file tabs.");
     }
@@ -1710,8 +1721,10 @@ async function handleMessage(message) {
   if (message.command === "cancel_active_mcp_calls") return cancelActiveMcpCalls();
   if (message.command === "cancel_video_analysis") return videoAnalysis.cancelActive();
   if (message.command === "analyze_current_video") {
+    const storedCredentials = await chrome.storage.local.get([STORAGE_KEYS.groqApiKey]);
     return videoAnalysis.analyze({
       apiKey: message.apiKey,
+      groqApiKey: String(storedCredentials[STORAGE_KEYS.groqApiKey] || "").trim(),
       args: message.args || {},
     });
   }

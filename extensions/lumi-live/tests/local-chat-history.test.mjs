@@ -208,6 +208,7 @@ test("wires New chat, the saved-session dialog, switching, deletion, and clearin
   assert.match(newChatSource, /findReusableBlankChatSession/);
   assert.match(newChatSource, /cancelConversationWorkForChatChange\(\)/);
   assert.match(newChatSource, /clearConversationContext\(\)/);
+  assert.match(newChatSource, /isolateChatTransportAfterCancelledTurn\(cancelledInFlightTurn\)/);
   assert.doesNotMatch(
     newChatSource,
     /stopSession|autoStartSessionIfReady|websocket(?:\?|)\.close|cleanupMedia/,
@@ -215,8 +216,13 @@ test("wires New chat, the saved-session dialog, switching, deletion, and clearin
   assert.match(panelController, /restoreLocalChatHistory\(\)/);
   assert.match(panelController, /pendingConversationBoundary = true/);
   assert.match(panelController, /sendPendingConversationBoundary\(\)/);
+  assert.match(panelController, /function isolateChatTransportAfterCancelledTurn/);
+  assert.match(panelController, /allowInFlight:\s*true/);
+  assert.match(panelController, /discardOldContext:\s*true/);
+  assert.match(panelController, /cancelledTurnBoundarySeen = false/);
   assert.match(panelController, /await chatHistoryStore\.clear\(\)/);
   assert.match(panelStyles, /\.chat-history-dialog/);
   assert.match(panelStyles, /\.chat-confirmation-dialog/);
   assert.match(panelStyles, /\.chat-session-row\.is-active/);
+  assert.match(panelStyles, /button\[data-mode="send"\] \.message-cancel-icon \{ display: none; \}/);
 });

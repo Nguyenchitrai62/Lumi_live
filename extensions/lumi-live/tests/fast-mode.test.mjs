@@ -66,12 +66,15 @@ test("wires Fast mode through settings, the side panel, the workspace, and the p
   assert.match(worker, /!await fastWorkspace\.containsTab\(activeTab\.id\)/);
   assert.match(worker, /await fastWorkspace\.addTab\(activeTab\.id\)/);
   assert.match(worker, /tab\.id === activeTab\?\.id/);
-  assert.match(worker, /restriction: "workspace_tabs_only"/);
+  assert.match(worker, /restriction: "single_prompt_tab"/);
+  assert.match(worker, /filterPromptLockedTabs\(tabs, fastPromptTargetTabId\)/);
+  assert.match(worker, /lockedTab = await chrome\.tabs\.get\(fastPromptTargetTabId\)/);
   assert.match(worker, /\? \{ groupId: workspaceGroup\.id \}/);
   assert.match(worker, /Fast mode can switch only to tabs already inside Agent Space/);
   assert.match(panelController, /await sendRuntime\("prepare_browser_prompt"\)/);
   assert.match(panelController, /onUserSpeechStart:[^]*sendRuntime\("prepare_browser_prompt"\)/);
-  assert.match(panelController, /This turn is locked to workspace tabId/);
+  assert.match(panelController, /entire user prompt is locked to exactly one tab/);
+  assert.match(panelController, /Ignore every other Agent Space tab/);
   assert.match(workspace, /tabsApi\.group/);
   assert.match(workspace, /autoDiscardable: false/);
   assert.ok(JSON.parse(manifest).permissions.includes("tabGroups"));

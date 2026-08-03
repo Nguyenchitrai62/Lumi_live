@@ -34,13 +34,25 @@
             <section class="connection-field api-field">
               <div class="field-label-row">
                 <label for="apiKeyInput">Gemini API key</label>
-                <a class="api-key-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Create or get an API key ↗</a>
+                <a class="api-key-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Get key <span aria-hidden="true">&#8599;</span></a>
               </div>
               <div class="key-row">
                 <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste a Google AI Studio key" />
                 <button id="toggleKeyButton" class="secondary" type="button">Show</button>
               </div>
               <p class="field-help">Stored only in this browser.</p>
+            </section>
+
+            <section class="connection-field groq-field">
+              <div class="field-label-row">
+                <label for="groqApiKeyInput">Groq API key <span class="optional-label">Optional</span></label>
+                <a class="api-key-link" href="https://console.groq.com/keys" target="_blank" rel="noreferrer">Get key <span aria-hidden="true">&#8599;</span></a>
+              </div>
+              <div class="key-row">
+                <input id="groqApiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste a Groq key (gsk_...)" />
+                <button id="toggleGroqKeyButton" class="secondary" type="button">Show</button>
+              </div>
+              <p class="field-help">Uses Whisper Large V3 Turbo first, then Whisper Large V3 on rate limit. Without a Groq key, Lumi uses complete captions first and then Gemini 3.5 Flash-Lite. Stored only in this browser.</p>
             </section>
 
             <section class="connection-field voice-field">

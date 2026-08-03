@@ -11,6 +11,7 @@ import {
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
+const GROQ_API_KEY_STORAGE_KEY = STORAGE_KEYS.groqApiKey;
 const VOICE_STORAGE_KEY = STORAGE_KEYS.voice;
 const ELEMENT_HIGHLIGHTS_STORAGE_KEY = STORAGE_KEYS.elementHighlights;
 const FAST_MODE_STORAGE_KEY = STORAGE_KEYS.fastMode;
@@ -19,8 +20,10 @@ const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
 const elements = {
   extensionVersion: document.querySelector("#extensionVersion"),
   apiKeyInput: document.querySelector("#apiKeyInput"),
+  groqApiKeyInput: document.querySelector("#groqApiKeyInput"),
   voiceInput: document.querySelector("#voiceInput"),
   toggleKeyButton: document.querySelector("#toggleKeyButton"),
+  toggleGroqKeyButton: document.querySelector("#toggleGroqKeyButton"),
   previewVoiceButton: document.querySelector("#previewVoiceButton"),
   saveSettingsButton: document.querySelector("#saveSettingsButton"),
   saveNote: document.querySelector("#saveNote"),
@@ -117,18 +120,28 @@ async function openMicrophonePermissionPage() {
 
 async function saveSettings() {
   const apiKey = elements.apiKeyInput.value.trim();
+  const groqApiKey = elements.groqApiKeyInput.value.trim();
   if (!apiKey) {
     elements.saveNote.dataset.state = "error";
     elements.saveNote.textContent = "Enter a Gemini API key before saving.";
     elements.apiKeyInput.focus();
     return;
   }
+  if (groqApiKey && !groqApiKey.startsWith("gsk_")) {
+    elements.saveNote.dataset.state = "error";
+    elements.saveNote.textContent = "Groq API keys should start with gsk_.";
+    elements.groqApiKeyInput.focus();
+    return;
+  }
   await chrome.storage.local.set({
     [API_KEY_STORAGE_KEY]: apiKey,
+    [GROQ_API_KEY_STORAGE_KEY]: groqApiKey,
     [VOICE_STORAGE_KEY]: elements.voiceInput.value || DEFAULT_VOICE_NAME,
   });
   elements.saveNote.dataset.state = "saved";
-  elements.saveNote.textContent = `Saved. Lumi will use ${elements.voiceInput.value} for the next voice session.`;
+  elements.saveNote.textContent = groqApiKey
+    ? `Saved. Lumi will use complete video captions first, then Groq Whisper when audio transcription is needed; ${elements.voiceInput.value} remains Lumi's voice.`
+    : `Saved. Without a Groq key, Lumi will use complete video captions first and then Gemini 3.5 Flash-Lite; ${elements.voiceInput.value} remains Lumi's voice.`;
 }
 
 async function saveVisualPreference() {
@@ -160,6 +173,11 @@ elements.toggleKeyButton.addEventListener("click", () => {
   const shouldShow = elements.apiKeyInput.type === "password";
   elements.apiKeyInput.type = shouldShow ? "text" : "password";
   elements.toggleKeyButton.textContent = shouldShow ? "Hide" : "Show";
+});
+elements.toggleGroqKeyButton.addEventListener("click", () => {
+  const shouldShow = elements.groqApiKeyInput.type === "password";
+  elements.groqApiKeyInput.type = shouldShow ? "text" : "password";
+  elements.toggleGroqKeyButton.textContent = shouldShow ? "Hide" : "Show";
 });
 elements.saveSettingsButton.addEventListener("click", () => void saveSettings());
 elements.previewVoiceButton.addEventListener("click", () => void voicePreview.toggle());
@@ -195,11 +213,13 @@ async function initialize() {
   elements.extensionVersion.textContent = `v${manifest.version}`;
   const stored = await chrome.storage.local.get([
     API_KEY_STORAGE_KEY,
+    GROQ_API_KEY_STORAGE_KEY,
     VOICE_STORAGE_KEY,
     ELEMENT_HIGHLIGHTS_STORAGE_KEY,
     FAST_MODE_STORAGE_KEY,
   ]);
   elements.apiKeyInput.value = String(stored[API_KEY_STORAGE_KEY] || "");
+  elements.groqApiKeyInput.value = String(stored[GROQ_API_KEY_STORAGE_KEY] || "");
   elements.voiceInput.value = String(stored[VOICE_STORAGE_KEY] || DEFAULT_VOICE_NAME);
   voicePreview.updateVoiceProfiles();
   applyVisualPreferenceControls({

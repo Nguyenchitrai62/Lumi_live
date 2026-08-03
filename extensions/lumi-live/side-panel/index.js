@@ -102,6 +102,7 @@ import {
   normalizeLocalChatHistoryState,
 } from "./local-chat-history.js";
 import { createLocalChatSnapshotStore } from "./local-chat-snapshots.js";
+import { shouldIgnoreStaleTypedTurnBoundary } from "./turn-boundary-policy.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const API_KEY_STORAGE_KEY = STORAGE_KEYS.apiKey;
@@ -285,6 +286,9 @@ let transcriptProgrammaticScroll = false;
 let transcriptProgrammaticScrollTimerId = null;
 let activeTurnWork = null;
 let directVideoPresentationTurnSequence = null;
+let typedTurnInFlight = false;
+let typedTurnStartedAt = 0;
+let typedTurnServerPayloadSeen = false;
 
 let petalsEnabled = DEFAULT_FALLING_PETALS_ENABLED;
 let fastModeController = null;
@@ -315,6 +319,7 @@ const panelAudio = createPanelAudioController({
   getInputState: () => ({
     canSendAudio: isGeminiTransportReady()
       && !isMuted
+      && !typedTurnInFlight
       && !turnCancellationPending
       && !pendingSessionHandoffSocket,
     freshUserInputStarted,
@@ -734,6 +739,11 @@ function setAgentTurnActive(active) {
     turnCancellationPending
     || (suppressServerOutputUntilNextUserTurn && !freshUserInputStarted)
   )) return;
+  if (active !== true) {
+    typedTurnInFlight = false;
+    typedTurnStartedAt = 0;
+    typedTurnServerPayloadSeen = false;
+  }
   agentTurnActive = sessionStatus === "ready" && active === true;
   syncMessageComposer();
 }
@@ -1365,7 +1375,7 @@ async function startNewChatSession() {
       elements.messageInput.focus();
       return true;
     }
-    cancelConversationWorkForChatChange();
+    const cancelledInFlightTurn = cancelConversationWorkForChatChange();
     await flushActiveChatSnapshotPersist();
     currentSession = getActiveChatSession();
     const reusableBlank = findReusableBlankChatSession(
@@ -1391,6 +1401,7 @@ async function startNewChatSession() {
     removeSnapshotsForDroppedSessions(previousSessions, chatHistoryState.sessions);
     await renderActiveChatSession();
     await chatHistoryStore.save(chatHistoryState);
+    isolateChatTransportAfterCancelledTurn(cancelledInFlightTurn);
     closeChatHistory();
     elements.messageInput.focus();
     elements.statusLine.textContent = "New chat is ready. Connection stays active.";
@@ -1413,7 +1424,7 @@ async function activateChatSession(sessionId) {
       (session) => session.id === requestedSessionId,
     );
     if (!selectedSession) return false;
-    cancelConversationWorkForChatChange();
+    const cancelledInFlightTurn = cancelConversationWorkForChatChange();
     await flushActiveChatSnapshotPersist();
     clearConversationContext();
     chatHistoryState = normalizeLocalChatHistoryState({
@@ -1422,6 +1433,7 @@ async function activateChatSession(sessionId) {
     });
     await renderActiveChatSession();
     await chatHistoryStore.save(chatHistoryState);
+    isolateChatTransportAfterCancelledTurn(cancelledInFlightTurn);
     closeChatHistory();
     elements.statusLine.textContent =
       `Opened “${selectedSession.title}”. Connection stays active.`;
@@ -1442,7 +1454,9 @@ async function deleteChatSession(sessionId) {
   if (!confirmed) return false;
   return runChatSessionMutation(async () => {
     const deletingActiveSession = selectedSession.id === chatHistoryState.activeSessionId;
-    if (deletingActiveSession) cancelConversationWorkForChatChange();
+    const cancelledInFlightTurn = deletingActiveSession
+      ? cancelConversationWorkForChatChange()
+      : false;
     if (deletingActiveSession) await flushActiveChatSnapshotPersist();
     const remainingSessions = chatHistoryState.sessions.filter(
       (session) => session.id !== selectedSession.id,
@@ -1463,6 +1477,7 @@ async function deleteChatSession(sessionId) {
     }
     await chatSnapshotStore.delete(selectedSession.id);
     await chatHistoryStore.save(chatHistoryState);
+    isolateChatTransportAfterCancelledTurn(cancelledInFlightTurn);
     elements.statusLine.textContent = deletingActiveSession
       ? "Chat deleted. Connection stays active."
       : "Chat deleted from this device.";
@@ -1478,7 +1493,7 @@ async function clearLocalChatHistory() {
   });
   if (!confirmed) return false;
   return runChatSessionMutation(async () => {
-    cancelConversationWorkForChatChange();
+    const cancelledInFlightTurn = cancelConversationWorkForChatChange();
     clearConversationContext();
     const session = createBlankChatSession();
     chatHistoryState = normalizeLocalChatHistoryState({
@@ -1490,6 +1505,7 @@ async function clearLocalChatHistory() {
     await chatHistoryStore.clear();
     await chrome.storage.local.remove(VIDEO_ANALYSES_STORAGE_KEY);
     await chatHistoryStore.save(chatHistoryState);
+    isolateChatTransportAfterCancelledTurn(cancelledInFlightTurn);
     closeChatHistory();
     elements.statusLine.textContent =
       "All chats and saved video transcripts cleared. Connection stays active.";
@@ -1524,7 +1540,7 @@ function sendPendingConversationBoundary() {
 }
 
 function cancelConversationWorkForChatChange() {
-  if (!sessionHasInFlightWork() && !agentTurnActive && !pendingToolCallIds.size) return;
+  if (!sessionHasInFlightWork() && !agentTurnActive && !pendingToolCallIds.size) return false;
   clearTurnCancellationTimers();
   clearTurnCancellationBoundaryTimeout();
   turnExecutionSequence += 1;
@@ -1532,7 +1548,7 @@ function cancelConversationWorkForChatChange() {
   activeTurnUserRequest = "";
   turnCancellationPending = false;
   suppressServerOutputUntilNextUserTurn = true;
-  cancelledTurnBoundarySeen = true;
+  cancelledTurnBoundarySeen = false;
   freshUserInputStarted = false;
   const cancelledResponses = resetPendingTurnExecution("Cancelled because the user changed chats.");
   if (cancelledResponses.length) {
@@ -1545,6 +1561,28 @@ function cancelConversationWorkForChatChange() {
     sendRuntime("cancel_video_analysis"),
   ]);
   setAgentTurnActive(false);
+  return true;
+}
+
+function isolateChatTransportAfterCancelledTurn(cancelledInFlightTurn) {
+  if (!cancelledInFlightTurn || sessionStatus !== "ready") return false;
+  const scheduled = scheduleAutomaticSessionReconnect(
+    "Isolating a new chat from the cancelled response",
+    {
+      delayMs: 0,
+      allowInFlight: true,
+      discardOldContext: true,
+    },
+  );
+  if (!scheduled) return false;
+  // The composer remains available. Messages entered during the short socket
+  // handoff use the existing queue and flush only on the isolated transport.
+  agentTurnActive = false;
+  turnCancellationPending = false;
+  textSendPending = false;
+  syncMessageComposer();
+  syncQueuedMessagePanel();
+  return true;
 }
 
 function clearConversationContext() {
@@ -1847,15 +1885,19 @@ function beginTurnWork(turnSequence) {
   return work;
 }
 
-function finishTurnWork({ cancelled = false } = {}) {
+function finishTurnWork({ cancelled = false, interrupted = false } = {}) {
   const work = activeTurnWork;
   if (!work) return null;
   activeTurnWork = null;
   clearInterval(work.timerId);
   ensureTurnWorkIndicator(work);
   const durationMs = Math.max(0, performance.now() - work.startedAt);
-  if (work.row) work.row.dataset.state = cancelled ? "cancelled" : "complete";
-  if (work.label) work.label.textContent = cancelled ? "Đã dừng sau" : "Xử lý trong";
+  if (work.row) work.row.dataset.state = cancelled || interrupted ? "cancelled" : "complete";
+  if (work.label) {
+    work.label.textContent = interrupted
+      ? "Bị gián đoạn sau"
+      : cancelled ? "Đã dừng sau" : "Xử lý trong";
+  }
   if (work.duration) work.duration.textContent = formatTurnDuration(durationMs);
   scheduleActiveChatSnapshotPersist();
   return { durationMs, turnSequence: work.turnSequence };
@@ -1983,6 +2025,44 @@ function createTranscriptDownloadMessage(downloadInfo, analysis) {
   download.download = downloadInfo.filename || "video-transcript.txt";
   download.textContent = "Download transcript";
   body.append(mark, copy, download);
+  article.append(author, body);
+  elements.transcript.append(article);
+  scrollTranscriptToLatest({ smooth: true });
+  scheduleActiveChatSnapshotPersist();
+}
+
+function createVideoAudioSourceMessage(analysis) {
+  const audioUrl = String(analysis?.audioUrl || "").trim();
+  let parsed;
+  try {
+    parsed = new URL(audioUrl);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "https:") return;
+  const article = document.createElement("article");
+  article.className = "message message-lumi message-transcript-download";
+  const author = document.createElement("span");
+  author.textContent = "Video audio source";
+  const body = document.createElement("div");
+  body.className = "transcript-download-body";
+  const mark = document.createElement("span");
+  mark.className = "transcript-download-mark";
+  mark.textContent = "AUDIO";
+  const copy = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = analysis?.sourceTitle || "Verified video audio";
+  const meta = document.createElement("small");
+  meta.textContent = analysis?.audioLinkEphemeral
+    ? "Ready to open · temporary signed link"
+    : "Ready to open";
+  copy.append(title, meta);
+  const open = document.createElement("a");
+  open.href = parsed.href;
+  open.target = "_blank";
+  open.rel = "noopener noreferrer";
+  open.textContent = "Open audio link";
+  body.append(mark, copy, open);
   article.append(author, body);
   elements.transcript.append(article);
   scrollTranscriptToLatest({ smooth: true });
@@ -2455,16 +2535,17 @@ async function runLiveTranslationTool(args = {}) {
 }
 
 async function runVideoAnalysisTool(args = {}) {
-  if (!activeApiKey) {
+  if (!activeApiKey && args.action !== "audio") {
     throw new Error("Connect Lumi before analyzing the current video.");
   }
   avatarController.transitionState("tool_call");
-  elements.statusLine.textContent = "Finding captions or preparing the current video for Gemini Flash-Lite…";
+  elements.statusLine.textContent = "Finding verified video audio and captions…";
   try {
     const result = await sendRuntime("analyze_current_video", {
       apiKey: activeApiKey,
       args,
     });
+    createVideoAudioSourceMessage(result);
     if (result?.transcriptDownload?.text) {
       createTranscriptDownloadMessage(result.transcriptDownload, result);
     }
@@ -2472,9 +2553,16 @@ async function runVideoAnalysisTool(args = {}) {
       createVideoSummaryPresentationMessage(result?.summaryMarkdown);
     }
     const sanitized = prepareVideoAnalysisAgentResult(result, args);
-    elements.statusLine.textContent = result?.sourceMethod?.includes("caption")
-      ? `Used the video's existing captions · ${result.sourceTitle || "current video"}.`
-      : `Analyzed ${result.sourceTitle || "the current video"} with ${result.model || VIDEO_ANALYSIS_MODEL}.`;
+    const audioStatus = result?.audioUrl ? "Audio link ready · " : "";
+    elements.statusLine.textContent = result?.sourceMethod === "audio_reference"
+      ? `Audio link ready · ${result.sourceTitle || "current video"}.`
+      : result?.sourceMethod?.includes("caption")
+      ? `${audioStatus}Used the video's existing captions · ${result.sourceTitle || "current video"}.`
+      : result?.sourceMethod === "groq_whisper"
+        ? `${audioStatus}Transcribed ${result.sourceTitle || "the current video"} with Groq ${result.transcriptModel || "Whisper"}.`
+        : result?.groqFallbackUsed
+          ? `${audioStatus}Groq was unavailable; analyzed ${result.sourceTitle || "the current video"} with ${result.model || VIDEO_ANALYSIS_MODEL}.`
+          : `${audioStatus}Analyzed ${result.sourceTitle || "the current video"} with ${result.model || VIDEO_ANALYSIS_MODEL}.`;
     avatarController.transitionState("success", {
       forMs: AVATAR_SUCCESS_STATE_DURATION_MS,
       resumeState: "thinking",
@@ -2709,6 +2797,19 @@ async function handleServerMessage(event, sourceSocket) {
     serverContent?.modelTurn?.parts?.length
     || functionCalls.length
   );
+  const hasTypedTurnResponsePayload = Boolean(
+    serverContent?.modelTurn?.parts?.length
+    || serverContent?.outputTranscription?.text
+    || functionCalls.length
+  );
+  const ignoreStaleTypedTurnBoundary = shouldIgnoreStaleTypedTurnBoundary({
+    typedTurnInFlight,
+    responsePayloadSeen: typedTurnServerPayloadSeen,
+    hasResponsePayload: hasTypedTurnResponsePayload,
+    hasServerBoundary: Boolean(serverContent?.interrupted || serverContent?.turnComplete),
+    elapsedMs: performance.now() - typedTurnStartedAt,
+  });
+  if (hasTypedTurnResponsePayload) typedTurnServerPayloadSeen = true;
   if (turnCancellationPending) {
     if (hasTurnPayload) clearTimeout(turnCancellationDrainTimeoutId);
     for (const functionCall of functionCalls) rememberCancelledToolCall(functionCall.id);
@@ -2789,7 +2890,7 @@ async function handleServerMessage(event, sourceSocket) {
   if (serverContent?.generationComplete || functionCalls.length) {
     finalizeTranscript("thinking");
   }
-  if (serverContent?.interrupted) {
+  if (serverContent?.interrupted && !ignoreStaleTypedTurnBoundary) {
     const wasUserCancellation = turnCancellationPending;
     turnCancellationPending = false;
     cancelPendingMcpActivities();
@@ -2798,9 +2899,16 @@ async function handleServerMessage(event, sourceSocket) {
     finalizeTranscript("lumi");
     finalizeTranscript("thinking");
     setAgentTurnActive(false);
-    finishTurnWork({ cancelled: true });
+    finishTurnWork({
+      cancelled: wasUserCancellation,
+      interrupted: !wasUserCancellation,
+    });
     if (wasUserCancellation) {
       elements.statusLine.textContent = "Current action cancelled. Lumi is ready for your next request.";
+    } else {
+      userTurnAuthorized = false;
+      activeTurnUserRequest = "";
+      elements.statusLine.textContent = "The response was interrupted unexpectedly. Lumi is ready; send the request again.";
     }
     flushQueuedUserMessage();
   }
@@ -2919,7 +3027,9 @@ async function handleServerMessage(event, sourceSocket) {
             ? {
                 activityLabel: "BUILT-IN TOOL",
                 toolName: VIDEO_ANALYZE_TOOL_NAME,
-                serverName: "Gemini 3.5 Flash-Lite",
+                serverName: actionArgs.action === "audio"
+                  ? "Verified video audio"
+                  : "Gemini 3.5 Flash-Lite",
               }
           : mcpTool;
         renderStandaloneActivity = Boolean(activityTool)
@@ -3042,7 +3152,7 @@ async function handleServerMessage(event, sourceSocket) {
       }
     }
   }
-  if (serverContent?.turnComplete && !functionCalls.length) {
+  if (serverContent?.turnComplete && !functionCalls.length && !ignoreStaleTypedTurnBoundary) {
     const completionRecoveryStarted = requestStructuredTaskCompletion(sourceSocket);
     if (!completionRecoveryStarted) {
       const wasUserCancellation = turnCancellationPending;
@@ -3478,6 +3588,7 @@ function cleanupMedia({ cancelActiveTask = true } = {}) {
   microphonePermissionHelp = false;
   elements.microphoneHelpButton.hidden = true;
   agentTurnActive = false;
+  typedTurnInFlight = false;
   userTurnAuthorized = false;
   activeTurnUserRequest = "";
   turnCancellationPending = false;
@@ -3615,12 +3726,18 @@ async function sendText(
     ? `${boundaryPrompt}\n\n[New user request]\n${userRequestText}`
     : userRequestText;
   const modelText = promptContext?.mode === "fast"
-    ? `[Lumi runtime context — not part of the user's request] Fast mode is active. This turn is locked to workspace tabId ${Number.isInteger(targetTabId) ? targetTabId : "unknown"} inside Agent Space and must never read or operate on tabs outside that group. You may switch only among tabs returned from the workspace-only browser_list_tabs result, or open a necessary new tab with browser_open_tab so it joins the workspace. Use browser_set_selection or browser_batch_actions for large independent form edits.\n\n[User request]\n${scopedUserRequestText}`
+    ? `[Lumi runtime context — not part of the user's request] Fast mode is active. This entire user prompt is locked to exactly one tab: workspace tabId ${Number.isInteger(targetTabId) ? targetTabId : "unknown"} inside Agent Space. Inspect, summarize, transcribe, and operate only on that tab. Ignore every other Agent Space tab and never include their title, URL, DOM, media, captions, or transcript in context. browser_list_tabs returns only the locked tab for this prompt; do not switch to an older workspace tab. A new destination may replace the locked target only when the user's request explicitly requires navigation. Use browser_set_selection or browser_batch_actions for large independent form edits.\n\n[User request]\n${scopedUserRequestText}`
     : scopedUserRequestText;
+  typedTurnInFlight = true;
+  typedTurnStartedAt = performance.now();
+  typedTurnServerPayloadSeen = false;
   userTurnAuthorized = true;
   const videoSent = frame ? sendJson({ realtimeInput: { video: frame } }) : true;
   const textSent = videoSent && sendJson({ realtimeInput: { text: modelText } });
   if (!videoSent || !textSent) {
+    typedTurnInFlight = false;
+    typedTurnStartedAt = 0;
+    typedTurnServerPayloadSeen = false;
     userTurnAuthorized = false;
     elements.statusLine.textContent = clearComposer
       ? "Message was not sent and remains in the composer. The connection stays open for retry."

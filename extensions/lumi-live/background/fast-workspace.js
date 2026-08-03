@@ -1,6 +1,26 @@
 export const FAST_WORKSPACE_TITLE = "Agent Space";
 export const FAST_WORKSPACE_COLOR = "yellow";
 
+export function selectPromptWorkspaceTab(
+  tabs,
+  { activeTabId = null, lastActiveTabId = null, connectedTabId = null } = {},
+) {
+  const controllableTabs = (Array.isArray(tabs) ? tabs : [])
+    .filter((tab) => Number.isInteger(tab?.id) && /^https?:\/\/|^file:\/\//i.test(String(tab.url || "")));
+  const preferredIds = [activeTabId, lastActiveTabId, connectedTabId].filter(Number.isInteger);
+  return preferredIds
+    .map((tabId) => controllableTabs.find((tab) => tab.id === tabId))
+    .find(Boolean)
+    || controllableTabs[0]
+    || null;
+}
+
+export function filterPromptLockedTabs(tabs, lockedTabId) {
+  const available = (Array.isArray(tabs) ? tabs : []).filter((tab) => Number.isInteger(tab?.id));
+  if (!Number.isInteger(lockedTabId)) return available;
+  return available.filter((tab) => tab.id === lockedTabId);
+}
+
 function validId(value) {
   return Number.isInteger(value) && value >= 0 ? value : null;
 }

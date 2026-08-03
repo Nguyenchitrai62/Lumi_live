@@ -5,7 +5,24 @@ import {
   createFastWorkspace,
   FAST_WORKSPACE_COLOR,
   FAST_WORKSPACE_TITLE,
+  filterPromptLockedTabs,
+  selectPromptWorkspaceTab,
 } from "../background/fast-workspace.js";
+
+test("locks each prompt to the visible Agent Space tab and excludes sibling tabs", () => {
+  const tabs = [
+    { id: 1, active: false, url: "https://www.youtube.com/watch?v=one" },
+    { id: 2, active: true, url: "https://www.youtube.com/watch?v=two" },
+    { id: 3, active: false, url: "https://www.udemy.com/course/example/learn/lecture/3" },
+  ];
+  const selected = selectPromptWorkspaceTab(tabs, {
+    activeTabId: 2,
+    lastActiveTabId: 1,
+    connectedTabId: 3,
+  });
+  assert.equal(selected.id, 2);
+  assert.deepEqual(filterPromptLockedTabs(tabs, selected.id), [tabs[1]]);
+});
 
 function createChromeFakes({ storedGroupId = null } = {}) {
   const tabs = new Map([

@@ -9,6 +9,7 @@ export const EXTENSION_EVENTS = Object.freeze({
 
 export const STORAGE_KEYS = Object.freeze({
   apiKey: "lumiGeminiApiKey",
+  groqApiKey: "lumiGroqApiKey",
   avatarMode: "lumiAvatarMode",
   capturedTabAssets: "lumiCapturedTabAssets",
   chatHistory: "lumiLocalChatHistory",

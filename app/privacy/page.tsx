@@ -49,8 +49,8 @@ export default function PrivacyPolicyPage() {
           <p>
             Lumi Live stores its settings, credentials, and conversation history on your
             device. Information leaves your device only when needed to perform a feature
-            you request, such as contacting Google Gemini, a service you connect through
-            MCP, or a website you ask Lumi Live to interact with.
+            you request, such as contacting Google Gemini, optional Groq speech-to-text,
+            a service you connect through MCP, or a website you ask Lumi Live to interact with.
           </p>
         </section>
 
@@ -61,8 +61,8 @@ export default function PrivacyPolicyPage() {
               <h2>Scope</h2>
               <p>
                 This Privacy Policy applies to the Lumi Live Chrome extension. It does not
-                replace the privacy policies of Google Gemini, websites you visit, or
-                third-party MCP services that you choose to connect.
+                replace the privacy policies of Google Gemini, Groq, websites you visit,
+                or third-party MCP services that you choose to connect.
               </p>
             </div>
           </section>
@@ -88,9 +88,9 @@ export default function PrivacyPolicyPage() {
                   temporary media URL when the user requests a video summary or transcript.
                 </li>
                 <li>
-                  <strong>Authentication and configuration information:</strong> a Gemini
-                  API key, credentials or authorization tokens for MCP services, connected
-                  service addresses, permissions, and extension preferences.
+                  <strong>Authentication and configuration information:</strong> Gemini
+                  and optional Groq API keys, credentials or authorization tokens for MCP
+                  services, connected service addresses, permissions, and extension preferences.
                 </li>
                 <li>
                   <strong>Local activity and history:</strong> chat sessions, transcripts,
@@ -161,6 +161,18 @@ export default function PrivacyPolicyPage() {
                   processing; Google&apos;s independent handling remains governed by its terms.
                 </li>
                 <li>
+                  <strong>Groq:</strong> when the user saves an optional Groq API key and
+                  requests a transcript or video summary, a direct audio URL, a small audio
+                  file downloaded by the extension is sent to Groq&apos;s Whisper speech-to-text API.
+                  Whisper Large V3 Turbo is attempted first and Whisper Large V3 is attempted
+                  on rate limit. Gemini is the general transcription fallback when both Groq
+                  models are limited. If no Groq key is saved, Groq is skipped completely and
+                  Gemini 3.5 Flash-Lite is used after exact captions. For YouTube, the public
+                  watch URL may also be sent directly to Gemini when the site exposes UMP media,
+                  the signed audio URL is inaccessible, or the audio exceeds the extension upload
+                  limit. No Lumi backend or loopback helper is used for video analysis.
+                </li>
+                <li>
                   <strong>User-configured MCP services:</strong> tool arguments and relevant
                   context when the user invokes or approves a connected tool. These services
                   may include Notion, Atlassian, Redmine, Hicas, or another MCP endpoint
@@ -203,8 +215,8 @@ export default function PrivacyPolicyPage() {
             <div>
               <h2>Security</h2>
               <p>
-                Lumi Live uses secure connections for Google Gemini and its built-in cloud
-                integrations. Credentials are stored in the extension&apos;s local Chrome storage
+                Lumi Live uses secure connections for Google Gemini, Groq, and its built-in
+                cloud integrations. Credentials are stored in the extension&apos;s local Chrome storage
                 and are used only for the service to which they belong. Users should connect
                 only trusted MCP services and use HTTPS for any remote custom MCP endpoint.
               </p>

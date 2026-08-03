@@ -30,7 +30,7 @@ Lumi includes two avatar models:
 - Visual activity feedback for conversations, browser actions, tool calls, results, and errors.
 - Voice, avatar, theme, scene, and outfit customization.
 - Optional live translation for supported audio and video workflows.
-- Fast current-video summaries, timestamped transcripts, downloadable transcript files, and cached follow-up analysis.
+- Fast video summaries from the current tab or a supplied YouTube/Facebook/Udemy link, with a verified audio URL shown behind an explicit side-panel button, timestamped transcripts, downloadable transcript files, and cached follow-up analysis.
 
 ## Choose how to run Lumi
 
@@ -98,6 +98,7 @@ Requirements:
 - A recent version of Chrome
 - Node.js supported by the [`package.json`](./package.json) engine setting
 - A [Gemini API key](https://aistudio.google.com/apikey)
+- Optional: a [Groq API key](https://console.groq.com/keys) for faster, timestamped Whisper transcripts
 
 Install dependencies and build the extension:
 
@@ -110,7 +111,7 @@ Then:
 
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Select **Load unpacked** and choose [`extensions/lumi-live`](./extensions/lumi-live).
-3. Open Lumi Settings, configure the Gemini API key and preferences, and grant microphone access when prompted.
+3. Open Lumi Settings, configure the Gemini API key, optionally add a Groq key for Whisper transcripts, choose preferences, and grant microphone access when prompted.
 4. Open a normal HTTP/HTTPS page and launch the Lumi side panel.
 
 After changing extension source or avatar assets, rebuild with

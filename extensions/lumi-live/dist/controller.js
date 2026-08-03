@@ -4603,6 +4603,7 @@ ${clippedAnchor.content}`);
   });
   var STORAGE_KEYS = Object.freeze({
     apiKey: "lumiGeminiApiKey",
+    groqApiKey: "lumiGroqApiKey",
     avatarMode: "lumiAvatarMode",
     capturedTabAssets: "lumiCapturedTabAssets",
     chatHistory: "lumiLocalChatHistory",

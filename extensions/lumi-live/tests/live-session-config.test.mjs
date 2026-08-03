@@ -191,8 +191,10 @@ test("keeps website navigation available from New Tab and Chrome internal pages"
   assert.match(openTabTool.description, /From New Tab, chrome:\/\/ pages/i);
   assert.match(openTabTool.description, /must first open exactly https:\/\/www\.google\.com\//i);
   assert.match(openTabTool.description, /reuse(?:s)? that same tab for the destination/i);
-  assert.match(listTabsTool.description, /List all tabs/i);
-  assert.match(switchTabTool.description, /Activate any existing Chrome tab/i);
+  assert.match(listTabsTool.description, /Normal mode this lists the current Chrome window/i);
+  assert.match(listTabsTool.description, /Fast-mode user prompt it returns only the single locked Agent Space tab/i);
+  assert.match(switchTabTool.description, /Activate an existing Chrome tab/i);
+  assert.match(switchTabTool.description, /switching to any other existing workspace tab is rejected/i);
   assert.match(instruction, /navigation tools .+ remain available from every active tab/i);
   assert.match(instruction, /http, https, or file tab/i);
   assert.match(instruction, /Allow access to file URLs/i);

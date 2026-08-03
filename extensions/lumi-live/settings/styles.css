@@ -60,6 +60,10 @@ body.is-mcp-tools-view .settings-shell { opacity: 0; pointer-events: none; trans
 .card-heading h2 { margin-bottom: 4px; font-size: 24px; }
 .card-heading p { max-width: 480px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .connection-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 20px; }
+.api-field { grid-column: 1; grid-row: 1; }
+.voice-field { grid-column: 2; grid-row: 1; }
+.groq-field { grid-column: 1 / -1; grid-row: 2; }
+.optional-label { margin-left: 5px; border-radius: 999px; padding: 2px 6px; color: var(--muted); background: rgba(117,109,134,.1); font-size: 8px; font-weight: 900; text-transform: uppercase; letter-spacing: .06em; }
 .connection-field { min-width: 0; border: 1px solid rgba(119, 93, 198, .15); border-radius: 16px; padding: 16px; background: rgba(255, 255, 255, .58); }
 .connection-field .field-label-row { margin: 0 0 8px; }
 .connection-field > label { margin: 0 0 8px !important; }
@@ -68,8 +72,8 @@ body.is-mcp-tools-view .settings-shell { opacity: 0; pointer-events: none; trans
 .settings-card label:not(.toggle-switch) { display: block; margin: 17px 0 7px; font-size: 12px; font-weight: 850; }
 .field-label-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; margin: 17px 0 7px; }
 .settings-card .field-label-row label { margin: 0; }
-.api-key-link { color: var(--lavender); font-size: 11px; font-weight: 900; text-decoration: none; }
-.api-key-link:hover { text-decoration: underline; }
+.api-key-link { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; border: 1px solid rgba(119, 93, 198, .2); border-radius: 9px; padding: 0 9px; color: var(--lavender); background: rgba(119, 93, 198, .07); font-size: 10px; font-weight: 900; text-decoration: none; white-space: nowrap; }
+.api-key-link:hover { border-color: rgba(119, 93, 198, .4); text-decoration: none; }
 .key-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
 .voice-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .preview-voice { min-width: 96px; white-space: nowrap; }
@@ -259,6 +263,7 @@ body.is-mcp-connector-modal-open { overflow: hidden; }
   .settings-column { grid-column: auto; grid-template-columns: 1fr; grid-template-rows: none; }
   .connection-card { grid-column: auto; min-height: 0; padding: 22px; }
   .connection-fields { grid-template-columns: 1fr; }
+  .api-field, .voice-field, .groq-field { grid-column: auto; grid-row: auto; }
   .mcp-card { grid-column: auto; padding: 22px; }
   .mcp-tools-page-shell { width: min(100% - 20px, 560px); padding: 22px 0 44px; }
   .mcp-card-heading { align-items: stretch; flex-direction: column; gap: 15px; }

@@ -288,6 +288,10 @@ test("side panel connects chat without requiring a microphone and remembers mic 
     controller.indexOf("async function enableMicrophone"),
     controller.indexOf("function sendText"),
   );
+  const sendTextSource = controller.slice(
+    controller.indexOf("async function sendText"),
+    controller.indexOf("async function flushQueuedUserMessage"),
+  );
 
   assert.match(config, /microphoneEnabled:\s*"lumiMicrophoneEnabled"/);
   assert.match(html, /id="muteButton"[^>]+aria-label="Turn on microphone"[^>]+aria-pressed="true"/);
@@ -306,6 +310,15 @@ test("side panel connects chat without requiring a microphone and remembers mic 
   assert.match(audioController, /function isUserSpeechActive\(\)/);
   assert.match(audioController, /function stopMicrophone\(\)/);
   assert.match(controller, /sessionHasInFlightWork\(\)[^]*panelAudio\.isUserSpeechActive\(\)/);
+  assert.match(controller, /canSendAudio:[^]*!typedTurnInFlight/);
+  assert.match(sendTextSource, /typedTurnInFlight = true;[^]*sendJson\(\{ realtimeInput: \{ text: modelText \} \}\)/);
+  assert.match(controller, /if \(active !== true\) \{[^]*typedTurnInFlight = false/);
+  assert.match(controller, /shouldIgnoreStaleTypedTurnBoundary/);
+  assert.match(controller, /serverContent\?\.interrupted && !ignoreStaleTypedTurnBoundary/);
+  assert.match(controller, /serverContent\?\.turnComplete && !functionCalls\.length && !ignoreStaleTypedTurnBoundary/);
+  assert.match(controller, /interrupted: !wasUserCancellation/);
+  assert.match(controller, /Bị gián đoạn sau/);
+  assert.match(controller, /The response was interrupted unexpectedly\. Lumi is ready; send the request again\./);
   assert.doesNotMatch(html, /id="startButton"/);
   assert.doesNotMatch(controller, /elements\.startButton/);
 });
@@ -443,8 +456,21 @@ test("opens a requested website even when the current tab cannot host PageAgent"
   assert.doesNotMatch(openTabSource, /needs a controllable current page/);
 });
 
+test("keeps Facebook analysis in the prompt-locked active tab", async () => {
+  const worker = await readFile(new URL("background/index.js", extensionRoot), "utf8");
+  const analysis = await readFile(new URL("background/video-analysis-service.js", extensionRoot), "utf8");
+  assert.doesNotMatch(worker, /openTemporaryAnalysisTab|closeTemporaryAnalysisTab/);
+  assert.doesNotMatch(analysis, /createTemporaryFacebookTab|openFreshFacebookReelTab|reloadFreshFacebookTabOnce/);
+  assert.match(analysis, /if \(isFacebookSource\)[\s\S]+lumiRequestedFacebookVideoId/);
+  assert.match(analysis, /retry the same locked tab instead of[\s\S]+collectSources\(tab\.id, discoveredFacebookVideoId, true\)/i);
+  assert.match(analysis, /sourcePageClosedAfterAnalysis:\s*false/);
+  assert.doesNotMatch(worker, /videoAudioHelperUrl|api\/video-audio|127\.0\.0\.1:3000/);
+  assert.doesNotMatch(analysis, /transcribeYouTubeWithLocalHelper|normalizeVideoAudioHelperUrl/);
+});
+
 test("settings ships OAuth and URL-key connectors, app icons, URL copy, and a temporary server toggle", async () => {
   const html = await readFile(new URL("settings/index.html", extensionRoot), "utf8");
+  const settingsController = await readFile(new URL("settings/index.js", extensionRoot), "utf8");
   const controller = await readFile(
     new URL("settings/mcp-settings-controller.js", extensionRoot),
     "utf8",
@@ -460,6 +486,14 @@ test("settings ships OAuth and URL-key connectors, app icons, URL copy, and a te
   assert.match(styles, /\.connection-card[^}]+grid-column:\s*span 9/);
   assert.match(html, /class="connection-fields"/);
   assert.match(html, /class="connection-field api-field"/);
+  assert.match(html, /id="groqApiKeyInput"/);
+  assert.match(html, /id="toggleGroqKeyButton"/);
+  assert.equal((html.match(/class="connection-field groq-field"/g) || []).length, 1);
+  assert.match(html, /href="https:\/\/console\.groq\.com\/keys"[^>]*>Get key/);
+  assert.doesNotMatch(html, /videoAudioHelperUrlInput|Local yt-dlp helper/i);
+  assert.doesNotMatch(settingsController, /videoAudioHelperUrl|127\.0\.0\.1|api\/video-audio/);
+  assert.match(settingsController, /Without a Groq key[^`]+Gemini 3\.5 Flash-Lite/);
+  assert.match(styles, /\.groq-field[^}]+grid-column:\s*1 \/ -1/);
   assert.match(html, /class="connection-field voice-field"/);
   assert.match(styles, /\.connection-fields[^}]+repeat\(2, minmax\(0, 1fr\)\)[^}]+gap:\s*14px/);
   assert.match(styles, /\.mcp-card[^}]+grid-column:\s*1 \/ -1/);
