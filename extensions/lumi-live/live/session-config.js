@@ -2,6 +2,10 @@ import {
   LIVE_TRANSLATE_TOOL,
   LIVE_TRANSLATION_GUIDANCE,
 } from "./translate.js";
+import {
+  VIDEO_ANALYSIS_GUIDANCE,
+  VIDEO_ANALYZE_TOOL,
+} from "./video-analysis.js";
 import { DEFAULT_THINKING_LEVEL } from "../core/ui-config.js";
 import { buildAgentProtocolInstruction } from "./agent-protocol.js";
 
@@ -382,7 +386,11 @@ export const BROWSER_TOOLS = [
   },
 ];
 
-export const BUILTIN_TOOLS = [...BROWSER_TOOLS, LIVE_TRANSLATE_TOOL];
+export const BUILTIN_TOOLS = [
+  ...BROWSER_TOOLS,
+  LIVE_TRANSLATE_TOOL,
+  VIDEO_ANALYZE_TOOL,
+];
 
 export const BROWSER_UI_ACTION_TOOLS = new Set([
   "browser_click",
@@ -434,7 +442,9 @@ Start browser work with semantic page state because it supplies stable element i
 
 Only call the separate browser_capture_screenshot attachment tool when the user's current request explicitly asks for a screenshot, capture, image attachment, or saving/sharing what is visibly on the tab. A captured attachmentId is private extension state: never invent one, never read it aloud, and pass it only to a tool whose declared schema includes attachmentId. Capturing does not authorize uploading or saving the image externally; ask for explicit confirmation in a separate turn before any connector write or upload. The current Notion MCP does not support file uploads, so never claim an image was saved to Notion unless a future Notion tool explicitly declares a compatible attachment parameter and succeeds.
 
-${LIVE_TRANSLATION_GUIDANCE}`;
+${LIVE_TRANSLATION_GUIDANCE}
+
+${VIDEO_ANALYSIS_GUIDANCE}`;
 
 export function configureMcpTools(mcpInfo, activeMcpTools) {
   activeMcpTools.clear();

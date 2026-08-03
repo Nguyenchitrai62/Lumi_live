@@ -22,6 +22,7 @@ import {
   normalizeUploadFilePaths,
 } from "../browser/file-upload.js";
 import { createRecordedFlowService } from "./recorded-flow-service.js";
+import { createVideoAnalysisService } from "./video-analysis-service.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
 const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
@@ -70,6 +71,17 @@ const recordedFlows = createRecordedFlowService({
   sessionStorageArea: chrome.storage.session,
   flowsStorageKey: RECORDED_FLOWS_STORAGE_KEY,
   draftStorageKey: RECORDED_FLOW_DRAFT_STORAGE_KEY,
+});
+const videoAnalysis = createVideoAnalysisService({
+  chromeApi: chrome,
+  storageKey: STORAGE_KEYS.videoAnalyses,
+  getTargetTab: async () => {
+    const activeTab = await getActiveTab();
+    if (activeTab?.id && /^https?:\/\//i.test(activeTab.url || "")) return activeTab;
+    const status = await getStatus();
+    if (!status.connected || !Number.isInteger(status.tabId)) return null;
+    return chrome.tabs.get(status.tabId).catch(() => null);
+  },
 });
 
 async function loadTarget() {
@@ -1696,6 +1708,13 @@ async function handleMessage(message) {
   }
   if (message.command === "cancel_active_browser_action") return cancelActiveBrowserAction();
   if (message.command === "cancel_active_mcp_calls") return cancelActiveMcpCalls();
+  if (message.command === "cancel_video_analysis") return videoAnalysis.cancelActive();
+  if (message.command === "analyze_current_video") {
+    return videoAnalysis.analyze({
+      apiKey: message.apiKey,
+      args: message.args || {},
+    });
+  }
   if (message.command === "live_translation_status") {
     return sendOffscreenCommand("translation_status");
   }

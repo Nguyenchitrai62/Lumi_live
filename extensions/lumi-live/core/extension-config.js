@@ -27,5 +27,6 @@ export const STORAGE_KEYS = Object.freeze({
   microphoneGrantedAt: "lumiMicrophoneGrantedAt",
   targetTabId: "lumiLiveTargetTabId",
   thinkingLevel: "lumiGeminiThinkingLevel",
+  videoAnalyses: "lumiVideoAnalyses",
   voice: "lumiGeminiVoice",
 });

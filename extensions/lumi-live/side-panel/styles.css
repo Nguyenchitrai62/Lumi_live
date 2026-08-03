@@ -271,6 +271,15 @@ body.petals-off .petal-field { opacity: 0; }
 .message-capture figcaption { display: flex; align-items: center; justify-content: space-between; gap: 9px; margin-top: 8px; }
 .message-capture figcaption strong { min-width: 0; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .message-capture figcaption a { flex: 0 0 auto; color: var(--lavender); font-size: 10px; font-weight: 900; }
+.message-transcript-download { width: min(92%, 560px); }
+.transcript-download-body { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.transcript-download-mark { display: grid; place-items: center; width: 38px; height: 38px; border: 1px solid color-mix(in srgb, var(--lavender) 34%, var(--line)); border-radius: 10px; color: var(--lavender); background: color-mix(in srgb, var(--lavender) 10%, transparent); font-size: 9px; font-weight: 950; letter-spacing: .08em; }
+.transcript-download-body div { min-width: 0; }
+.transcript-download-body strong, .transcript-download-body small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transcript-download-body strong { color: var(--ink); font-size: 11px; }
+.transcript-download-body small { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.transcript-download-body a { min-height: 34px; display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--lavender) 38%, var(--line)); border-radius: 9px; padding: 0 10px; color: var(--lavender); background: color-mix(in srgb, var(--lavender) 8%, transparent); font-size: 9px; font-weight: 900; text-decoration: none; }
+.transcript-download-body a:hover { background: color-mix(in srgb, var(--lavender) 15%, transparent); }
 .message-thinking { width: min(96%, 430px); margin: 0 0 11px; overflow: hidden; border: 1px dashed rgba(128,104,207,.3); border-radius: 14px; color: var(--muted); background: rgba(244,240,255,.82); }
 .message-thinking summary { display: grid; grid-template-columns: auto minmax(0,1fr) auto auto; align-items: center; gap: 8px; min-height: 40px; padding: 8px 10px; cursor: pointer; list-style: none; user-select: none; }
 .message-thinking summary::-webkit-details-marker { display: none; }

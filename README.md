@@ -30,6 +30,7 @@ Lumi includes two avatar models:
 - Visual activity feedback for conversations, browser actions, tool calls, results, and errors.
 - Voice, avatar, theme, scene, and outfit customization.
 - Optional live translation for supported audio and video workflows.
+- Fast current-video summaries, timestamped transcripts, downloadable transcript files, and cached follow-up analysis.
 
 ## Choose how to run Lumi
 

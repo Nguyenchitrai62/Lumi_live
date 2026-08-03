@@ -33,6 +33,7 @@ import {
   LIVE_TRANSLATE_TOOL_NAME,
   normalizeLiveTranslationLanguageCode,
 } from "../live/translate.js";
+import { VIDEO_ANALYSIS_MODEL, VIDEO_ANALYZE_TOOL_NAME } from "../live/video-analysis.js";
 import { mergeTranscriptText } from "../live/audio-utils.js";
 import {
   findCommonCharacterPrefix,
@@ -107,6 +108,7 @@ const CHAT_HISTORY_STORAGE_KEY = STORAGE_KEYS.chatHistory;
 const FAST_MODE_STORAGE_KEY = STORAGE_KEYS.fastMode;
 const THINKING_LEVEL_STORAGE_KEY = STORAGE_KEYS.thinkingLevel;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
+const VIDEO_ANALYSES_STORAGE_KEY = STORAGE_KEYS.videoAnalyses;
 const PANEL_LIFECYCLE_MESSAGE = EXTENSION_EVENTS.lifecycle;
 const GEMINI_SETUP_TIMEOUT_MS = 15000;
 const EARLY_CONNECTION_DROP_MS = 3000;
@@ -1470,10 +1472,11 @@ async function clearLocalChatHistory() {
     await chatSnapshotStore.clear();
     await renderActiveChatSession();
     await chatHistoryStore.clear();
+    await chrome.storage.local.remove(VIDEO_ANALYSES_STORAGE_KEY);
     await chatHistoryStore.save(chatHistoryState);
     closeChatHistory();
     elements.statusLine.textContent =
-      "All chats cleared. Connection stays active.";
+      "All chats and saved video transcripts cleared. Connection stays active.";
     return true;
   });
 }
@@ -1523,6 +1526,7 @@ function cancelConversationWorkForChatChange() {
   void Promise.allSettled([
     sendRuntime("cancel_active_browser_action"),
     sendRuntime("cancel_active_mcp_calls"),
+    sendRuntime("cancel_video_analysis"),
   ]);
   setAgentTurnActive(false);
 }
@@ -1837,6 +1841,36 @@ function createCapturedTabMessage(capture) {
   caption.append(title, download);
   figure.append(image, caption);
   article.append(author, figure);
+  elements.transcript.append(article);
+  scrollTranscriptToLatest({ smooth: true });
+  scheduleActiveChatSnapshotPersist();
+}
+
+function createTranscriptDownloadMessage(downloadInfo, analysis) {
+  const text = String(downloadInfo?.text || "");
+  if (!text) return;
+  const article = document.createElement("article");
+  article.className = "message message-lumi message-transcript-download";
+  const author = document.createElement("span");
+  author.textContent = "Video transcript";
+  const body = document.createElement("div");
+  body.className = "transcript-download-body";
+  const mark = document.createElement("span");
+  mark.className = "transcript-download-mark";
+  mark.textContent = "TXT";
+  const copy = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = downloadInfo.filename || "video-transcript.txt";
+  const meta = document.createElement("small");
+  const characterCount = Number(analysis?.transcriptCharacterCount) || text.length;
+  meta.textContent = `${characterCount.toLocaleString()} characters · ${analysis?.sourceMethod || "video analysis"}`;
+  copy.append(title, meta);
+  const download = document.createElement("a");
+  download.href = `data:${downloadInfo.mimeType || "text/plain;charset=utf-8"},${encodeURIComponent(text)}`;
+  download.download = downloadInfo.filename || "video-transcript.txt";
+  download.textContent = "Download transcript";
+  body.append(mark, copy, download);
+  article.append(author, body);
   elements.transcript.append(article);
   scrollTranscriptToLatest({ smooth: true });
   scheduleActiveChatSnapshotPersist();
@@ -2291,6 +2325,36 @@ async function runLiveTranslationTool(args = {}) {
   };
 }
 
+async function runVideoAnalysisTool(args = {}) {
+  if (!activeApiKey) {
+    throw new Error("Connect Lumi before analyzing the current video.");
+  }
+  avatarController.transitionState("tool_call");
+  elements.statusLine.textContent = "Finding captions or preparing the current video for Gemini Flash-Lite…";
+  try {
+    const result = await sendRuntime("analyze_current_video", {
+      apiKey: activeApiKey,
+      args,
+    });
+    if (result?.transcriptDownload?.text) {
+      createTranscriptDownloadMessage(result.transcriptDownload, result);
+    }
+    const sanitized = { ...result };
+    delete sanitized.transcriptDownload;
+    elements.statusLine.textContent = result?.sourceMethod?.includes("caption")
+      ? `Used the video's existing captions · ${result.sourceTitle || "current video"}.`
+      : `Analyzed ${result.sourceTitle || "the current video"} with ${result.model || VIDEO_ANALYSIS_MODEL}.`;
+    avatarController.transitionState("success", {
+      forMs: AVATAR_SUCCESS_STATE_DURATION_MS,
+      resumeState: "thinking",
+    });
+    return sanitized;
+  } catch (error) {
+    avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
+    throw error;
+  }
+}
+
 const runBrowserTool = createBrowserToolRunner({
   isUiAction: (tool) => BROWSER_UI_ACTION_TOOLS.has(tool),
   avatarController,
@@ -2707,8 +2771,9 @@ async function handleServerMessage(event, sourceSocket) {
 
         isBrowserTool = BROWSER_TOOLS.some((tool) => tool.name === actionName);
         const isLiveTranslationTool = actionName === LIVE_TRANSLATE_TOOL_NAME;
+        const isVideoAnalysisTool = actionName === VIDEO_ANALYZE_TOOL_NAME;
         mcpTool = activeMcpTools.get(actionName) || null;
-        if (!isBrowserTool && !isLiveTranslationTool && !mcpTool) {
+        if (!isBrowserTool && !isLiveTranslationTool && !isVideoAnalysisTool && !mcpTool) {
           throw new Error(`Unsupported tool: ${actionName}`);
         }
         if (mcpTool?.disabled) throw new Error("This MCP tool is disabled for the rest of this session.");
@@ -2718,6 +2783,12 @@ async function handleServerMessage(event, sourceSocket) {
               toolName: LIVE_TRANSLATE_TOOL_NAME,
               serverName: "Gemini Live Translate",
             }
+          : isVideoAnalysisTool
+            ? {
+                activityLabel: "BUILT-IN TOOL",
+                toolName: VIDEO_ANALYZE_TOOL_NAME,
+                serverName: "Gemini 3.5 Flash-Lite",
+              }
           : mcpTool;
         renderStandaloneActivity = Boolean(activityTool)
           && shouldRenderStandaloneToolActivity(orchestration);
@@ -2726,6 +2797,8 @@ async function handleServerMessage(event, sourceSocket) {
         }
         let result = isLiveTranslationTool
           ? await runLiveTranslationTool(actionArgs)
+          : isVideoAnalysisTool
+            ? await runVideoAnalysisTool(actionArgs)
           : isBrowserTool
             ? await runBrowserTool(actionName, actionArgs)
             : normalizeMcpToolResult(await runMcpTool(mcpTool, actionArgs, callId));
@@ -3551,6 +3624,7 @@ function cancelCurrentTurn() {
   void Promise.allSettled([
     sendRuntime("cancel_active_browser_action"),
     sendRuntime("cancel_active_mcp_calls"),
+    sendRuntime("cancel_video_analysis"),
   ]);
   setAgentTurnActive(false);
   syncQueuedMessagePanel();

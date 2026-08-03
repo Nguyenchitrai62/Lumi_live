@@ -4,6 +4,8 @@ The standalone Chrome extension runs Gemini Live, the Lumi Pixel Companion, the 
 
 It also exposes a built-in `live_translate` agent tool backed by `gemini-3.5-live-translate-preview`. The tool reuses the saved Gemini API key, captures the active media element's audio, and plays the translated speech itself so the conversational agent does not repeat the dialogue.
 
+The built-in `video_analyze_current` tool summarizes or transcribes the video in the active tab with `gemini-3.5-flash-lite`. It prefers complete captions already exposed by the player, sends public YouTube URLs directly to Gemini, then tries a direct HTTPS media URL and a bounded temporary Files API upload. Transcript requests add a downloadable `.txt` card to the conversation, keep the transcript available to the current Lumi task, retain the latest five analyses locally for follow-up work, and delete temporary Gemini uploads after processing.
+
 ## Install
 
 ```powershell
@@ -49,6 +51,16 @@ Live translation uses 100 ms PCM input chunks and a bounded realtime input queue
 
 After rebuilding, press **Reload** on `chrome://extensions` and reopen any old Lumi Live or Settings pages.
 
+## Video summary and transcript
+
+1. Open a YouTube video, Facebook Reel, Udemy lecture, or another web player in the current active tab.
+2. Ask **“Summarize this video”**, **“Get the transcript”**, or request both.
+3. Lumi checks complete HTML/YouTube caption tracks first. Transcript-only requests with available captions do not call Gemini.
+4. Without captions, public YouTube URLs are sent directly to `gemini-3.5-flash-lite`. For Facebook, Lumi selects the exact Reel ID and reads its embedded DASH manifest so a separate MP4 audio representation can be downloaded even when `video.src` is empty. Because Gemini's documented audio inputs omit `audio/mp4`, that ISO-BMFF container is submitted through the supported `video/mp4` media pipeline while retaining its AAC speech track. Lumi does not waste time retrying Facebook's silent video-only representations if this dedicated audio track fails. For Udemy, Lumi checks player frames and unencrypted HLS audio. Media is limited to 100 MB in extension memory, uploaded temporarily through the Gemini Files API, analyzed, and deleted. No browser-wide background traffic monitor is used.
+5. Transcript requests show a **Download transcript** link. The tool also returns a concise summary and important timestamp ranges for follow-up questions. A later request can use `action=inspect` with an optional timestamp range; Lumi reuses the newest matching transcript from the five-item local analysis cache instead of downloading the video again.
+
+If a player has not made a usable caption/media request yet, start or seek the video briefly and retry. DRM-protected/encrypted Udemy streams are never bypassed; use the course subtitle track when available. Players that expose only a `blob:` URL and no completed media request cannot provide a complete ten-minute transcript in seconds. Lumi reports that limitation instead of silently recording the tab in real time. Audio-only analysis covers speech and sound but cannot recover important visual-only details; direct video and YouTube inputs use low media resolution for the first fast pass.
+
 ## Source layout
 
 The extension root contains only `manifest.json`, documentation, generated/runtime assets, and domain directories. Chrome and the build pipeline reference the domain entrypoints directly, so there are no duplicate compatibility wrappers to keep in sync.
@@ -67,7 +79,7 @@ Implementations are grouped by responsibility:
 | `side-panel/` | Main Lumi panel, avatars, petals, and MCP activity UI |
 | `tests/` | Unit, integration, manifest, asset, and import-graph checks |
 
-`manifest.json` loads `background/index.js`, `side-panel/index.html`, and `settings/index.html` directly. `extensions/build.mjs` bundles `browser/controller.js` into `dist/controller.js`. `npm test` validates these paths and recursively resolves every local JavaScript import reachable at runtime.
+`manifest.json` loads the bundled `dist/background.js`, `side-panel/index.html`, and `settings/index.html`. `extensions/build.mjs` bundles both `background/index.js` (including MP4Box for AAC extraction) and `browser/controller.js` into `dist/`. `npm test` validates these paths and recursively resolves every local JavaScript import reachable at runtime.
 
 ## Avatars
 

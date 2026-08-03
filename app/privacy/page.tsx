@@ -11,7 +11,7 @@ export const metadata: Metadata = {
   },
 };
 
-const LAST_UPDATED = "July 31, 2026";
+const LAST_UPDATED = "August 3, 2026";
 
 export default function PrivacyPolicyPage() {
   return (
@@ -83,8 +83,9 @@ export default function PrivacyPolicyPage() {
                   details required to complete a user-requested browser action.
                 </li>
                 <li>
-                  <strong>Media:</strong> microphone audio and, when Live Translate is
-                  started, audio from the tab or media element selected by the user.
+                  <strong>Media:</strong> microphone audio; audio from the tab or media
+                  element selected for Live Translate; and captions, audio, video, or a
+                  temporary media URL when the user requests a video summary or transcript.
                 </li>
                 <li>
                   <strong>Authentication and configuration information:</strong> a Gemini
@@ -112,6 +113,7 @@ export default function PrivacyPolicyPage() {
               <ul>
                 <li>Respond to voice, text, and image requests.</li>
                 <li>Translate user-selected media audio.</li>
+                <li>Create requested video summaries, transcripts, downloads, and timestamp-based follow-up analysis.</li>
                 <li>Understand page context and perform browser actions requested by the user.</li>
                 <li>Run tools through MCP services selected and configured by the user.</li>
                 <li>Restore local conversations, preferences, and recorded workflows.</li>
@@ -127,8 +129,9 @@ export default function PrivacyPolicyPage() {
               <p>
                 Lumi Live stores extension data locally using Chrome extension storage and
                 IndexedDB. This can include credentials, settings, chat history, transcript
-                snapshots, screenshots, and recorded flows. The developer does not receive
-                or have access to this locally stored information.
+                snapshots, the latest five video-analysis transcripts, screenshots, and
+                recorded flows. The developer does not receive or have access to this locally
+                stored information.
               </p>
               <p>
                 Local information remains on the device until it is deleted through Lumi
@@ -150,9 +153,12 @@ export default function PrivacyPolicyPage() {
               </p>
               <ul>
                 <li>
-                  <strong>Google Gemini:</strong> prompts, audio, images, page context,
-                  screenshots, and tool results needed to generate responses, plan requested
-                  actions, or provide live translation.
+                  <strong>Google Gemini:</strong> prompts, audio, video, captions, temporary
+                  media URLs, images, page context, screenshots, and tool results needed to
+                  generate responses, plan requested actions, provide live translation, or
+                  create a user-requested video summary or transcript. When Lumi must use the
+                  Gemini Files API for video analysis, it deletes the temporary upload after
+                  processing; Google&apos;s independent handling remains governed by its terms.
                 </li>
                 <li>
                   <strong>User-configured MCP services:</strong> tool arguments and relevant

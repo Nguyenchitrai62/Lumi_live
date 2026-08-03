@@ -4621,6 +4621,7 @@ ${clippedAnchor.content}`);
     microphoneGrantedAt: "lumiMicrophoneGrantedAt",
     targetTabId: "lumiLiveTargetTabId",
     thinkingLevel: "lumiGeminiThinkingLevel",
+    videoAnalyses: "lumiVideoAnalyses",
     voice: "lumiGeminiVoice"
   });
 

@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Lumi Live",
-  "version": "0.1.4",
+  "version": "0.1.9",
   "minimum_chrome_version": "120",
-  "description": "A Gemini Live voice agent with live video translation, reactive avatars, PageAgent browser controls, and MCP tools.",
+  "description": "A Gemini Live voice agent with video summaries and transcripts, live translation, avatars, PageAgent controls, and MCP tools.",
   "permissions": ["activeTab", "debugger", "identity", "offscreen", "scripting", "sidePanel", "storage", "tabGroups", "tabs", "unlimitedStorage", "webNavigation"],
   "host_permissions": [
     "<all_urls>"
@@ -15,7 +15,7 @@
     "128": "icons/lumi-live.png"
   },
   "background": {
-    "service_worker": "background/index.js",
+    "service_worker": "dist/background.js",
     "type": "module"
   },
   "action": {

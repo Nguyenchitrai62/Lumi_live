@@ -96,4 +96,19 @@ await build({
   },
 });
 
+await build({
+  entryPoints: [path.join(extensionRoot, "background", "index.js")],
+  outfile: path.join(outputDirectory, "background.js"),
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: ["chrome120"],
+  sourcemap: false,
+  minify: false,
+  legalComments: "inline",
+  banner: {
+    js: "/* Includes MP4Box.js by GPAC under the BSD-3-Clause License. */",
+  },
+});
+
 console.log("Built the Lumi Live extension");
