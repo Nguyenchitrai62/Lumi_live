@@ -282,6 +282,20 @@ export function parseStoredTranscriptSegments(transcript) {
   return deduplicateCues(segments);
 }
 
+export function facebookVideoIdFromUrl(rawUrl) {
+  const safeUrl = sanitizeActiveContextUrl(rawUrl || "");
+  try {
+    const parsed = new URL(safeUrl);
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    if (hostname !== "facebook.com" && !hostname.endsWith(".facebook.com")) return "";
+    return parsed.pathname.match(/\/(?:reel|reels|videos?)\/(\d+)/i)?.[1]
+      || parsed.searchParams.get("v")
+      || "";
+  } catch {
+    return "";
+  }
+}
+
 export function videoIdentityKey(rawUrl) {
   const safeUrl = sanitizeActiveContextUrl(rawUrl || "");
   try {
@@ -293,11 +307,8 @@ export function videoIdentityKey(rawUrl) {
       const videoId = parsed.searchParams.get("v") || pathId;
       if (videoId) return `youtube:${videoId}`;
     }
-    if (hostname === "facebook.com" || hostname.endsWith(".facebook.com")) {
-      const pathId = parsed.pathname.match(/\/(?:reel|reels|videos)\/(\d+)/i)?.[1];
-      const videoId = pathId || parsed.searchParams.get("v");
-      if (videoId) return `facebook:${videoId}`;
-    }
+    const facebookVideoId = facebookVideoIdFromUrl(parsed.href);
+    if (facebookVideoId) return `facebook:${facebookVideoId}`;
     if (hostname === "udemy.com" || hostname.endsWith(".udemy.com")) {
       const lectureId = parsed.pathname.match(/\/lecture\/(\d+)/i)?.[1];
       if (lectureId) return `udemy-lecture:${lectureId}`;
@@ -837,17 +848,26 @@ export function mergeVideoAnalysisSources(executions = []) {
   });
   const primary = ranked[0];
   const topFrame = sources.find((source) => source.frameId === 0);
+  const facebookVideoId = topFrame?.facebookVideoId || facebookVideoIdFromUrl(topFrame?.pageUrl);
   const captionTracks = [];
   const captionIdentities = new Set();
   const mediaCandidates = [];
   for (const source of sources) {
     for (const track of source.captionTracks || []) {
+      if (facebookVideoId && (
+        track.facebookVideoId !== facebookVideoId
+        || track.identityVerified !== true
+      )) continue;
       const identity = track.baseUrl || `${track.source}:${track.language}:${track.label}:${track.cues?.length || 0}`;
       if (captionIdentities.has(identity)) continue;
       captionIdentities.add(identity);
       captionTracks.push({ ...track, frameId: source.frameId });
     }
     for (const candidate of source.mediaCandidates || []) {
+      if (facebookVideoId && (
+        candidate.facebookVideoId !== facebookVideoId
+        || candidate.identityVerified !== true
+      )) continue;
       if (!candidate?.url || mediaCandidates.some((item) => item.url === candidate.url)) continue;
       mediaCandidates.push({ ...candidate, frameId: source.frameId });
     }
@@ -856,6 +876,14 @@ export function mergeVideoAnalysisSources(executions = []) {
     ...primary,
     pageTitle: topFrame?.pageTitle || primary.pageTitle,
     pageUrl: topFrame?.pageUrl || primary.pageUrl,
+    facebookVideoId,
+    facebookMediaIdentityVerified: facebookVideoId
+      ? Boolean(
+          topFrame?.facebookMediaIdentityVerified
+          || captionTracks.some((track) => track.facebookVideoId === facebookVideoId && track.identityVerified)
+          || mediaCandidates.some((candidate) => candidate.facebookVideoId === facebookVideoId && candidate.identityVerified),
+        )
+      : false,
     captionTracks,
     mediaCandidates,
   };
@@ -1270,13 +1298,28 @@ export function createVideoAnalysisService({
 
   async function findStoredAnalysis(analysisId, pageUrl) {
     const stored = await chromeApi.storage.local.get(storageKey);
-    const records = Array.isArray(stored[storageKey]) ? stored[storageKey] : [];
+    const storedRecords = Array.isArray(stored[storageKey]) ? stored[storageKey] : [];
+    const records = storedRecords.filter((record) => {
+      const recordFacebookVideoId = facebookVideoIdFromUrl(record?.pageUrl);
+      return !recordFacebookVideoId || (
+        record?.mediaIdentityVerified === true
+        && String(record?.facebookVideoId || "") === recordFacebookVideoId
+      );
+    });
+    if (records.length !== storedRecords.length) {
+      await chromeApi.storage.local.set({ [storageKey]: records });
+    }
     const requestedId = String(analysisId || "").trim();
     if (requestedId) return records.find((record) => record?.id === requestedId) || null;
     const requestedVideoIdentity = videoIdentityKey(pageUrl);
     if (!requestedVideoIdentity) return null;
+    const requestedFacebookVideoId = facebookVideoIdFromUrl(pageUrl);
     return records.find((record) => (
       (record?.videoIdentity || videoIdentityKey(record?.pageUrl)) === requestedVideoIdentity
+      && (!requestedFacebookVideoId || (
+        record?.mediaIdentityVerified === true
+        && String(record?.facebookVideoId || "") === requestedFacebookVideoId
+      ))
     )) || null;
   }
 
@@ -1348,7 +1391,17 @@ Cite the supporting timestamp ranges. If the question requires visual details th
       }
       const source = await collectSources(tab.id);
       const pageTitle = source.pageTitle || tab.title || "Video";
-      const pageUrl = sanitizeActiveContextUrl(tab.url || source.pageUrl || "");
+      const tabFacebookVideoId = facebookVideoIdFromUrl(tab.url);
+      const sourceFacebookVideoId = String(source.facebookVideoId || facebookVideoIdFromUrl(source.pageUrl));
+      if (tabFacebookVideoId && sourceFacebookVideoId && tabFacebookVideoId !== sourceFacebookVideoId) {
+        throw new Error("The Facebook Reel changed while Lumi was locating its media. Keep the intended Reel open and try again.");
+      }
+      const facebookVideoId = sourceFacebookVideoId || tabFacebookVideoId;
+      const pageUrl = sanitizeActiveContextUrl(
+        facebookVideoId && sourceFacebookVideoId
+          ? source.pageUrl
+          : tab.url || source.pageUrl || "",
+      );
       const storedAnalysis = await findStoredAnalysis("", pageUrl);
       const storedSegments = Array.isArray(storedAnalysis?.segments) && storedAnalysis.segments.length
         ? deduplicateCues(storedAnalysis.segments)
@@ -1358,6 +1411,11 @@ Cite the supporting timestamp ranges. If the question requires visual details th
       let sourceMethod;
       let transcriptLanguage = "";
       let transcriptReused = false;
+      const mediaIdentityVerified = !facebookVideoId || Boolean(
+        source.facebookMediaIdentityVerified
+        || (storedAnalysis?.mediaIdentityVerified === true
+          && String(storedAnalysis.facebookVideoId || "") === facebookVideoId),
+      );
       if (storedAnalysis?.transcript && storedSegments.length) {
         transcriptLanguage = cleanTranscriptText(
           storedAnalysis.transcriptLanguage
@@ -1416,7 +1474,16 @@ Cite the supporting timestamp ranges. If the question requires visual details th
             signal,
           });
         } else {
-          const rankedCandidates = rankDirectMediaCandidates(source.mediaCandidates, {
+          const eligibleMediaCandidates = facebookVideoId
+            ? source.mediaCandidates.filter((candidate) => (
+                candidate.facebookVideoId === facebookVideoId
+                && candidate.identityVerified === true
+              ))
+            : source.mediaCandidates;
+          if (facebookVideoId && (!mediaIdentityVerified || !eligibleMediaCandidates.length)) {
+            throw new Error(`Lumi could not verify an audio track belonging to Facebook Reel ${facebookVideoId}. Play this Reel briefly and try again; ambiguous media from adjacent Reels was intentionally rejected.`);
+          }
+          const rankedCandidates = rankDirectMediaCandidates(eligibleMediaCandidates, {
             preferAudio: true,
           });
           const audioCandidates = rankedCandidates.filter((candidate) => (
@@ -1536,6 +1603,8 @@ Cite the supporting timestamp ranges. If the question requires visual details th
         pageTitle,
         pageUrl,
         videoIdentity: videoIdentityKey(pageUrl),
+        facebookVideoId,
+        mediaIdentityVerified,
         sourceMethod,
         summary: result.summary,
         language: result.language,
@@ -1555,6 +1624,8 @@ Cite the supporting timestamp ranges. If the question requires visual details th
         modelAttempts: [...new Set(interactionModelAttempts)],
         modelFallbackUsed: new Set(interactionModelAttempts).size > 1,
         sourceMethod,
+        facebookVideoId: facebookVideoId || null,
+        mediaIdentityVerified,
         transcriptReused,
         transcriptSourceQuality: transcriptReused
           ? "stored_transcript"

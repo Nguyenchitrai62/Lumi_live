@@ -2619,15 +2619,47 @@ async function collectVideoAnalysisSourceInPage() {
       return "";
     }
   };
+  const facebookVideoIdFromUrl2 = (value) => {
+    try {
+      const parsed = new URL(String(value || ""), location.href);
+      if (!/(^|\.)facebook\.com$/i.test(parsed.hostname)) return "";
+      return parsed.pathname.match(/\/(?:reel|reels|videos?)\/(\d+)/i)?.[1] || parsed.searchParams.get("v") || "";
+    } catch {
+      return "";
+    }
+  };
+  const facebookVideoId = facebookVideoIdFromUrl2(location.href);
+  const elementFacebookVideoId = (mediaElement) => {
+    if (!mediaElement || !facebookVideoId) return "";
+    let node = mediaElement;
+    for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+      for (const attribute of Array.from(node.attributes || [])) {
+        const name = String(attribute?.name || "");
+        const value = String(attribute?.value || "");
+        if (/^(?:data-)?(?:video|reel)(?:[-_]?id)?$/i.test(name) && value === facebookVideoId) {
+          return facebookVideoId;
+        }
+        const linkedId = facebookVideoIdFromUrl2(value);
+        if (linkedId) return linkedId;
+      }
+      const links = Array.from(node.querySelectorAll?.('a[href*="/reel/"],a[href*="/reels/"],a[href*="/videos/"]') || []).map((link) => facebookVideoIdFromUrl2(link.href || link.getAttribute?.("href"))).filter(Boolean);
+      const distinctIds = [...new Set(links)];
+      if (distinctIds.length === 1) return distinctIds[0];
+    }
+    return "";
+  };
   const mediaElements = [...document.querySelectorAll("video, audio")];
   const scoreElement = (element2) => {
     const rect = element2.getBoundingClientRect();
     const area = Math.max(0, rect.width) * Math.max(0, rect.height);
     const playable = element2.readyState >= HTMLMediaElement.HAVE_METADATA ? 1e6 : 0;
     const active = !element2.paused && !element2.ended ? 2e6 : 0;
-    return active + playable + area;
+    const associatedId = elementFacebookVideoId(element2);
+    const identityScore = !facebookVideoId ? 0 : associatedId === facebookVideoId ? 2e7 : associatedId ? -2e7 : 0;
+    return identityScore + active + playable + area;
   };
   const element = mediaElements.sort((left, right) => scoreElement(right) - scoreElement(left))[0] || null;
+  const selectedElementFacebookVideoId = elementFacebookVideoId(element);
   const htmlTracks = [];
   if (element) {
     const restoredTrackModes = [];
@@ -2651,6 +2683,7 @@ async function collectVideoAnalysisSourceInPage() {
       if (!cues.length) continue;
       htmlTracks.push({
         source: "html_text_track",
+        ...facebookVideoId && selectedElementFacebookVideoId === facebookVideoId ? { facebookVideoId, identityVerified: true } : {},
         language: String(track.language || ""),
         label: String(track.label || track.language || "Captions"),
         kind: String(track.kind || "subtitles"),
@@ -2663,6 +2696,7 @@ async function collectVideoAnalysisSourceInPage() {
       htmlTracks.push({
         source: "html_track_url",
         baseUrl,
+        ...facebookVideoId && selectedElementFacebookVideoId === facebookVideoId ? { facebookVideoId, identityVerified: true } : {},
         language: String(trackElement.srclang || ""),
         label: cleanText(trackElement.label || trackElement.srclang || "Captions"),
         kind: String(trackElement.kind || "subtitles"),
@@ -2702,12 +2736,11 @@ async function collectVideoAnalysisSourceInPage() {
     }
   }
   const candidates = [];
-  const addCandidate = (value, origin, mimeType = "") => {
+  const addCandidate = (value, origin, mimeType = "", metadata = {}) => {
     const url = absoluteUrl(value);
     if (!url || candidates.some((candidate) => candidate.url === url)) return;
-    candidates.push({ url, origin, mimeType: String(mimeType || "") });
+    candidates.push({ url, origin, mimeType: String(mimeType || ""), ...metadata });
   };
-  const facebookVideoId = location.pathname.match(/\/(?:reel|reels|videos?)\/(\d+)/i)?.[1] || "";
   if (facebookVideoId && /(^|\.)facebook\.com$/i.test(location.hostname)) {
     const readXmlAttribute = (attributes, name) => {
       const match = String(attributes || "").match(new RegExp(`(?:^|\\s)${name}=["']([^"']+)["']`, "i"));
@@ -2736,6 +2769,8 @@ async function collectVideoAnalysisSourceInPage() {
             htmlTracks.push({
               source: "facebook_caption_url",
               baseUrl: captionsUrl,
+              facebookVideoId,
+              identityVerified: true,
               language: String(value.video_available_captions_locales?.[0] || ""),
               label: "Facebook captions",
               kind: "subtitles",
@@ -2749,7 +2784,10 @@ async function collectVideoAnalysisSourceInPage() {
             for (const match of xml.matchAll(representationPattern)) {
               const baseUrl = decodeXmlUrl(match[2].match(/<BaseURL>([\s\S]*?)<\/BaseURL>/i)?.[1]);
               const mimeType = readXmlAttribute(match[1], "mimeType");
-              addCandidate(baseUrl, "facebook_dash_manifest", mimeType);
+              addCandidate(baseUrl, "facebook_dash_manifest", mimeType, {
+                facebookVideoId,
+                identityVerified: true
+              });
               const candidate = candidates.at(-1);
               if (candidate?.url === absoluteUrl(baseUrl)) {
                 candidate.bandwidth = Number(readXmlAttribute(match[1], "bandwidth")) || 0;
@@ -2773,10 +2811,14 @@ async function collectVideoAnalysisSourceInPage() {
     }
   }
   if (element) {
-    addCandidate(element.currentSrc, "current_src", element.getAttribute("type"));
-    addCandidate(element.src, "element_src", element.getAttribute("type"));
-    for (const source of element.querySelectorAll("source")) {
-      addCandidate(source.src, "source_element", source.type);
+    const canTrustSelectedElement = !facebookVideoId || selectedElementFacebookVideoId === facebookVideoId;
+    if (canTrustSelectedElement) {
+      const identityMetadata = facebookVideoId ? { facebookVideoId, identityVerified: true } : {};
+      addCandidate(element.currentSrc, "current_src", element.getAttribute("type"), identityMetadata);
+      addCandidate(element.src, "element_src", element.getAttribute("type"), identityMetadata);
+      for (const source of element.querySelectorAll("source")) {
+        addCandidate(source.src, "source_element", source.type, identityMetadata);
+      }
     }
   }
   for (const selector of [
@@ -2786,7 +2828,9 @@ async function collectVideoAnalysisSourceInPage() {
     'meta[name="twitter:player:stream"]'
   ]) {
     const meta = document.querySelector(selector);
-    addCandidate(meta?.content, "page_metadata", meta?.getAttribute("data-type"));
+    if (!facebookVideoId) {
+      addCandidate(meta?.content, "page_metadata", meta?.getAttribute("data-type"));
+    }
   }
   const captionResourcePattern = /(?:caption|subtitle|\.vtt|\.srt|\.ttml|\.dfxp)(?:[/?#]|$)/i;
   const mediaResourcePattern = /(?:\.m4a|\.mp3|\.aac|\.mp4|\.m4s|\.webm|\.m3u8|\.mpd|\.ts)(?:[?#]|$)|googlevideo\.com|(?:[?&](?:mime|type|mime_type)=(?:audio|video)(?:%2f|\/|_))|(?:fbcdn\.net\/(?:o1\/v\/|[^?#]*\/v\/t42\.1790-2\/))/i;
@@ -2806,7 +2850,7 @@ async function collectVideoAnalysisSourceInPage() {
         });
       }
     }
-    if (mediaResourcePattern.test(url) || ["audio", "video"].includes(entry.initiatorType)) {
+    if (!facebookVideoId && (mediaResourcePattern.test(url) || ["audio", "video"].includes(entry.initiatorType))) {
       addCandidate(url, "performance_resource");
       const candidate = candidates.at(-1);
       if (candidate?.url === absoluteUrl(url)) {
@@ -2817,7 +2861,7 @@ async function collectVideoAnalysisSourceInPage() {
     }
   }
   return {
-    found: Boolean(element || youtubeTracks.length || candidates.length),
+    found: Boolean(element || youtubeTracks.length || candidates.length || facebookVideoId),
     pageTitle: document.title,
     pageUrl: location.href,
     frameUrl: location.href,
@@ -2830,8 +2874,13 @@ async function collectVideoAnalysisSourceInPage() {
         const rect = element.getBoundingClientRect();
         return Math.max(0, rect.width) * Math.max(0, rect.height);
       })(),
-      poster: absoluteUrl(element.poster)
+      poster: absoluteUrl(element.poster),
+      facebookVideoId: selectedElementFacebookVideoId
     } : null,
+    facebookVideoId,
+    facebookMediaIdentityVerified: Boolean(
+      facebookVideoId && (selectedElementFacebookVideoId === facebookVideoId || candidates.some((candidate) => candidate.facebookVideoId === facebookVideoId && candidate.identityVerified) || htmlTracks.some((track) => track.facebookVideoId === facebookVideoId && track.identityVerified))
+    ),
     captionTracks: [...htmlTracks, ...youtubeTracks],
     mediaCandidates: candidates.slice(-64)
   };
@@ -13098,6 +13147,17 @@ function parseStoredTranscriptSegments(transcript) {
   }
   return deduplicateCues(segments);
 }
+function facebookVideoIdFromUrl(rawUrl) {
+  const safeUrl = sanitizeActiveContextUrl(rawUrl || "");
+  try {
+    const parsed = new URL(safeUrl);
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    if (hostname !== "facebook.com" && !hostname.endsWith(".facebook.com")) return "";
+    return parsed.pathname.match(/\/(?:reel|reels|videos?)\/(\d+)/i)?.[1] || parsed.searchParams.get("v") || "";
+  } catch {
+    return "";
+  }
+}
 function videoIdentityKey(rawUrl) {
   const safeUrl = sanitizeActiveContextUrl(rawUrl || "");
   try {
@@ -13108,11 +13168,8 @@ function videoIdentityKey(rawUrl) {
       const videoId = parsed.searchParams.get("v") || pathId;
       if (videoId) return `youtube:${videoId}`;
     }
-    if (hostname === "facebook.com" || hostname.endsWith(".facebook.com")) {
-      const pathId = parsed.pathname.match(/\/(?:reel|reels|videos)\/(\d+)/i)?.[1];
-      const videoId = pathId || parsed.searchParams.get("v");
-      if (videoId) return `facebook:${videoId}`;
-    }
+    const facebookVideoId = facebookVideoIdFromUrl(parsed.href);
+    if (facebookVideoId) return `facebook:${facebookVideoId}`;
     if (hostname === "udemy.com" || hostname.endsWith(".udemy.com")) {
       const lectureId = parsed.pathname.match(/\/lecture\/(\d+)/i)?.[1];
       if (lectureId) return `udemy-lecture:${lectureId}`;
@@ -13586,17 +13643,20 @@ function mergeVideoAnalysisSources(executions = []) {
   });
   const primary = ranked[0];
   const topFrame = sources.find((source) => source.frameId === 0);
+  const facebookVideoId = topFrame?.facebookVideoId || facebookVideoIdFromUrl(topFrame?.pageUrl);
   const captionTracks = [];
   const captionIdentities = /* @__PURE__ */ new Set();
   const mediaCandidates = [];
   for (const source of sources) {
     for (const track of source.captionTracks || []) {
+      if (facebookVideoId && (track.facebookVideoId !== facebookVideoId || track.identityVerified !== true)) continue;
       const identity = track.baseUrl || `${track.source}:${track.language}:${track.label}:${track.cues?.length || 0}`;
       if (captionIdentities.has(identity)) continue;
       captionIdentities.add(identity);
       captionTracks.push({ ...track, frameId: source.frameId });
     }
     for (const candidate of source.mediaCandidates || []) {
+      if (facebookVideoId && (candidate.facebookVideoId !== facebookVideoId || candidate.identityVerified !== true)) continue;
       if (!candidate?.url || mediaCandidates.some((item) => item.url === candidate.url)) continue;
       mediaCandidates.push({ ...candidate, frameId: source.frameId });
     }
@@ -13605,6 +13665,10 @@ function mergeVideoAnalysisSources(executions = []) {
     ...primary,
     pageTitle: topFrame?.pageTitle || primary.pageTitle,
     pageUrl: topFrame?.pageUrl || primary.pageUrl,
+    facebookVideoId,
+    facebookMediaIdentityVerified: facebookVideoId ? Boolean(
+      topFrame?.facebookMediaIdentityVerified || captionTracks.some((track) => track.facebookVideoId === facebookVideoId && track.identityVerified) || mediaCandidates.some((candidate) => candidate.facebookVideoId === facebookVideoId && candidate.identityVerified)
+    ) : false,
     captionTracks,
     mediaCandidates
   };
@@ -13990,12 +14054,20 @@ ${transcript}`
   }
   async function findStoredAnalysis(analysisId, pageUrl) {
     const stored = await chromeApi.storage.local.get(storageKey);
-    const records = Array.isArray(stored[storageKey]) ? stored[storageKey] : [];
+    const storedRecords = Array.isArray(stored[storageKey]) ? stored[storageKey] : [];
+    const records = storedRecords.filter((record) => {
+      const recordFacebookVideoId = facebookVideoIdFromUrl(record?.pageUrl);
+      return !recordFacebookVideoId || record?.mediaIdentityVerified === true && String(record?.facebookVideoId || "") === recordFacebookVideoId;
+    });
+    if (records.length !== storedRecords.length) {
+      await chromeApi.storage.local.set({ [storageKey]: records });
+    }
     const requestedId = String(analysisId || "").trim();
     if (requestedId) return records.find((record) => record?.id === requestedId) || null;
     const requestedVideoIdentity = videoIdentityKey(pageUrl);
     if (!requestedVideoIdentity) return null;
-    return records.find((record) => (record?.videoIdentity || videoIdentityKey(record?.pageUrl)) === requestedVideoIdentity) || null;
+    const requestedFacebookVideoId = facebookVideoIdFromUrl(pageUrl);
+    return records.find((record) => (record?.videoIdentity || videoIdentityKey(record?.pageUrl)) === requestedVideoIdentity && (!requestedFacebookVideoId || record?.mediaIdentityVerified === true && String(record?.facebookVideoId || "") === requestedFacebookVideoId)) || null;
   }
   async function inspectStoredAnalysis({ tab, args, apiKey, signal }) {
     const record = await findStoredAnalysis(args.analysisId, tab.url);
@@ -14062,7 +14134,15 @@ ${transcript}` },
       }
       const source = await collectSources(tab.id);
       const pageTitle = source.pageTitle || tab.title || "Video";
-      const pageUrl = sanitizeActiveContextUrl(tab.url || source.pageUrl || "");
+      const tabFacebookVideoId = facebookVideoIdFromUrl(tab.url);
+      const sourceFacebookVideoId = String(source.facebookVideoId || facebookVideoIdFromUrl(source.pageUrl));
+      if (tabFacebookVideoId && sourceFacebookVideoId && tabFacebookVideoId !== sourceFacebookVideoId) {
+        throw new Error("The Facebook Reel changed while Lumi was locating its media. Keep the intended Reel open and try again.");
+      }
+      const facebookVideoId = sourceFacebookVideoId || tabFacebookVideoId;
+      const pageUrl = sanitizeActiveContextUrl(
+        facebookVideoId && sourceFacebookVideoId ? source.pageUrl : tab.url || source.pageUrl || ""
+      );
       const storedAnalysis = await findStoredAnalysis("", pageUrl);
       const storedSegments = Array.isArray(storedAnalysis?.segments) && storedAnalysis.segments.length ? deduplicateCues(storedAnalysis.segments) : parseStoredTranscriptSegments(storedAnalysis?.transcript);
       let captionResult = null;
@@ -14070,6 +14150,9 @@ ${transcript}` },
       let sourceMethod;
       let transcriptLanguage = "";
       let transcriptReused = false;
+      const mediaIdentityVerified = !facebookVideoId || Boolean(
+        source.facebookMediaIdentityVerified || storedAnalysis?.mediaIdentityVerified === true && String(storedAnalysis.facebookVideoId || "") === facebookVideoId
+      );
       if (storedAnalysis?.transcript && storedSegments.length) {
         transcriptLanguage = cleanTranscriptText(
           storedAnalysis.transcriptLanguage || storedAnalysis.transcript.match(/^Language:\s*(.+)$/mi)?.[1] || storedAnalysis.language
@@ -14122,7 +14205,11 @@ ${transcript}` },
               signal
             });
           } else {
-            const rankedCandidates = rankDirectMediaCandidates(source.mediaCandidates, {
+            const eligibleMediaCandidates = facebookVideoId ? source.mediaCandidates.filter((candidate) => candidate.facebookVideoId === facebookVideoId && candidate.identityVerified === true) : source.mediaCandidates;
+            if (facebookVideoId && (!mediaIdentityVerified || !eligibleMediaCandidates.length)) {
+              throw new Error(`Lumi could not verify an audio track belonging to Facebook Reel ${facebookVideoId}. Play this Reel briefly and try again; ambiguous media from adjacent Reels was intentionally rejected.`);
+            }
+            const rankedCandidates = rankDirectMediaCandidates(eligibleMediaCandidates, {
               preferAudio: true
             });
             const audioCandidates = rankedCandidates.filter((candidate) => inferMimeType(candidate.url, candidate.mimeType).startsWith("audio/"));
@@ -14227,6 +14314,8 @@ ${transcript}` },
         pageTitle,
         pageUrl,
         videoIdentity: videoIdentityKey(pageUrl),
+        facebookVideoId,
+        mediaIdentityVerified,
         sourceMethod,
         summary: result.summary,
         language: result.language,
@@ -14246,6 +14335,8 @@ ${transcript}` },
         modelAttempts: [...new Set(interactionModelAttempts)],
         modelFallbackUsed: new Set(interactionModelAttempts).size > 1,
         sourceMethod,
+        facebookVideoId: facebookVideoId || null,
+        mediaIdentityVerified,
         transcriptReused,
         transcriptSourceQuality: transcriptReused ? "stored_transcript" : captionResult ? "existing_caption" : result.segments.length ? "model_context_corrected" : null,
         sourceTitle: pageTitle,

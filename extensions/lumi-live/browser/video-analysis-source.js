@@ -19,15 +19,57 @@ export async function collectVideoAnalysisSourceInPage() {
       return "";
     }
   };
+  const facebookVideoIdFromUrl = (value) => {
+    try {
+      const parsed = new URL(String(value || ""), location.href);
+      if (!/(^|\.)facebook\.com$/i.test(parsed.hostname)) return "";
+      return parsed.pathname.match(/\/(?:reel|reels|videos?)\/(\d+)/i)?.[1]
+        || parsed.searchParams.get("v")
+        || "";
+    } catch {
+      return "";
+    }
+  };
+  const facebookVideoId = facebookVideoIdFromUrl(location.href);
+  const elementFacebookVideoId = (mediaElement) => {
+    if (!mediaElement || !facebookVideoId) return "";
+    let node = mediaElement;
+    for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+      for (const attribute of Array.from(node.attributes || [])) {
+        const name = String(attribute?.name || "");
+        const value = String(attribute?.value || "");
+        if (/^(?:data-)?(?:video|reel)(?:[-_]?id)?$/i.test(name) && value === facebookVideoId) {
+          return facebookVideoId;
+        }
+        const linkedId = facebookVideoIdFromUrl(value);
+        if (linkedId) return linkedId;
+      }
+      const links = Array.from(node.querySelectorAll?.('a[href*="/reel/"],a[href*="/reels/"],a[href*="/videos/"]') || [])
+        .map((link) => facebookVideoIdFromUrl(link.href || link.getAttribute?.("href")))
+        .filter(Boolean);
+      const distinctIds = [...new Set(links)];
+      if (distinctIds.length === 1) return distinctIds[0];
+    }
+    return "";
+  };
   const mediaElements = [...document.querySelectorAll("video, audio")];
   const scoreElement = (element) => {
     const rect = element.getBoundingClientRect();
     const area = Math.max(0, rect.width) * Math.max(0, rect.height);
     const playable = element.readyState >= HTMLMediaElement.HAVE_METADATA ? 1_000_000 : 0;
     const active = !element.paused && !element.ended ? 2_000_000 : 0;
-    return active + playable + area;
+    const associatedId = elementFacebookVideoId(element);
+    const identityScore = !facebookVideoId
+      ? 0
+      : associatedId === facebookVideoId
+        ? 20_000_000
+        : associatedId
+          ? -20_000_000
+          : 0;
+    return identityScore + active + playable + area;
   };
   const element = mediaElements.sort((left, right) => scoreElement(right) - scoreElement(left))[0] || null;
+  const selectedElementFacebookVideoId = elementFacebookVideoId(element);
   const htmlTracks = [];
   if (element) {
     const restoredTrackModes = [];
@@ -48,6 +90,9 @@ export async function collectVideoAnalysisSourceInPage() {
       if (!cues.length) continue;
       htmlTracks.push({
         source: "html_text_track",
+        ...(facebookVideoId && selectedElementFacebookVideoId === facebookVideoId
+          ? { facebookVideoId, identityVerified: true }
+          : {}),
         language: String(track.language || ""),
         label: String(track.label || track.language || "Captions"),
         kind: String(track.kind || "subtitles"),
@@ -60,6 +105,9 @@ export async function collectVideoAnalysisSourceInPage() {
       htmlTracks.push({
         source: "html_track_url",
         baseUrl,
+        ...(facebookVideoId && selectedElementFacebookVideoId === facebookVideoId
+          ? { facebookVideoId, identityVerified: true }
+          : {}),
         language: String(trackElement.srclang || ""),
         label: cleanText(trackElement.label || trackElement.srclang || "Captions"),
         kind: String(trackElement.kind || "subtitles"),
@@ -104,13 +152,12 @@ export async function collectVideoAnalysisSourceInPage() {
   }
 
   const candidates = [];
-  const addCandidate = (value, origin, mimeType = "") => {
+  const addCandidate = (value, origin, mimeType = "", metadata = {}) => {
     const url = absoluteUrl(value);
     if (!url || candidates.some((candidate) => candidate.url === url)) return;
-    candidates.push({ url, origin, mimeType: String(mimeType || "") });
+    candidates.push({ url, origin, mimeType: String(mimeType || ""), ...metadata });
   };
 
-  const facebookVideoId = location.pathname.match(/\/(?:reel|reels|videos?)\/(\d+)/i)?.[1] || "";
   if (facebookVideoId && /(^|\.)facebook\.com$/i.test(location.hostname)) {
     const readXmlAttribute = (attributes, name) => {
       const match = String(attributes || "").match(new RegExp(`(?:^|\\s)${name}=["']([^"']+)["']`, "i"));
@@ -138,6 +185,8 @@ export async function collectVideoAnalysisSourceInPage() {
             htmlTracks.push({
               source: "facebook_caption_url",
               baseUrl: captionsUrl,
+              facebookVideoId,
+              identityVerified: true,
               language: String(value.video_available_captions_locales?.[0] || ""),
               label: "Facebook captions",
               kind: "subtitles",
@@ -153,7 +202,10 @@ export async function collectVideoAnalysisSourceInPage() {
             for (const match of xml.matchAll(representationPattern)) {
               const baseUrl = decodeXmlUrl(match[2].match(/<BaseURL>([\s\S]*?)<\/BaseURL>/i)?.[1]);
               const mimeType = readXmlAttribute(match[1], "mimeType");
-              addCandidate(baseUrl, "facebook_dash_manifest", mimeType);
+              addCandidate(baseUrl, "facebook_dash_manifest", mimeType, {
+                facebookVideoId,
+                identityVerified: true,
+              });
               const candidate = candidates.at(-1);
               if (candidate?.url === absoluteUrl(baseUrl)) {
                 candidate.bandwidth = Number(readXmlAttribute(match[1], "bandwidth")) || 0;
@@ -177,10 +229,16 @@ export async function collectVideoAnalysisSourceInPage() {
     }
   }
   if (element) {
-    addCandidate(element.currentSrc, "current_src", element.getAttribute("type"));
-    addCandidate(element.src, "element_src", element.getAttribute("type"));
-    for (const source of element.querySelectorAll("source")) {
-      addCandidate(source.src, "source_element", source.type);
+    const canTrustSelectedElement = !facebookVideoId || selectedElementFacebookVideoId === facebookVideoId;
+    if (canTrustSelectedElement) {
+      const identityMetadata = facebookVideoId
+        ? { facebookVideoId, identityVerified: true }
+        : {};
+      addCandidate(element.currentSrc, "current_src", element.getAttribute("type"), identityMetadata);
+      addCandidate(element.src, "element_src", element.getAttribute("type"), identityMetadata);
+      for (const source of element.querySelectorAll("source")) {
+        addCandidate(source.src, "source_element", source.type, identityMetadata);
+      }
     }
   }
   for (const selector of [
@@ -190,7 +248,9 @@ export async function collectVideoAnalysisSourceInPage() {
     'meta[name="twitter:player:stream"]',
   ]) {
     const meta = document.querySelector(selector);
-    addCandidate(meta?.content, "page_metadata", meta?.getAttribute("data-type"));
+    if (!facebookVideoId) {
+      addCandidate(meta?.content, "page_metadata", meta?.getAttribute("data-type"));
+    }
   }
   const captionResourcePattern = /(?:caption|subtitle|\.vtt|\.srt|\.ttml|\.dfxp)(?:[/?#]|$)/i;
   const mediaResourcePattern = /(?:\.m4a|\.mp3|\.aac|\.mp4|\.m4s|\.webm|\.m3u8|\.mpd|\.ts)(?:[?#]|$)|googlevideo\.com|(?:[?&](?:mime|type|mime_type)=(?:audio|video)(?:%2f|\/|_))|(?:fbcdn\.net\/(?:o1\/v\/|[^?#]*\/v\/t42\.1790-2\/))/i;
@@ -210,7 +270,7 @@ export async function collectVideoAnalysisSourceInPage() {
         });
       }
     }
-    if (mediaResourcePattern.test(url) || ["audio", "video"].includes(entry.initiatorType)) {
+    if (!facebookVideoId && (mediaResourcePattern.test(url) || ["audio", "video"].includes(entry.initiatorType))) {
       addCandidate(url, "performance_resource");
       const candidate = candidates.at(-1);
       if (candidate?.url === absoluteUrl(url)) {
@@ -222,7 +282,7 @@ export async function collectVideoAnalysisSourceInPage() {
   }
 
   return {
-    found: Boolean(element || youtubeTracks.length || candidates.length),
+    found: Boolean(element || youtubeTracks.length || candidates.length || facebookVideoId),
     pageTitle: document.title,
     pageUrl: location.href,
     frameUrl: location.href,
@@ -236,7 +296,15 @@ export async function collectVideoAnalysisSourceInPage() {
         return Math.max(0, rect.width) * Math.max(0, rect.height);
       })(),
       poster: absoluteUrl(element.poster),
+      facebookVideoId: selectedElementFacebookVideoId,
     } : null,
+    facebookVideoId,
+    facebookMediaIdentityVerified: Boolean(
+      facebookVideoId
+      && (selectedElementFacebookVideoId === facebookVideoId
+        || candidates.some((candidate) => candidate.facebookVideoId === facebookVideoId && candidate.identityVerified)
+        || htmlTracks.some((track) => track.facebookVideoId === facebookVideoId && track.identityVerified)),
+    ),
     captionTracks: [...htmlTracks, ...youtubeTracks],
     mediaCandidates: candidates.slice(-64),
   };

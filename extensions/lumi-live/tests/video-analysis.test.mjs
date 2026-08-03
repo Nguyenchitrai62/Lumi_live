@@ -188,6 +188,46 @@ test("merges video sources across Udemy-style frames and ranks Facebook audio", 
   assert.match(ranked[0].url, /audio_mp4/);
 });
 
+test("merges only media verified against the exact Facebook Reel ID", () => {
+  const targetId = "1554671672755534";
+  const merged = mergeVideoAnalysisSources([
+    { frameId: 0, result: {
+      found: true,
+      pageTitle: "Target Reel",
+      pageUrl: `https://www.facebook.com/reel/${targetId}`,
+      facebookVideoId: targetId,
+      facebookMediaIdentityVerified: true,
+      captionTracks: [],
+      mediaCandidates: [{
+        url: "https://scontent.fbcdn.net/target-audio.mp4",
+        origin: "facebook_dash_manifest",
+        mimeType: "audio/mp4",
+        facebookVideoId: targetId,
+        identityVerified: true,
+      }],
+    } },
+    { frameId: 1, result: {
+      found: true,
+      pageTitle: "Adjacent Reel",
+      pageUrl: "https://www.facebook.com/reel/9999999999999999",
+      captionTracks: [{ source: "performance_caption_resource", baseUrl: "https://fbcdn.net/wrong.vtt" }],
+      mediaCandidates: [{
+        url: "https://scontent.fbcdn.net/wrong-audio.mp4",
+        origin: "facebook_dash_manifest",
+        mimeType: "audio/mp4",
+        facebookVideoId: "9999999999999999",
+        identityVerified: true,
+      }],
+    } },
+  ]);
+  assert.equal(merged.facebookVideoId, targetId);
+  assert.equal(merged.facebookMediaIdentityVerified, true);
+  assert.deepEqual(merged.captionTracks, []);
+  assert.deepEqual(merged.mediaCandidates.map((candidate) => candidate.url), [
+    "https://scontent.fbcdn.net/target-audio.mp4",
+  ]);
+});
+
 test("parses HLS audio renditions and unencrypted media segments", () => {
   const master = parseHlsPlaylist(`#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",DEFAULT=YES,AUTOSELECT=YES,URI="audio/index.m3u8"
@@ -213,7 +253,7 @@ segment-2.m4s
   ]);
 });
 
-test("collects Facebook media performance requests without mistaking ordinary fbcdn images", async () => {
+test("rejects unbound Facebook performance media instead of guessing an adjacent Reel", async () => {
   const previousDocument = globalThis.document;
   const previousLocation = globalThis.location;
   const previousPerformance = globalThis.performance;
@@ -250,8 +290,9 @@ test("collects Facebook media performance requests without mistaking ordinary fb
     globalThis.HTMLMediaElement = { HAVE_METADATA: 1 };
     const source = await collectVideoAnalysisSourceInPage();
     assert.equal(source.found, true);
-    assert.equal(source.mediaCandidates.length, 1);
-    assert.match(source.mediaCandidates[0].url, /mime_type=audio_mp4/);
+    assert.equal(source.facebookVideoId, "1554671672755534");
+    assert.equal(source.facebookMediaIdentityVerified, false);
+    assert.equal(source.mediaCandidates.length, 0);
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
@@ -303,11 +344,15 @@ test("extracts the exact Facebook Reel audio representation from embedded DASH m
     globalThis.performance = { getEntriesByType() { return []; } };
     globalThis.HTMLMediaElement = { HAVE_METADATA: 1 };
     const source = await collectVideoAnalysisSourceInPage();
+    assert.equal(source.facebookVideoId, targetId);
+    assert.equal(source.facebookMediaIdentityVerified, true);
     const candidates = source.mediaCandidates.filter((candidate) => candidate.origin === "facebook_dash_manifest");
     assert.equal(candidates.length, 2);
     const audio = candidates.find((candidate) => candidate.mimeType === "audio/mp4");
     assert.ok(audio);
     assert.equal(audio.bandwidth, 45836);
+    assert.equal(audio.facebookVideoId, targetId);
+    assert.equal(audio.identityVerified, true);
     assert.equal(audio.representationId, "audio-track");
     assert.match(audio.url, /token=audio&expires=1/);
     assert.match(rankDirectMediaCandidates(candidates, { preferAudio: true })[0].url, /audio\.mp4/);
@@ -725,6 +770,13 @@ test("reports an error only after both video models are rate-limited", async () 
 
 test("remuxes a small Facebook MP4 audio container to inline AAC for Gemini", async () => {
   const storage = createMemoryStorage();
+  await storage.area.set({ analyses: [{
+    id: "legacy-poisoned-cache",
+    pageUrl: "https://www.facebook.com/reel/1554671672755534",
+    videoIdentity: "facebook:1554671672755534",
+    transcript: "Wrong cached transcript\n\n[00:00 - 00:03] Wrong Reel",
+    segments: [{ start: "00:00", end: "00:03", speaker: "Speaker", text: "Wrong Reel" }],
+  }] });
   const calls = [];
   const modelResult = {
     summary: "",
@@ -739,11 +791,13 @@ test("remuxes a small Facebook MP4 audio container to inline AAC for Gemini", as
           found: true,
           pageTitle: "Facebook Reel",
           pageUrl: "https://www.facebook.com/reel/1554671672755534",
+          facebookVideoId: "1554671672755534",
+          facebookMediaIdentityVerified: true,
           media: { kind: "video", duration: 60, paused: true },
           captionTracks: [],
           mediaCandidates: [
-            { url: "https://video.xx.fbcdn.net/reel.mp4?mime_type=video_mp4", origin: "performance_resource" },
-            { url: "https://video.xx.fbcdn.net/reel.mp4?mime_type=audio_mp4", origin: "performance_resource" },
+            { url: "https://video.xx.fbcdn.net/reel.mp4?mime_type=video_mp4", origin: "facebook_dash_manifest", facebookVideoId: "1554671672755534", identityVerified: true },
+            { url: "https://video.xx.fbcdn.net/reel.mp4?mime_type=audio_mp4", origin: "facebook_dash_manifest", facebookVideoId: "1554671672755534", identityVerified: true },
           ],
         } }];
       },
@@ -810,10 +864,64 @@ test("remuxes a small Facebook MP4 audio container to inline AAC for Gemini", as
   });
   const result = await service.analyze({ apiKey: "test-key", args: { action: "transcript" } });
   assert.equal(result.sourceMethod, "inline_media");
+  assert.equal(result.facebookVideoId, "1554671672755534");
+  assert.equal(result.mediaIdentityVerified, true);
+  assert.equal(result.transcriptReused, false);
   assert.equal(result.uploadedMediaDeleted, false);
   assert.match(result.transcript, /Xin chào/);
   assert.equal(calls.filter((call) => call.url.endsWith("/interactions")).length, 1);
   assert.equal(calls.some((call) => call.url.includes("/upload/v1beta/files")), false);
+  assert.equal(storage.state.analyses.length, 1);
+  assert.equal(storage.state.analyses[0].mediaIdentityVerified, true);
+  assert.equal(storage.state.analyses[0].facebookVideoId, "1554671672755534");
+  assert.equal(storage.state.analyses[0].videoIdentity, "facebook:1554671672755534");
+  assert.equal(storage.state.analyses[0].pageUrl, "https://www.facebook.com/reel/1554671672755534");
+  assert.doesNotMatch(storage.state.analyses[0].transcript, /Wrong Reel/);
+});
+
+test("stops when the Facebook player Reel ID disagrees with the active tab", async () => {
+  const storage = createMemoryStorage();
+  let fetchCalled = false;
+  const service = createVideoAnalysisService({
+    chromeApi: {
+      scripting: {
+        async executeScript() {
+          return [{ frameId: 0, result: {
+            found: true,
+            pageTitle: "Adjacent Reel",
+            pageUrl: "https://www.facebook.com/reel/9999999999999999",
+            facebookVideoId: "9999999999999999",
+            facebookMediaIdentityVerified: true,
+            captionTracks: [],
+            mediaCandidates: [{
+              url: "https://scontent.fbcdn.net/wrong-audio.mp4",
+              origin: "facebook_dash_manifest",
+              mimeType: "audio/mp4",
+              facebookVideoId: "9999999999999999",
+              identityVerified: true,
+            }],
+          } }];
+        },
+      },
+      storage: { local: storage.area },
+    },
+    fetchImpl: async () => {
+      fetchCalled = true;
+      throw new Error("must not fetch mismatched Reel media");
+    },
+    getTargetTab: async () => ({
+      id: 10,
+      title: "Target Reel",
+      url: "https://www.facebook.com/reel/1554671672755534",
+    }),
+    storageKey: "analyses",
+  });
+  await assert.rejects(
+    service.analyze({ apiKey: "test-key", args: { action: "transcript" } }),
+    /Facebook Reel changed/i,
+  );
+  assert.equal(fetchCalled, false);
+  assert.equal(storage.state.analyses, undefined);
 });
 
 test("does not retry silent Facebook video representations after the dedicated audio track fails", async () => {
@@ -826,11 +934,13 @@ test("does not retry silent Facebook video representations after the dedicated a
           found: true,
           pageTitle: "Facebook Reel",
           pageUrl: "https://www.facebook.com/reel/1554671672755534",
+          facebookVideoId: "1554671672755534",
+          facebookMediaIdentityVerified: true,
           media: { kind: "video", duration: 1330, paused: true },
           captionTracks: [],
           mediaCandidates: [
-            { url: "https://scontent.fbcdn.net/o1/v/video.mp4", origin: "facebook_dash_manifest", mimeType: "video/mp4" },
-            { url: "https://scontent.fbcdn.net/o1/v/audio.mp4", origin: "facebook_dash_manifest", mimeType: "audio/mp4" },
+            { url: "https://scontent.fbcdn.net/o1/v/video.mp4", origin: "facebook_dash_manifest", mimeType: "video/mp4", facebookVideoId: "1554671672755534", identityVerified: true },
+            { url: "https://scontent.fbcdn.net/o1/v/audio.mp4", origin: "facebook_dash_manifest", mimeType: "audio/mp4", facebookVideoId: "1554671672755534", identityVerified: true },
           ],
         } }];
       },
