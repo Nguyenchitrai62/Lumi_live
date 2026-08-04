@@ -1,4 +1,6 @@
 import { createMcpSettingsController } from "./mcp-settings-controller.js";
+import { createAdminToolsGesture } from "./admin-tools-gesture.js";
+import { createBuiltInToolInventory } from "./built-in-tool-inventory.js";
 import { EXTENSION_EVENTS, STORAGE_KEYS } from "../core/extension-config.js";
 import {
   DEFAULT_FAST_MODE_ENABLED,
@@ -18,6 +20,7 @@ const FAST_MODE_STORAGE_KEY = STORAGE_KEYS.fastMode;
 const MCP_DISABLED_TOOLS_STORAGE_KEY = STORAGE_KEYS.mcpDisabledTools;
 const MCP_TOOL_POLICIES_STORAGE_KEY = STORAGE_KEYS.mcpToolPolicies;
 const elements = {
+  lumiSettingsIcon: document.querySelector("#lumiSettingsIcon"),
   extensionVersion: document.querySelector("#extensionVersion"),
   apiKeyInput: document.querySelector("#apiKeyInput"),
   groqApiKeyInput: document.querySelector("#groqApiKeyInput"),
@@ -55,10 +58,12 @@ const elements = {
   confirmConnectorButton: document.querySelector("#confirmConnectorButton"),
   settingsShell: document.querySelector(".settings-shell"),
   mcpToolsView: document.querySelector("#mcpToolsView"),
+  mcpToolsViewEyebrow: document.querySelector("#mcpToolsViewEyebrow"),
   backToMcpServersButton: document.querySelector("#backToMcpServersButton"),
   mcpToolsViewTitle: document.querySelector("#mcpToolsViewTitle"),
   mcpToolsViewSubtitle: document.querySelector("#mcpToolsViewSubtitle"),
   mcpBulkPermissionOptions: document.querySelector("#mcpBulkPermissionOptions"),
+  mcpBulkPermissionSection: document.querySelector("#mcpBulkPermissionSection"),
   mcpToolPermissionList: document.querySelector("#mcpToolPermissionList"),
   mcpServerCount: document.querySelector("#mcpServerCount"),
   mcpEmptyState: document.querySelector("#mcpEmptyState"),
@@ -82,8 +87,14 @@ function sendRuntime(command, payload = {}) {
 const mcpSettings = createMcpSettingsController({
   elements,
   sendRuntime,
+  builtInTools: createBuiltInToolInventory(),
   MCP_DISABLED_TOOLS_STORAGE_KEY,
   MCP_TOOL_POLICIES_STORAGE_KEY,
+});
+const adminToolsGesture = createAdminToolsGesture({
+  requiredClicks: 5,
+  windowMs: 1_000,
+  onUnlock: () => mcpSettings.openBuiltInToolsView(),
 });
 
 async function queryMicrophonePermission() {
@@ -173,6 +184,9 @@ elements.toggleKeyButton.addEventListener("click", () => {
   const shouldShow = elements.apiKeyInput.type === "password";
   elements.apiKeyInput.type = shouldShow ? "text" : "password";
   elements.toggleKeyButton.textContent = shouldShow ? "Hide" : "Show";
+});
+elements.lumiSettingsIcon.addEventListener("click", () => {
+  adminToolsGesture.registerClick();
 });
 elements.toggleGroqKeyButton.addEventListener("click", () => {
   const shouldShow = elements.groqApiKeyInput.type === "password";

@@ -73,11 +73,17 @@ import {
   settlePendingFunctionCalls,
 } from "../live/tool-call-ledger.js";
 import {
-  imageFilesFromClipboard,
-  imageFilesFromDrop,
-  prepareImageAttachment,
-  queuedImageMessagePreview,
-} from "./image-attachments.js";
+  attachmentFilesFromClipboard,
+  createDocumentParserClient,
+  prepareAttachment,
+  queuedAttachmentMessagePreview,
+  validateAttachmentSelection,
+} from "./attachments.js";
+import {
+  createExcelRegistry,
+  EXCEL_ANALYSIS_GUIDANCE,
+  LOCAL_EXCEL_PROVIDER,
+} from "../documents/excel-registry.js";
 import { buildBrowserToolFailureResponse } from "./browser-tool-recovery.js";
 import { addBrowserWorkflowContext } from "./browser-workflow-context.js";
 import {
@@ -168,6 +174,7 @@ const elements = {
   taskFailureNoticeTitle: document.querySelector("#taskFailureNoticeTitle"),
   taskFailureNoticeMessage: document.querySelector("#taskFailureNoticeMessage"),
   dismissTaskFailureNoticeButton: document.querySelector("#dismissTaskFailureNoticeButton"),
+  mcpPermissionBackdrop: document.querySelector("#mcpPermissionBackdrop"),
   mcpToolNotice: document.querySelector("#mcpToolNotice"),
   mcpToolNoticeTitle: document.querySelector("#mcpToolNoticeTitle"),
   mcpToolNoticeMessage: document.querySelector("#mcpToolNoticeMessage"),
@@ -253,9 +260,10 @@ let cancelPendingSharedTabAudioPrompt = null;
 let thinkingLevel = DEFAULT_THINKING_LEVEL;
 let activeTabFrameCapture = null;
 let textSendPending = false;
-let imageAttachmentPending = false;
-let pendingImageAttachment = null;
-let imageDragDepth = 0;
+let attachmentParseCount = 0;
+const pendingAttachments = [];
+let attachmentDragDepth = 0;
+let attachmentGeneration = 0;
 let shouldMaintainGeminiSession = false;
 let sessionConnectionOptions = null;
 let sessionResumptionHandle = "";
@@ -277,6 +285,19 @@ let pendingChatConfirmationResolve = null;
 let chatSnapshotPersistTimerId = null;
 let chatSnapshotPersistenceSuspended = false;
 const queuedUserMessages = [];
+const documentParser = createDocumentParserClient();
+const excelRegistry = createExcelRegistry({
+  editWorkbook: (workbook, operations) => documentParser.edit(
+    workbook.sourceBytes,
+    {
+      name: workbook.name,
+      mimeType: workbook.mimeType,
+      kind: workbook.kind,
+    },
+    operations,
+  ),
+});
+const activeExcelDownloadUrls = new Set();
 const initialTranscriptMarkup = elements.transcript.innerHTML;
 const activeTranscriptReveals = new Set();
 const completedThinkingMessagesAwaitingContent = new Set();
@@ -408,22 +429,9 @@ function syncTaskFailureNotice(event, change) {
     );
     return;
   }
-  if (
-    change !== "replace"
-    || event?.type !== "step"
-    || event.action?.status !== "failed"
-    || event.action?.name === AGENT_DONE_ACTION_NAME
-  ) return;
-  const detail = String(event.action.error || "The action failed unexpectedly.");
-  if (/cancelled|interrupted|session ended/i.test(detail)) return;
-  const actionLabel = String(event.action.name || "action")
-    .replace(/[_-]+/g, " ")
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2");
-  showTaskFailureNotice(
-    `Action failed at step ${event.stepNumber || "?"}`,
-    `${actionLabel}: ${detail}`,
-    `${event.taskId}:${event.id}:${detail}`,
-  );
+  // Individual tool attempts are recoverable while the task remains active.
+  // The task timeline keeps their diagnostic details; the assertive red alert
+  // is reserved for a terminal task_done failure above.
 }
 
 const taskOrchestrator = createTaskOrchestrator({
@@ -591,89 +599,150 @@ function requestSharedTabAudio(targetLanguageCode, failureReason = "") {
   });
 }
 
-function formatImageAttachmentSize(byteSize) {
+function formatAttachmentSize(byteSize) {
   const size = Math.max(0, Number(byteSize) || 0);
   return size >= 1024 * 1024
     ? `${(size / (1024 * 1024)).toFixed(1)} MB`
     : `${Math.max(1, Math.round(size / 1024))} KB`;
 }
 
-function renderPendingImageAttachment() {
+function attachmentStructureSummary(attachment) {
+  if (attachment.category === "image") return `${attachment.width} × ${attachment.height}`;
+  if (attachment.parseStatus === "parsing") return "Reading locally…";
+  const sheetCount = attachment.structure?.sheetCount || 0;
+  const cellCount = attachment.structure?.populatedCellCount || 0;
+  return `${sheetCount} sheet${sheetCount === 1 ? "" : "s"} · ${cellCount.toLocaleString()} cells`;
+}
+
+function releaseWorkbookAttachments(attachments) {
+  for (const attachment of attachments || []) {
+    if (attachment?.workbookId) excelRegistry.remove(attachment.workbookId);
+  }
+}
+
+function renderPendingAttachments() {
   elements.imageAttachmentTray.replaceChildren();
-  elements.imageAttachmentTray.hidden = !pendingImageAttachment;
-  if (!pendingImageAttachment) return;
-
-  const card = document.createElement("div");
-  card.className = "image-attachment-card";
-  const preview = document.createElement("img");
-  preview.src = pendingImageAttachment.previewDataUrl;
-  preview.alt = `Attached image ${pendingImageAttachment.name}`;
-  const copy = document.createElement("div");
-  copy.className = "image-attachment-copy";
-  const name = document.createElement("strong");
-  name.textContent = pendingImageAttachment.name;
-  const details = document.createElement("span");
-  details.textContent = `${pendingImageAttachment.width} × ${pendingImageAttachment.height} · ${formatImageAttachmentSize(pendingImageAttachment.byteSize)}`;
-  copy.append(name, details);
-  const remove = document.createElement("button");
-  remove.className = "image-attachment-remove";
-  remove.type = "button";
-  remove.setAttribute("aria-label", "Remove attached image");
-  remove.title = "Remove attached image";
-  remove.innerHTML = `
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M6 6l12 12M18 6L6 18"></path>
-    </svg>
-  `;
-  remove.addEventListener("click", () => {
-    pendingImageAttachment = null;
-    renderPendingImageAttachment();
-    syncMessageComposer();
-    elements.messageInput.focus();
-  });
-  card.append(preview, copy, remove);
-  elements.imageAttachmentTray.append(card);
+  elements.imageAttachmentTray.hidden = pendingAttachments.length === 0;
+  for (const attachment of pendingAttachments) {
+    const card = document.createElement("div");
+    card.className = "attachment-card";
+    card.dataset.status = attachment.parseStatus || "ready";
+    let visual;
+    if (attachment.category === "image" && attachment.previewDataUrl) {
+      visual = document.createElement("img");
+      visual.src = attachment.previewDataUrl;
+      visual.alt = `Attached image ${attachment.name}`;
+    } else {
+      visual = document.createElement("span");
+      visual.className = "attachment-file-mark";
+      visual.textContent = String(attachment.kind || "file").toUpperCase();
+      visual.setAttribute("aria-hidden", "true");
+    }
+    const copy = document.createElement("div");
+    copy.className = "attachment-copy";
+    const name = document.createElement("strong");
+    name.textContent = attachment.name;
+    const details = document.createElement("span");
+    details.textContent = `${attachmentStructureSummary(attachment)} · ${formatAttachmentSize(attachment.byteSize)}`;
+    copy.append(name, details);
+    const remove = document.createElement("button");
+    remove.className = "attachment-remove";
+    remove.type = "button";
+    remove.disabled = attachment.parseStatus === "parsing";
+    remove.setAttribute("aria-label", `Remove ${attachment.name}`);
+    remove.title = attachment.parseStatus === "parsing" ? "Wait for parsing to finish" : "Remove attachment";
+    remove.innerHTML = `
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6 6l12 12M18 6L6 18"></path>
+      </svg>
+    `;
+    remove.addEventListener("click", () => {
+      const index = pendingAttachments.findIndex((item) => item.id === attachment.id);
+      if (index < 0) return;
+      const [removed] = pendingAttachments.splice(index, 1);
+      releaseWorkbookAttachments([removed]);
+      renderPendingAttachments();
+      syncMessageComposer();
+      elements.messageInput.focus();
+    });
+    card.append(visual, copy, remove);
+    elements.imageAttachmentTray.append(card);
+  }
 }
 
-function clearPendingImageAttachment() {
-  pendingImageAttachment = null;
+function clearPendingAttachments({ removeDocuments = false } = {}) {
+  if (removeDocuments) releaseWorkbookAttachments(pendingAttachments);
+  pendingAttachments.length = 0;
   elements.imageAttachmentInput.value = "";
-  renderPendingImageAttachment();
+  renderPendingAttachments();
 }
 
-async function attachImageFiles(files) {
-  const selectedFiles = Array.from(files || []);
-  const file = selectedFiles[0];
+async function attachFiles(files) {
+  const generation = attachmentGeneration;
+  const selection = validateAttachmentSelection(pendingAttachments, files);
   if (isLiveTranslationChatLocked()) {
     elements.statusLine.textContent = "Stop Live Translate before attaching or sending a message.";
     return false;
   }
-  if (!file || imageAttachmentPending) {
-    if (!file) elements.statusLine.textContent = "Drop or paste a JPEG, PNG, WebP, or GIF image.";
+  if (!selection.accepted.length) {
+    elements.statusLine.textContent = selection.errors[0]
+      || "Drop or paste an XLSX, CSV, JPEG, PNG, WebP, or GIF file.";
     return false;
   }
 
-  imageAttachmentPending = true;
+  const placeholders = selection.accepted.map(({ file, category, kind }) => ({
+    id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+    category,
+    kind,
+    name: file.name || (category === "image" ? "clipboard-image" : `spreadsheet.${kind}`),
+    byteSize: file.size,
+    parseStatus: "parsing",
+  }));
+  pendingAttachments.push(...placeholders);
+  attachmentParseCount += placeholders.length;
+  renderPendingAttachments();
   syncMessageComposer();
-  elements.statusLine.textContent = "Preparing image attachment…";
-  try {
-    const attachment = await prepareImageAttachment(file);
-    pendingImageAttachment = attachment;
-    renderPendingImageAttachment();
-    elements.statusLine.textContent = selectedFiles.length > 1
-      ? `Attached ${attachment.name}. Lumi sends one image per message, so the remaining images were skipped.`
-      : `Attached ${attachment.name}. Add a message or send the image now.`;
-    return true;
-  } catch (error) {
-    elements.statusLine.textContent = error instanceof Error
-      ? `Could not attach image: ${error.message}`
-      : "Could not attach this image.";
-    return false;
-  } finally {
-    imageAttachmentPending = false;
-    elements.imageAttachmentInput.value = "";
-    syncMessageComposer();
+  elements.statusLine.textContent = `Reading ${placeholders.length} attachment${placeholders.length === 1 ? "" : "s"} locally…`;
+  const failures = [];
+  await Promise.all(selection.accepted.map(async (selected, index) => {
+    const placeholder = placeholders[index];
+    try {
+      const prepared = await prepareAttachment(selected.file, selected, documentParser);
+      const pendingIndex = pendingAttachments.findIndex((item) => item.id === placeholder.id);
+      if (pendingIndex < 0 || generation !== attachmentGeneration) return;
+      if (prepared.category === "document") {
+        const registered = excelRegistry.add(prepared.parsed);
+        pendingAttachments[pendingIndex] = {
+          ...prepared,
+          parsed: undefined,
+          workbookId: registered.workbookId,
+          structure: registered.structure,
+          characterCount: registered.characterCount,
+          deliveryMode: registered.deliveryMode,
+        };
+      } else {
+        pendingAttachments[pendingIndex] = prepared;
+      }
+    } catch (error) {
+      failures.push(`${placeholder.name}: ${error instanceof Error ? error.message : "could not be parsed"}`);
+      const pendingIndex = pendingAttachments.findIndex((item) => item.id === placeholder.id);
+      if (pendingIndex >= 0) pendingAttachments.splice(pendingIndex, 1);
+    } finally {
+      attachmentParseCount = Math.max(0, attachmentParseCount - 1);
+      renderPendingAttachments();
+      syncMessageComposer();
+    }
+  }));
+  if (generation !== attachmentGeneration) return false;
+  elements.imageAttachmentInput.value = "";
+  const attachedCount = placeholders.length - failures.length;
+  elements.statusLine.textContent = failures.length
+    ? `Rejected: ${failures.join(" ")}`
+    : `Attached ${attachedCount} file${attachedCount === 1 ? "" : "s"}. Spreadsheet content stays local to this panel session and is sent to Gemini only when needed.`;
+  if (selection.errors.length && !failures.length) {
+    elements.statusLine.textContent = selection.errors.join(" ");
   }
+  return attachedCount > 0;
 }
 
 function syncMessageComposer() {
@@ -681,7 +750,8 @@ function syncMessageComposer() {
   const transportReady = isGeminiTransportReady();
   const translationLocked = isLiveTranslationChatLocked();
   const hasText = Boolean(elements.messageInput.value.trim());
-  const hasContent = hasText || Boolean(pendingImageAttachment);
+  const hasContent = hasText
+    || pendingAttachments.some((attachment) => attachment.parseStatus === "ready");
   const cancelMode = !translationLocked
     && ready
     && agentTurnActive
@@ -714,11 +784,12 @@ function syncMessageComposer() {
   elements.imageAttachmentButton.disabled =
     translationLocked
     || textSendPending
-    || imageAttachmentPending;
+    || attachmentParseCount > 0
+    || pendingAttachments.length >= 5;
   elements.messageSubmit.disabled =
     translationLocked
     || textSendPending
-    || imageAttachmentPending
+    || attachmentParseCount > 0
     || (!hasContent && !cancelMode);
   elements.muteButton.disabled = !canUseMicrophoneControl();
 }
@@ -727,7 +798,7 @@ function syncQueuedMessagePanel() {
   const count = queuedUserMessages.length;
   elements.messageQueue.hidden = count === 0;
   if (!count) return;
-  const preview = queuedImageMessagePreview(queuedUserMessages[0]);
+  const preview = queuedAttachmentMessagePreview(queuedUserMessages[0]);
   elements.messageQueuePreview.textContent = preview;
   elements.messageQueuePreview.title = preview;
   elements.messageQueueCount.textContent = count > 1 ? `+${count - 1}` : "";
@@ -984,7 +1055,7 @@ function disposeRestoredTranscriptDisclosures() {
 function createTranscriptSnapshotHtml() {
   const clone = elements.transcript.cloneNode(true);
   for (const transientTranscript of clone.querySelectorAll(
-    '[data-transient-video-transcript="true"]',
+    '[data-transient-video-transcript="true"], [data-transient-excel-export="true"]',
   )) {
     transientTranscript.remove();
   }
@@ -997,6 +1068,12 @@ function createTranscriptSnapshotHtml() {
     disclosure.dataset.expanded = String(disclosure.open === true);
     const summary = disclosure.querySelector(":scope > summary");
     summary?.setAttribute("aria-expanded", String(disclosure.open === true));
+  }
+  for (const activity of clone.querySelectorAll(
+    '.mcp-activity[data-local-excel-activity="true"]',
+  )) {
+    const result = activity.querySelector(".mcp-activity-body section:last-child pre");
+    if (result) result.textContent = "Spreadsheet content is not stored. Attach the file again after reload.";
   }
   return clone.innerHTML;
 }
@@ -1028,6 +1105,15 @@ function sanitizeStoredTranscriptHtml(value) {
     }
   }
   return template.innerHTML;
+}
+
+function markRestoredWorkbookAttachmentsExpired() {
+  for (const card of elements.transcript.querySelectorAll("[data-workbook-attachment]")) {
+    card.classList.add("is-expired");
+    card.dataset.expired = "true";
+    const status = card.querySelector(".message-document-status");
+    if (status) status.textContent = "Expired — attach again";
+  }
 }
 
 function attachRestoredTranscriptDisclosures({ includeTaskSteps = false } = {}) {
@@ -1084,6 +1170,7 @@ async function restoreActiveChatSessionSnapshot(session) {
   elements.transcript.innerHTML = sanitizeStoredTranscriptHtml(
     snapshot.transcriptHtml,
   );
+  markRestoredWorkbookAttachmentsExpired();
   for (const row of elements.transcript.querySelectorAll('.turn-work-status[data-state="working"]')) {
     row.dataset.state = "cancelled";
     const label = row.querySelector(".turn-work-label");
@@ -1378,7 +1465,9 @@ async function startNewChatSession() {
       && !partialMessages.user
       && !partialMessages.lumi
       && !partialMessages.thinking
-      && queuedUserMessages.length === 0;
+      && queuedUserMessages.length === 0
+      && pendingAttachments.length === 0
+      && excelRegistry.list().length === 0;
     if (currentSessionIsReusable) {
       cancelConversationWorkForChatChange();
       await chatChangeCancellationPromise;
@@ -1645,10 +1734,13 @@ function clearConversationContext() {
     elements.transcript.innerHTML = initialTranscriptMarkup;
     elements.messageInput.value = "";
     textSendPending = false;
-    imageAttachmentPending = false;
-    imageDragDepth = 0;
-    elements.messageForm.classList.remove("is-image-dragging");
-    clearPendingImageAttachment();
+    attachmentGeneration += 1;
+    attachmentParseCount = 0;
+    attachmentDragDepth = 0;
+    document.documentElement.classList.remove("is-attachment-dragging");
+    clearPendingAttachments();
+    releaseExcelDownloadUrls();
+    excelRegistry.clear();
     resizeMessageInput();
     syncMessageComposer();
     syncQueuedMessagePanel();
@@ -1937,7 +2029,11 @@ function showVideoAnalysisProgress(message) {
   scrollTranscriptToLatest({ smooth: true });
 }
 
-function createMessage(role, text, { attachment = null, createdAt = Date.now() } = {}) {
+function createMessage(role, text, {
+  attachment = null,
+  attachments = null,
+  createdAt = Date.now(),
+} = {}) {
   if (role === "thinking") {
     const details = document.createElement("details");
     details.className = "message-thinking";
@@ -1985,22 +2081,50 @@ function createMessage(role, text, { attachment = null, createdAt = Date.now() }
     scrollTranscriptToLatest({ smooth: true });
     return message;
   }
+  const messageAttachments = Array.isArray(attachments)
+    ? attachments
+    : attachment ? [attachment] : [];
   const article = document.createElement("article");
   article.className = `message message-${role}`;
   article.dataset.turnSequence = String(turnExecutionSequence);
-  if (role === "user" && attachment) article.classList.add("message-attachment");
+  if (role === "user" && messageAttachments.length) article.classList.add("message-attachment");
   const author = document.createElement("span");
   author.textContent = role === "lumi" ? "Lumi" : "You";
   const content = document.createElement(role === "lumi" ? "div" : "p");
   if (role === "lumi") content.className = "message-content";
   content.textContent = text;
   article.append(author);
-  if (role === "user" && attachment) {
-    const image = document.createElement("img");
-    image.className = "message-attachment-preview";
-    image.src = attachment.previewDataUrl;
-    image.alt = attachment.name || "Attached image";
-    article.append(image);
+  if (role === "user" && messageAttachments.length) {
+    const attachmentList = document.createElement("div");
+    attachmentList.className = "message-attachment-list";
+    for (const item of messageAttachments) {
+      if (item.category === "image" && item.previewDataUrl) {
+        const image = document.createElement("img");
+        image.className = "message-attachment-preview";
+        image.src = item.previewDataUrl;
+        image.alt = item.name || "Attached image";
+        attachmentList.append(image);
+        continue;
+      }
+      const card = document.createElement("div");
+      card.className = "message-document-card";
+      card.dataset.workbookAttachment = "true";
+      card.dataset.workbookId = item.workbookId || "";
+      const mark = document.createElement("span");
+      mark.className = "message-document-mark";
+      mark.textContent = String(item.kind || "XLSX").toUpperCase();
+      const copy = document.createElement("span");
+      copy.className = "message-document-copy";
+      const name = document.createElement("strong");
+      name.textContent = item.name || "Attached spreadsheet";
+      const status = document.createElement("small");
+      status.className = "message-document-status";
+      status.textContent = `${attachmentStructureSummary(item)} · available this session`;
+      copy.append(name, status);
+      card.append(mark, copy);
+      attachmentList.append(card);
+    }
+    article.append(attachmentList);
   }
   article.append(content);
   appendMessageTimestamp(article, createdAt);
@@ -2059,6 +2183,47 @@ function createTranscriptDownloadMessage(downloadInfo, analysis) {
   download.href = `data:${downloadInfo.mimeType || "text/plain;charset=utf-8"},${encodeURIComponent(text)}`;
   download.download = downloadInfo.filename || "video-transcript.txt";
   download.textContent = "Download transcript";
+  body.append(mark, copy, download);
+  article.append(author, body);
+  elements.transcript.append(article);
+  scrollTranscriptToLatest({ smooth: true });
+  scheduleActiveChatSnapshotPersist();
+}
+
+function releaseExcelDownloadUrls() {
+  for (const url of activeExcelDownloadUrls) URL.revokeObjectURL(url);
+  activeExcelDownloadUrls.clear();
+}
+
+function createExcelDownloadMessage(downloadInfo) {
+  const bytes = downloadInfo?.bytes;
+  if (!(bytes instanceof ArrayBuffer) || !bytes.byteLength) return;
+  const filename = String(downloadInfo.filename || "lumi-edited.xlsx");
+  const mimeType = String(downloadInfo.mimeType
+    || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  const url = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+  activeExcelDownloadUrls.add(url);
+
+  const article = document.createElement("article");
+  article.className = "message message-lumi message-transcript-download";
+  article.dataset.transientExcelExport = "true";
+  const author = document.createElement("span");
+  author.textContent = "Excel export";
+  const body = document.createElement("div");
+  body.className = "transcript-download-body";
+  const mark = document.createElement("span");
+  mark.className = "transcript-download-mark";
+  mark.textContent = "XLSX";
+  const copy = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = filename;
+  const meta = document.createElement("small");
+  meta.textContent = `${formatAttachmentSize(bytes.byteLength)} · edited workbook copy`;
+  copy.append(title, meta);
+  const download = document.createElement("a");
+  download.href = url;
+  download.download = filename;
+  download.textContent = "Download Excel";
   body.append(mark, copy, download);
   article.append(author, body);
   elements.transcript.append(article);
@@ -2654,12 +2819,17 @@ async function runMcpTool(tool, args, callId) {
         throw error;
       }
     }
-    const result = await sendRuntime("mcp_call_tool", {
-      serverId: tool.serverId,
-      tool: tool.toolName,
-      args,
-      permissionGranted,
-    });
+    const result = tool.localProvider === "excel"
+      ? await excelRegistry.callTool(tool.toolName, args)
+      : await sendRuntime("mcp_call_tool", {
+          serverId: tool.serverId,
+          tool: tool.toolName,
+          args,
+          permissionGranted,
+        });
+    if (tool.localProvider === "excel" && result?.download) {
+      createExcelDownloadMessage(result.download);
+    }
     avatarController.transitionState("success", {
       forMs: AVATAR_SUCCESS_STATE_DURATION_MS,
       resumeState: "thinking",
@@ -2669,6 +2839,20 @@ async function runMcpTool(tool, args, callId) {
     avatarController.transitionState("error", { forMs: AVATAR_ERROR_STATE_DURATION_MS });
     throw error;
   }
+}
+
+function localExcelHistoryResult(result, tool) {
+  if (tool?.localProvider !== "excel") return result;
+  const data = result?.data || result?.structuredContent || result?.content || {};
+  return {
+    success: result?.isError !== true,
+    provider: "Lumi Excel",
+    toolName: tool.toolName,
+    locator: data?.locator || "",
+    continuation: data?.continuation || null,
+    result: "Spreadsheet content was available to Gemini for this step but is not stored in chat history.",
+    contentExpired: true,
+  };
 }
 
 function availableAgentActions(sourceSocket = websocket) {
@@ -3077,7 +3261,10 @@ async function handleServerMessage(event, sourceSocket) {
         renderStandaloneActivity = Boolean(activityTool)
           && shouldRenderStandaloneToolActivity(orchestration);
         if (renderStandaloneActivity) {
-          createMcpActivityCard(callId, activityTool, actionArgs);
+          const activity = createMcpActivityCard(callId, activityTool, actionArgs);
+          if (mcpTool?.localProvider === "excel") {
+            activity.root.dataset.localExcelActivity = "true";
+          }
         }
         let result = isLiveTranslationTool
           ? await runLiveTranslationTool(actionArgs)
@@ -3115,8 +3302,9 @@ async function handleServerMessage(event, sourceSocket) {
           continue;
         }
         if (renderStandaloneActivity) finishMcpActivity(callId, "completed", result);
+        const historyResult = localExcelHistoryResult(result, mcpTool);
         const finished = taskOrchestrator.finishStep(orchestration.stepId, {
-          result,
+          result: historyResult,
           durationMs: performance.now() - stepStartedAt,
         });
         functionResponses.push({
@@ -3148,7 +3336,7 @@ async function handleServerMessage(event, sourceSocket) {
         if (renderStandaloneActivity) {
           finishMcpActivity(callId, "failed", error instanceof Error ? error.message : "Tool call failed.");
         }
-        if (mcpTool) promptToDisableFailedMcpTool(mcpTool, error);
+        if (mcpTool && !mcpTool.localProvider) promptToDisableFailedMcpTool(mcpTool, error);
         const detail = (error instanceof Error ? error.message : "Tool call failed.").slice(0, 1200);
         const actionName = protocolStep?.action?.name || AGENT_STEP_TOOL_NAME;
         const failure = isBrowserTool
@@ -3302,7 +3490,10 @@ function openGeminiSocket(
               mcpInfo,
               activeTabContext,
               actionDeclarations,
-              { fastMode: sessionFastMode },
+              {
+                fastMode: sessionFastMode,
+                excelGuidance: EXCEL_ANALYSIS_GUIDANCE,
+              },
             ),
           }],
         },
@@ -3347,16 +3538,18 @@ function openGeminiSocket(
         (declaration) => declaration.name === rejected.declaration.name,
       );
       if (declarationIndex >= 0) mcpFunctionDeclarations.splice(declarationIndex, 1);
-      void sendRuntime("mcp_disable_tool", {
-        serverId: rejected.tool.serverId,
-        tool: rejected.tool.toolName,
-        source: "gemini_setup",
-        reason: reason || "Gemini Live rejected this tool declaration.",
-      }).catch(() => {});
+      if (!rejected.tool.localProvider) {
+        void sendRuntime("mcp_disable_tool", {
+          serverId: rejected.tool.serverId,
+          tool: rejected.tool.toolName,
+          source: "gemini_setup",
+          reason: reason || "Gemini Live rejected this tool declaration.",
+        }).catch(() => {});
+      }
       queueMcpToolNotice({
         key: `gemini-setup:${rejected.tool.serverId}:${rejected.tool.toolName}`,
-        title: `MCP tool auto-disabled: ${rejected.tool.toolName}`,
-        message: `${rejected.tool.serverName} exposed a declaration Gemini rejected. Lumi disabled only this tool and is reconnecting now; voice, chat, and other tools remain available.`,
+        title: `${rejected.tool.localProvider ? "Local" : "MCP"} tool disabled: ${rejected.tool.toolName}`,
+        message: `${rejected.tool.serverName} exposed a declaration Gemini rejected. Lumi disabled only this tool for the current session and is reconnecting now; voice, chat, and other tools remain available.`,
         primaryLabel: "OK",
       });
       if (!sessionSocket.lumiBackgroundReconnect) {
@@ -3493,7 +3686,11 @@ async function startSession() {
     try {
       const mcpInfo = await sendRuntime("mcp_get_tools");
       notifyInvalidMcpSchemas(mcpInfo);
-      const mcpFunctionDeclarations = configureMcpTools(mcpInfo, activeMcpTools);
+      const mcpFunctionDeclarations = configureMcpTools(
+        mcpInfo,
+        activeMcpTools,
+        [LOCAL_EXCEL_PROVIDER],
+      );
       await panelAudio.prepareOutput();
       if (microphoneEnabled) {
         try {
@@ -3733,6 +3930,7 @@ async function sendText(
   text,
   {
     attachment = null,
+    attachments = null,
     clearComposer = true,
     displayTextOverride = "",
     render = true,
@@ -3740,10 +3938,19 @@ async function sendText(
   } = {},
 ) {
   const clean = String(text || "").trim();
-  const selectedAttachment = attachment?.frame?.data ? attachment : null;
+  const selectedAttachments = (Array.isArray(attachments)
+    ? attachments
+    : attachment ? [attachment] : [])
+    .filter((item) => item?.parseStatus === "ready" || item?.frame?.data);
+  const selectedAttachment = selectedAttachments.find(
+    (item) => item.category === "image" && item.frame?.data,
+  ) || null;
+  const selectedWorkbooks = selectedAttachments.filter(
+    (item) => item.category === "document" && item.workbookId,
+  );
   const contextEpoch = conversationContextEpoch;
   if (
-    (!clean && !selectedAttachment)
+    (!clean && !selectedAttachments.length)
     || textSendPending
     || !isGeminiTransportReady()
     || agentTurnActive
@@ -3777,12 +3984,23 @@ async function sendText(
   }
   const displayText = String(displayTextOverride || "").trim()
     || clean
-    || `Image · ${selectedAttachment.name}`;
-  const userRequestText = clean || "Please inspect the attached image and respond with the most helpful relevant analysis.";
+    || `Attachments · ${selectedAttachments.map((item) => item.name).join(", ")}`;
+  const userRequestText = clean || (
+    selectedWorkbooks.length
+      ? "Please analyze the attached spreadsheet and provide the most helpful relevant findings with exact source locators."
+      : "Please inspect the attached image and respond with the most helpful relevant analysis."
+  );
   const freshPromptRuntimeContext = buildPromptRuntimeContext(promptContext);
-  const modelText = freshPromptRuntimeContext
-    ? `${freshPromptRuntimeContext}\n\n[User request]\n${userRequestText}`
-    : userRequestText;
+  const spreadsheetManifestContext = selectedWorkbooks.length
+    ? excelRegistry.buildTurnContext(
+        selectedWorkbooks.map((item) => item.workbookId),
+        userRequestText,
+      ).prompt
+    : "";
+  const modelText = [
+    freshPromptRuntimeContext,
+    spreadsheetManifestContext || `[User request]\n${userRequestText}`,
+  ].filter(Boolean).join("\n\n");
   typedTurnInFlight = true;
   typedTurnStartedAt = performance.now();
   typedTurnServerPayloadSeen = false;
@@ -3809,11 +4027,17 @@ async function sendText(
   finalizeTranscript("user");
   finalizeTranscript("lumi");
   finalizeTranscript("thinking");
-  if (render) createMessage("user", displayText, { attachment: selectedAttachment });
+  if (render) createMessage("user", displayText, {
+    attachment: selectedAttachment,
+    attachments: selectedAttachments,
+  });
   if (remember) {
+    const attachmentMetadata = selectedAttachments.length
+      ? ` [Attached files; reattach after panel reload: ${selectedAttachments.map((item) => `${item.name} (${item.kind})`).join(", ")}]`
+      : "";
     rememberConversationTurn(
       "user",
-      selectedAttachment ? `${userRequestText} [Attached image: ${selectedAttachment.name}]` : userRequestText,
+      `${userRequestText}${attachmentMetadata}`,
     );
   }
   avatarController.transitionState("thinking");
@@ -3821,7 +4045,7 @@ async function sendText(
   setAgentTurnActive(true);
   if (clearComposer) {
     elements.messageInput.value = "";
-    clearPendingImageAttachment();
+    clearPendingAttachments();
     resizeMessageInput();
   }
   syncMessageComposer();
@@ -3842,7 +4066,7 @@ async function flushQueuedUserMessage() {
   const nextMessage = queuedUserMessages.shift();
   syncQueuedMessagePanel();
   if (!await sendText(nextMessage.text, {
-    attachment: nextMessage.attachment,
+    attachments: nextMessage.attachments,
     clearComposer: false,
   })) {
     queuedUserMessages.unshift(nextMessage);
@@ -3855,18 +4079,19 @@ async function flushQueuedUserMessage() {
   return true;
 }
 
-function queueUserMessage(text, attachment = null) {
+function queueUserMessage(text, attachments = []) {
   const clean = String(text || "").trim();
-  const selectedAttachment = attachment?.frame?.data ? attachment : null;
+  const selectedAttachments = Array.from(attachments || [])
+    .filter((item) => item?.parseStatus === "ready" || item?.frame?.data);
   if (isLiveTranslationChatLocked()) {
     elements.statusLine.textContent = "Stop Live Translate before sending another message.";
     return;
   }
-  if (!clean && !selectedAttachment) return;
-  queuedUserMessages.push({ text: clean, attachment: selectedAttachment });
+  if (!clean && !selectedAttachments.length) return;
+  queuedUserMessages.push({ text: clean, attachments: selectedAttachments });
   syncQueuedMessagePanel();
   elements.messageInput.value = "";
-  clearPendingImageAttachment();
+  clearPendingAttachments();
   resizeMessageInput();
   syncMessageComposer();
 
@@ -3905,7 +4130,8 @@ function steerQueuedUserMessage() {
 
 function removeQueuedUserMessage() {
   if (!queuedUserMessages.length) return;
-  queuedUserMessages.shift();
+  const removed = queuedUserMessages.shift();
+  releaseWorkbookAttachments(removed?.attachments);
   syncQueuedMessagePanel();
   elements.statusLine.textContent = queuedUserMessages.length
     ? `${queuedUserMessages.length} queued message${queuedUserMessages.length === 1 ? "" : "s"} remaining.`
@@ -4140,46 +4366,45 @@ elements.transcript.addEventListener("click", (event) => {
   });
 });
 elements.imageAttachmentButton.addEventListener("click", () => {
-  if (!imageAttachmentPending && !textSendPending) elements.imageAttachmentInput.click();
+  if (!attachmentParseCount && !textSendPending) elements.imageAttachmentInput.click();
 });
 elements.imageAttachmentInput.addEventListener("change", () => {
-  void attachImageFiles(elements.imageAttachmentInput.files);
+  void attachFiles(elements.imageAttachmentInput.files);
 });
 elements.messageInput.addEventListener("paste", (event) => {
-  const files = imageFilesFromClipboard(event.clipboardData);
+  const files = attachmentFilesFromClipboard(event.clipboardData);
   if (!files.length) return;
   event.preventDefault();
-  void attachImageFiles(files);
+  void attachFiles(files);
 });
-elements.messageForm.addEventListener("dragenter", (event) => {
-  if (isLiveTranslationChatLocked()) return;
+window.addEventListener("dragenter", (event) => {
   if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
   event.preventDefault();
-  imageDragDepth += 1;
-  elements.messageForm.classList.add("is-image-dragging");
+  attachmentDragDepth += 1;
+  document.documentElement.classList.add("is-attachment-dragging");
 });
-elements.messageForm.addEventListener("dragover", (event) => {
-  if (isLiveTranslationChatLocked()) return;
+window.addEventListener("dragover", (event) => {
   if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
   event.preventDefault();
   event.dataTransfer.dropEffect = "copy";
-  elements.messageForm.classList.add("is-image-dragging");
+  document.documentElement.classList.add("is-attachment-dragging");
 });
-elements.messageForm.addEventListener("dragleave", (event) => {
+window.addEventListener("dragleave", (event) => {
   if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
-  imageDragDepth = Math.max(0, imageDragDepth - 1);
-  if (!imageDragDepth) elements.messageForm.classList.remove("is-image-dragging");
+  if (event.relatedTarget === null) attachmentDragDepth = 0;
+  else attachmentDragDepth = Math.max(0, attachmentDragDepth - 1);
+  if (!attachmentDragDepth) document.documentElement.classList.remove("is-attachment-dragging");
 });
-elements.messageForm.addEventListener("drop", (event) => {
+window.addEventListener("drop", (event) => {
   if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
   event.preventDefault();
+  attachmentDragDepth = 0;
+  document.documentElement.classList.remove("is-attachment-dragging");
   if (isLiveTranslationChatLocked()) {
-    elements.statusLine.textContent = "Stop Live Translate before attaching an image.";
+    elements.statusLine.textContent = "Stop Live Translate before attaching files.";
     return;
   }
-  imageDragDepth = 0;
-  elements.messageForm.classList.remove("is-image-dragging");
-  void attachImageFiles(imageFilesFromDrop(event.dataTransfer));
+  void attachFiles(Array.from(event.dataTransfer?.files || []));
 });
 elements.messageInput.addEventListener("input", () => {
   resizeMessageInput();
@@ -4197,12 +4422,12 @@ elements.messageForm.addEventListener("submit", (event) => {
     return;
   }
   const message = elements.messageInput.value.trim();
-  const attachment = pendingImageAttachment;
-  const hasContent = Boolean(message || attachment);
+  const attachments = [...pendingAttachments];
+  const hasContent = Boolean(message || attachments.length);
   if (hasContent && (!isGeminiTransportReady() || agentTurnActive || turnCancellationPending)) {
-    queueUserMessage(message, attachment);
+    queueUserMessage(message, attachments);
   } else if (hasContent) {
-    void sendText(message, { attachment });
+    void sendText(message, { attachments });
   } else if (agentTurnActive) {
     cancelCurrentTurn();
   }
@@ -4213,6 +4438,9 @@ window.addEventListener("unload", () => {
   petalEmitter.stop();
   websocket?.close();
   cleanupMedia();
+  releaseExcelDownloadUrls();
+  excelRegistry.clear();
+  documentParser.dispose();
   void flushActiveChatSnapshotPersist();
   fastModeController.dispose();
   recordedFlowPanel.dispose();

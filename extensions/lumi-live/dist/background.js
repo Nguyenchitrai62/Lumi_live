@@ -14290,6 +14290,8 @@ function createVideoAnalysisService({
   maxInlineMediaBytes = MAX_INLINE_MEDIA_BYTES,
   onProgress = () => {
   },
+  prepareTemporaryTab = () => {
+  },
   remuxMp4AudioImpl = remuxMp4AudioToAdts
 } = {}) {
   let activeController = null;
@@ -14352,34 +14354,25 @@ function createVideoAnalysisService({
         return false;
       }
     })();
-    if (currentTab?.id && requestedIdentity && requestedIdentity === currentIdentity) {
+    if (!isFacebookSource && currentTab?.id && requestedIdentity && requestedIdentity === currentIdentity) {
       return { ...currentTab, lumiSourcePageOpened: false };
     }
     if (isFacebookSource) {
-      const currentIsFacebook = (() => {
-        try {
-          const hostname = new URL(currentTab?.url || "").hostname.toLowerCase().replace(/^www\./, "");
-          return hostname === "facebook.com" || hostname.endsWith(".facebook.com") || hostname === "fb.watch" || hostname.endsWith(".fb.watch");
-        } catch {
-          return false;
-        }
-      })();
-      if (currentTab?.id && currentIsFacebook && facebookVideoId) {
-        return {
-          ...currentTab,
-          lumiSourcePageOpened: false,
-          lumiRequestedFacebookVideoId: facebookVideoId || ""
-        };
-      }
       if (typeof chromeApi?.tabs?.create !== "function") {
         throw new Error("Lumi cannot open the supplied Facebook Reel because Chrome tab access is unavailable.");
       }
       const openedFacebookTab = await chromeApi.tabs.create({
         url: normalizedSourceUrl,
-        active: false
+        active: false,
+        ...Number.isInteger(currentTab?.windowId) ? { windowId: currentTab.windowId } : {}
       });
       let readyFacebookTab;
       try {
+        await prepareTemporaryTab(openedFacebookTab, {
+          currentTab,
+          facebookVideoId,
+          sourceUrl: normalizedSourceUrl
+        });
         readyFacebookTab = await waitForTabReady(openedFacebookTab, signal);
       } catch (error) {
         if (Number.isInteger(openedFacebookTab?.id) && typeof chromeApi?.tabs?.remove === "function") {
@@ -15486,6 +15479,10 @@ var videoAnalysis = createVideoAnalysisService({
     const status = await getStatus();
     if (!status.connected || !Number.isInteger(status.tabId)) return null;
     return chrome.tabs.get(status.tabId).catch(() => null);
+  },
+  prepareTemporaryTab: async (tab) => {
+    if (!fastModeEnabled || !Number.isInteger(tab?.id)) return;
+    await fastWorkspace.addTab(tab.id);
   }
 });
 async function loadTarget() {

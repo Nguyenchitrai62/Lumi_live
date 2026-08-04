@@ -97,6 +97,10 @@ const videoAnalysis = createVideoAnalysisService({
     if (!status.connected || !Number.isInteger(status.tabId)) return null;
     return chrome.tabs.get(status.tabId).catch(() => null);
   },
+  prepareTemporaryTab: async (tab) => {
+    if (!fastModeEnabled || !Number.isInteger(tab?.id)) return;
+    await fastWorkspace.addTab(tab.id);
+  },
 });
 
 async function loadTarget() {

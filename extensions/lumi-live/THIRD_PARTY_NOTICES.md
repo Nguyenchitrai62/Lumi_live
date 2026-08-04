@@ -2,6 +2,8 @@
 
 The generated `dist/controller.js` includes `@page-agent/page-controller` 1.12.1.
 
+The generated `dist/document-parser-worker.js` includes `fflate` 0.8.3 and `@xmldom/xmldom` 0.9.10 under their MIT licenses.
+
 MIT License
 
 Copyright (c) 2026 SimonLuvRamen  

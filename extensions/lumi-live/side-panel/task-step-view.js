@@ -9,8 +9,11 @@ const STATUS_LABELS = {
   completed: "Verified",
   failed: "Failed",
   loop_blocked: "Loop blocked",
+  retryable: "Retrying",
+  recovered: "Recovered",
 };
 const AUTO_EXPANDED_STEP_STATES = new Set(["running", "failed", "loop_blocked"]);
+const TASK_NOTICE_TYPES = new Set(["retry", "loop_detected", "error", "completion_required"]);
 const ACTION_LABELS = {
   browser_get_active_context: "Read active page",
   browser_capture_visible_tab: "Capture visible page",
@@ -62,7 +65,9 @@ export function formatStepActionLabel(action = {}) {
 
 export function resolveStepExpandedState(step, userPreference) {
   if (typeof userPreference === "boolean") return userPreference;
-  return AUTO_EXPANDED_STEP_STATES.has(step?.action?.status);
+  return AUTO_EXPANDED_STEP_STATES.has(
+    step?.presentationStatus || step?.action?.status,
+  );
 }
 
 export function shouldFollowTaskUpdates({
@@ -86,26 +91,76 @@ function taskStatus(events) {
   const done = events.findLast?.((event) => event.type === "task_done")
     || [...events].reverse().find((event) => event.type === "task_done");
   if (!done) return "running";
-  return done.success ? "completed" : done.reason === "cancelled" ? "cancelled" : "failed";
+  return done.success
+    ? "completed"
+    : ["cancelled", "superseded"].includes(done.reason) ? "cancelled" : "failed";
+}
+
+function stepPresentationStatus(step, events, status) {
+  if (!["failed", "loop_blocked"].includes(step.action.status)) {
+    return step.action.status;
+  }
+  if (status === "completed") return "recovered";
+  const eventIndex = events.findIndex((event) => event.id === step.id);
+  const laterSameActionSucceeded = events.slice(eventIndex + 1).some(
+    (event) => event.type === "step"
+      && event.action?.name === step.action.name
+      && event.action?.status === "completed",
+  );
+  if (laterSameActionSucceeded) return "recovered";
+  return status === "failed" ? step.action.status : "retryable";
+}
+
+function noticePresentationType(notice, status) {
+  if (
+    status === "completed"
+    && ["error", "loop_detected", "completion_required"].includes(notice.type)
+  ) return "recovered";
+  if (["error", "loop_detected"].includes(notice.type) && status !== "failed") {
+    return "guidance";
+  }
+  return notice.type;
 }
 
 export function buildTaskStepViewModel(history = []) {
   const taskStarts = history.filter((event) => event.type === "task_started");
   return taskStarts.map((started) => {
     const events = history.filter((event) => event.taskId === started.taskId);
-    const steps = events.filter((event) => event.type === "step");
+    const status = taskStatus(events);
+    const steps = events
+      .filter((event) => event.type === "step")
+      .map((step) => ({
+        ...step,
+        presentationStatus: stepPresentationStatus(step, events, status),
+      }));
+    const notices = events
+      .filter((event) => TASK_NOTICE_TYPES.has(event.type))
+      .map((notice) => ({
+        ...notice,
+        presentationType: noticePresentationType(notice, status),
+      }));
+    const stepsById = new Map(steps.map((step) => [step.id, step]));
+    const noticesById = new Map(notices.map((notice) => [notice.id, notice]));
     const done = [...events].reverse().find((event) => event.type === "task_done") || null;
     return {
       taskId: started.taskId,
       request: started.request,
       maxSteps: started.maxSteps,
-      status: taskStatus(events),
+      status,
       usedSteps: steps.filter(
         (step) => step.action.name !== "done" && step.action.status !== "loop_blocked",
       ).length,
       steps,
-      notices: events.filter((event) =>
-        ["retry", "loop_detected", "error", "completion_required"].includes(event.type)),
+      notices,
+      timeline: events.flatMap((event) => {
+        if (event.type === "step") {
+          return [{ kind: "step", item: stepsById.get(event.id) }];
+        }
+        if (TASK_NOTICE_TYPES.has(event.type)) {
+          return [{ kind: "notice", item: noticesById.get(event.id) }];
+        }
+        return [];
+      }),
       done,
     };
   });
@@ -141,8 +196,12 @@ function renderStep(step, disclosures, {
   onExpansionChange,
 } = {}) {
   const details = element("details", "agent-step-card");
-  details.dataset.state = step.action.status;
+  const presentationStatus = step.presentationStatus || step.action.status;
+  details.dataset.state = presentationStatus;
   details.dataset.stepId = step.id;
+  if (typeof expandedPreference === "boolean") {
+    details.dataset.userExpanded = String(expandedPreference);
+  }
   const summary = element("summary", "agent-step-summary");
   const marker = element("span", "agent-step-marker", String(step.stepNumber));
   marker.setAttribute("aria-hidden", "true");
@@ -163,7 +222,7 @@ function renderStep(step, disclosures, {
   const status = element(
     "span",
     "agent-step-status",
-    STATUS_LABELS[step.action.status] || step.action.status,
+    STATUS_LABELS[presentationStatus] || presentationStatus,
   );
   status.setAttribute("role", "status");
   const chevron = element("span", "agent-step-chevron");
@@ -211,7 +270,16 @@ function renderStep(step, disclosures, {
     }
   }
   if (step.action.error) {
-    appendField(body, "Error", step.action.error, "agent-step-error");
+    const recovered = presentationStatus === "recovered";
+    const retryable = presentationStatus === "retryable";
+    appendField(
+      body,
+      recovered ? "Recovered attempt" : retryable ? "Retryable attempt" : "Error",
+      step.action.error,
+      recovered
+        ? "agent-step-recovered-error"
+        : retryable ? "agent-step-retryable-error" : "agent-step-error",
+    );
   } else if (step.action.output !== null && step.action.output !== undefined) {
     appendCodeField(body, "Output", step.action.output);
   }
@@ -226,22 +294,28 @@ function renderStep(step, disclosures, {
     body,
     initiallyExpanded: resolveStepExpandedState(step, expandedPreference),
     durationMs: TASK_STEP_DISCLOSURE_ANIMATION_DURATION_MS,
-    onExpandedChange: onExpansionChange,
+    onExpandedChange: (expanded) => {
+      details.dataset.userExpanded = String(expanded);
+      onExpansionChange(expanded);
+    },
   }));
   return details;
 }
 
 function renderNotice(notice) {
   const row = element("div", "agent-task-notice");
-  row.dataset.type = notice.type;
+  const presentationType = notice.presentationType || notice.type;
+  row.dataset.type = presentationType;
   const labels = {
     retry: "Retry",
     loop_detected: "Loop detected",
     error: "Controller",
     completion_required: "Completion required",
+    guidance: "Controller guidance",
+    recovered: "Recovered",
   };
   row.append(
-    element("strong", "", labels[notice.type] || notice.type),
+    element("strong", "", labels[presentationType] || labels[notice.type] || notice.type),
     element("span", "", notice.message),
   );
   return row;
@@ -270,16 +344,21 @@ function renderTask(model, disclosures, {
   );
   header.append(copy, progress);
   const steps = element("div", "agent-task-steps");
-  for (const step of model.steps) {
+  for (const entry of model.timeline) {
+    if (entry.kind === "notice") {
+      steps.append(renderNotice(entry.item));
+      continue;
+    }
+    const step = entry.item;
     steps.append(renderStep(step, disclosures, {
       expandedPreference: expansionPreferences.get(step.id),
       onExpansionChange: (expanded) => onExpansionChange(step.id, expanded),
     }));
   }
-  for (const notice of model.notices) steps.append(renderNotice(notice));
   if (model.done) {
     const completion = element("div", "agent-task-completion");
     completion.dataset.success = String(model.done.success);
+    completion.dataset.state = model.status;
     completion.append(
       element("strong", "", model.done.success ? "Task completed" : "Task stopped"),
       element("p", "", model.done.result),
@@ -495,10 +574,12 @@ export function createTaskStepView({
       for (const step of root.querySelectorAll(
         ".agent-step-card[data-step-id]",
       )) {
-        expansionPreferences.set(
-          step.dataset.stepId,
-          step.open || step.dataset.expanded === "true",
-        );
+        if (["true", "false"].includes(step.dataset.userExpanded)) {
+          expansionPreferences.set(
+            step.dataset.stepId,
+            step.dataset.userExpanded === "true",
+          );
+        }
       }
     }
     render(history, { force: true });

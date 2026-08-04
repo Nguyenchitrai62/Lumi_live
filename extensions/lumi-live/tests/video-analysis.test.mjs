@@ -2502,11 +2502,12 @@ test("reports an error only after both video models are unavailable", async () =
   assert.deepEqual(requestedModels, VIDEO_ANALYSIS_MODELS);
 });
 
-test("isolates a supplied Facebook URL in a temporary background tab when the active tab is unrelated", async () => {
+test("always isolates a supplied Facebook Reel URL in a grouped temporary background tab", async () => {
   const storage = createMemoryStorage();
   const targetId = "5555555555555555";
   const audioUrl = "https://scontent.fbcdn.net/o1/v/isolated-audio.mp4?token=signed";
   const createdTabs = [];
+  const preparedTabs = [];
   const removedTabs = [];
   const service = createVideoAnalysisService({
     chromeApi: {
@@ -2545,17 +2546,71 @@ test("isolates a supplied Facebook URL in a temporary background tab when the ac
       },
     },
     fetchImpl: async () => { throw new Error("An audio-link request must not download media."); },
-    getTargetTab: async () => ({ id: 10, title: "Unrelated", url: "https://example.com/" }),
+    getTargetTab: async () => ({
+      id: 10,
+      windowId: 7,
+      title: "Same Facebook Reel in a long-lived feed tab",
+      url: `https://www.facebook.com/reel/${targetId}`,
+    }),
+    prepareTemporaryTab: async (tab, context) => {
+      preparedTabs.push({ tabId: tab.id, sourceUrl: context.sourceUrl });
+    },
     storageKey: "analyses",
   });
   const result = await service.analyze({
     args: { action: "audio", url: `https://www.facebook.com/reel/${targetId}` },
   });
-  assert.deepEqual(createdTabs, [{ url: `https://www.facebook.com/reel/${targetId}`, active: false }]);
+  assert.deepEqual(createdTabs, [{
+    url: `https://www.facebook.com/reel/${targetId}`,
+    active: false,
+    windowId: 7,
+  }]);
+  assert.deepEqual(preparedTabs, [{
+    tabId: 91,
+    sourceUrl: `https://www.facebook.com/reel/${targetId}`,
+  }]);
   assert.deepEqual(removedTabs, [91]);
   assert.equal(result.sourcePageOpened, true);
   assert.equal(result.sourcePageClosedAfterAnalysis, true);
   assert.equal(result.audioUrl, audioUrl);
+});
+
+test("closes the temporary Facebook tab when Agent Space preparation fails", async () => {
+  const storage = createMemoryStorage();
+  const targetId = "6666666666666666";
+  const removedTabs = [];
+  const service = createVideoAnalysisService({
+    chromeApi: {
+      scripting: {
+        async executeScript() {
+          throw new Error("Source discovery must not start before Agent Space preparation.");
+        },
+      },
+      storage: { local: storage.area },
+      tabs: {
+        async create(properties) {
+          return { id: 96, status: "complete", url: properties.url };
+        },
+        async remove(tabId) { removedTabs.push(tabId); },
+      },
+    },
+    getTargetTab: async () => ({
+      id: 10,
+      windowId: 7,
+      title: "Facebook Reels feed",
+      url: `https://www.facebook.com/reel/${targetId}`,
+    }),
+    prepareTemporaryTab: async () => {
+      throw new Error("Agent Space grouping failed");
+    },
+    storageKey: "analyses",
+  });
+
+  await assert.rejects(
+    service.analyze({ args: { action: "audio", url: `https://www.facebook.com/reel/${targetId}` } }),
+    /Agent Space grouping failed/,
+  );
+  assert.deepEqual(removedTabs, [96]);
 });
 
 test("retries the active Facebook Reel in place without creating or reloading a tab", async () => {
@@ -2937,7 +2992,8 @@ test("accepts exact Facebook prefetch audio on the first source scan", async () 
   const service = createVideoAnalysisService({
     chromeApi: {
       scripting: {
-        async executeScript() {
+        async executeScript({ target }) {
+          assert.equal(target.tabId, 24);
           sourceAttempts += 1;
           return [{ frameId: 0, result: {
             found: true,
@@ -2960,6 +3016,12 @@ test("accepts exact Facebook prefetch audio on the first source scan", async () 
         },
       },
       storage: { local: storage.area },
+      tabs: {
+        async create(properties) {
+          return { id: 24, status: "complete", title: "Facebook Reel", url: properties.url };
+        },
+        async remove() {},
+      },
     },
     fetchImpl: async () => { throw new Error("An audio-link request must not download the candidate."); },
     getTargetTab: async () => ({

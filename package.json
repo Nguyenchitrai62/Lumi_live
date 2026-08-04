@@ -17,6 +17,8 @@
   },
   "dependencies": {
     "@google/genai": "^2.11.0",
+    "@xmldom/xmldom": "0.9.10",
+    "fflate": "0.8.3",
     "mp4box": "^2.4.1",
     "next": "16.2.6",
     "react": "19.2.6",

@@ -3,6 +3,7 @@ import { MCP_CONNECTORS } from "../core/mcp-connectors.js";
 export function createMcpSettingsController({
   elements,
   sendRuntime,
+  builtInTools = [],
   MCP_DISABLED_TOOLS_STORAGE_KEY,
   MCP_TOOL_POLICIES_STORAGE_KEY,
 }) {
@@ -13,6 +14,14 @@ let dismissedMcpToolAlertSignature = "";
 let mcpAddModalReturnFocus = null;
 let connectorModalReturnFocus = null;
 let activeCredentialConnectorId = "";
+
+const BUILT_IN_TOOLS_VIEW_ID = "__lumi_built_in_tools__";
+const builtInToolCollection = Object.freeze({
+  id: BUILT_IN_TOOLS_VIEW_ID,
+  serverName: "Lumi built-in tools",
+  readOnlyInventory: true,
+  tools: Array.from(builtInTools || []),
+});
 
 const MCP_PERMISSION_OPTIONS = [
   { mode: "allow", label: "Always allow", icon: "\u2713" },
@@ -250,8 +259,13 @@ function createMcpPermissionButton(serverId, toolName, option, selected) {
   return button;
 }
 
+function selectedToolCollection() {
+  if (selectedMcpServerId === BUILT_IN_TOOLS_VIEW_ID) return builtInToolCollection;
+  return mcpServers.find((item) => item.id === selectedMcpServerId) || null;
+}
+
 function renderMcpToolsView() {
-  const server = mcpServers.find((item) => item.id === selectedMcpServerId);
+  const server = selectedToolCollection();
   if (!server) {
     selectedMcpServerId = null;
     document.body.classList.remove("is-mcp-tools-view");
@@ -260,13 +274,29 @@ function renderMcpToolsView() {
     elements.mcpToolsView.setAttribute("aria-hidden", "true");
     elements.mcpBulkPermissionOptions.replaceChildren();
     elements.mcpToolPermissionList.replaceChildren();
+    elements.mcpBulkPermissionSection.hidden = false;
+    elements.mcpToolsView.dataset.viewMode = "";
     return;
   }
 
   const tools = Array.isArray(server.tools) ? server.tools : [];
+  const readOnlyInventory = server.readOnlyInventory === true;
+  elements.mcpToolsView.dataset.viewMode = readOnlyInventory ? "built-in" : "mcp";
+  elements.mcpToolsViewEyebrow.textContent = readOnlyInventory
+    ? "INTERNAL TOOL INVENTORY"
+    : "MCP TOOL PERMISSIONS";
+  elements.backToMcpServersButton.setAttribute(
+    "aria-label",
+    readOnlyInventory ? "Back to settings" : "Back to MCP servers",
+  );
+  const backLabel = elements.backToMcpServersButton.querySelector("span");
+  if (backLabel) backLabel.textContent = readOnlyInventory ? "Settings" : "Back";
   elements.mcpToolsViewTitle.textContent = server.serverName || "MCP server";
-  elements.mcpToolsViewSubtitle.textContent = `${tools.length} ${tools.length === 1 ? "tool" : "tools"} · Choose what Lumi may use.`;
+  elements.mcpToolsViewSubtitle.textContent = readOnlyInventory
+    ? `${tools.length} ${tools.length === 1 ? "tool" : "tools"} · always enabled · view only.`
+    : `${tools.length} ${tools.length === 1 ? "tool" : "tools"} · Choose what Lumi may use.`;
 
+  elements.mcpBulkPermissionSection.hidden = readOnlyInventory;
   const permissions = new Set(tools.map((tool) => normalizeMcpPermission(tool.permission)));
   const aggregateMode = permissions.size === 1 ? [...permissions][0] : "custom";
   const bulkOptions = [
@@ -293,7 +323,7 @@ function renderMcpToolsView() {
     button.append(icon, label);
     return button;
   });
-  elements.mcpBulkPermissionOptions.replaceChildren(...bulkButtons);
+  elements.mcpBulkPermissionOptions.replaceChildren(...(readOnlyInventory ? [] : bulkButtons));
 
   const rows = tools.map((tool) => {
     const permission = normalizeMcpPermission(tool.permission);
@@ -307,6 +337,12 @@ function renderMcpToolsView() {
     const name = document.createElement("code");
     name.textContent = tool.name || "Unnamed tool";
     copy.append(name);
+    if (readOnlyInventory && tool.category) {
+      const category = document.createElement("span");
+      category.className = "mcp-tool-category";
+      category.textContent = tool.category;
+      copy.append(category);
+    }
     if (tool.description) {
       const description = document.createElement("p");
       description.className = "mcp-tool-description";
@@ -324,8 +360,16 @@ function renderMcpToolsView() {
     controls.className = "mcp-permission-icons";
     controls.setAttribute("role", "group");
     controls.setAttribute("aria-label", `Permission for ${tool.name || "unnamed tool"}`);
-    for (const option of MCP_PERMISSION_OPTIONS) {
-      controls.append(createMcpPermissionButton(server.id, tool.name, option, permission === option.mode));
+    if (readOnlyInventory) {
+      const fixedPermission = document.createElement("span");
+      fixedPermission.className = "mcp-fixed-permission";
+      fixedPermission.dataset.mode = permission;
+      fixedPermission.textContent = permission === "allow" ? "✓ Always allow" : "? Ask every time";
+      controls.append(fixedPermission);
+    } else {
+      for (const option of MCP_PERMISSION_OPTIONS) {
+        controls.append(createMcpPermissionButton(server.id, tool.name, option, permission === option.mode));
+      }
     }
     row.append(copy, controls);
     return row;
@@ -340,9 +384,7 @@ function renderMcpToolsView() {
   elements.mcpToolPermissionList.replaceChildren(...rows);
 }
 
-function openMcpToolsView(serverId) {
-  if (!mcpServers.some((server) => server.id === serverId && server.enabled !== false)) return;
-  selectedMcpServerId = serverId;
+function showSelectedToolsView() {
   renderMcpToolsView();
   elements.mcpToolsView.scrollTop = 0;
   document.body.classList.add("is-mcp-tools-view");
@@ -353,8 +395,21 @@ function openMcpToolsView(serverId) {
   elements.settingsShell.inert = true;
 }
 
+function openMcpToolsView(serverId) {
+  if (!mcpServers.some((server) => server.id === serverId && server.enabled !== false)) return;
+  selectedMcpServerId = serverId;
+  showSelectedToolsView();
+}
+
+function openBuiltInToolsView() {
+  if (!builtInToolCollection.tools.length) return;
+  selectedMcpServerId = BUILT_IN_TOOLS_VIEW_ID;
+  showSelectedToolsView();
+}
+
 function closeMcpToolsView() {
   const previousServerId = selectedMcpServerId;
+  const wasBuiltInInventory = previousServerId === BUILT_IN_TOOLS_VIEW_ID;
   const serverRow = previousServerId
     ? elements.mcpServerList.querySelector(`[data-server-id="${CSS.escape(previousServerId)}"]`)
     : null;
@@ -368,6 +423,18 @@ function closeMcpToolsView() {
   }
   elements.mcpToolsView.inert = true;
   elements.mcpToolsView.setAttribute("aria-hidden", "true");
+  if (wasBuiltInInventory) {
+    elements.mcpToolsView.dataset.viewMode = "";
+    elements.mcpToolsViewEyebrow.textContent = "MCP TOOL PERMISSIONS";
+    elements.backToMcpServersButton.setAttribute("aria-label", "Back to MCP servers");
+    const backLabel = elements.backToMcpServersButton.querySelector("span");
+    if (backLabel) backLabel.textContent = "Back";
+    elements.mcpToolsViewTitle.textContent = "Tool permissions";
+    elements.mcpToolsViewSubtitle.textContent = "";
+    elements.mcpBulkPermissionSection.hidden = false;
+    elements.mcpBulkPermissionOptions.replaceChildren();
+    elements.mcpToolPermissionList.replaceChildren();
+  }
 }
 
 function renderMcpServers() {
@@ -836,6 +903,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
   return {
     load: loadMcpServers,
+    openBuiltInToolsView,
     setStatus: setMcpStatus,
     showAddForm: toggleMcpAddForm,
   };

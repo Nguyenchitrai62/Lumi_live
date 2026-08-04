@@ -45,6 +45,7 @@ body.is-mcp-tools-view .settings-shell { opacity: 0; pointer-events: none; trans
 .settings-head > p { max-width: 360px; margin: 0 0 4px; color: var(--muted); font-size: 13px; line-height: 1.5; text-align: right; }
 .brand { display: flex; align-items: center; gap: 14px; }
 .brand img { width: 58px; height: 58px; border-radius: 18px; box-shadow: 0 14px 30px rgba(83, 61, 145, .24); }
+#lumiSettingsIcon { -webkit-user-drag: none; user-select: none; }
 .brand span, .eyebrow { display: block; color: var(--lavender); font-size: 10px; font-weight: 900; letter-spacing: .16em; }
 .brand-meta { display: flex; align-items: center; gap: 8px; }
 .brand .version-chip { border: 1px solid var(--line); border-radius: 999px; padding: 3px 6px; color: var(--muted); background: var(--surface); font-size: 8px; letter-spacing: .04em; }
@@ -210,6 +211,7 @@ body.is-mcp-connector-modal-open { overflow: hidden; }
 .mcp-permission-row[data-state="disabled"] { border-color: rgba(166,111,22,.3); background: rgba(166,111,22,.05); }
 .mcp-permission-copy { min-width: 0; }
 .mcp-permission-copy code { display: block; max-width: 100%; color: var(--ink); font: 800 13px/1.45 ui-monospace, "Cascadia Code", monospace; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.mcp-tool-category { display: inline-flex; align-items: center; min-height: 22px; margin-top: 7px; border: 1px solid rgba(119,93,198,.2); border-radius: 999px; padding: 0 8px; color: var(--lavender); background: rgba(119,93,198,.07); font-size: 9px; font-weight: 900; }
 .mcp-permission-copy p { max-width: 100%; margin: 6px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
 .mcp-permission-copy .mcp-tool-warning { color: var(--warning); }
 .mcp-permission-icons { display: flex; flex: 0 0 auto; gap: 6px; }
@@ -222,6 +224,10 @@ body.is-mcp-connector-modal-open { overflow: hidden; }
 .mcp-permission-icons button[data-mode="ask"][aria-pressed="true"] { background: rgba(166,111,22,.12); }
 .mcp-permission-icons button[data-mode="block"] { color: var(--danger); }
 .mcp-permission-icons button[data-mode="block"][aria-pressed="true"] { background: rgba(189,82,108,.12); }
+.mcp-fixed-permission { display: inline-flex; align-items: center; min-height: 34px; border: 1px solid currentColor; border-radius: 10px; padding: 0 11px; font-size: 10px; font-weight: 950; white-space: nowrap; }
+.mcp-fixed-permission[data-mode="allow"] { color: var(--mint); background: rgba(62,158,125,.1); }
+.mcp-fixed-permission[data-mode="ask"] { color: var(--warning); background: rgba(166,111,22,.1); }
+.mcp-tools-view[data-view-mode="built-in"] .mcp-permission-row { background: rgba(119,93,198,.035); }
 .mcp-permission-icons button:disabled, .mcp-bulk-options button:disabled { opacity: .35; cursor: wait; transform: none; }
 .compact-card { min-width: 0; padding: 18px; }
 .compact-card h2 { margin: 3px 0 2px; font-size: 16px; line-height: 1.18; }

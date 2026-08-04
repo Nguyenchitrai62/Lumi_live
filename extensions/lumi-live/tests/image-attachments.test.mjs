@@ -51,7 +51,8 @@ test("composer wires image paste, drop, preview, and Gemini video input", async 
   assert.match(html, /id="imageAttachmentInput"/);
   assert.match(html, /id="imageAttachmentTray"/);
   assert.match(controller, /addEventListener\("paste"/);
-  assert.match(controller, /addEventListener\("drop"/);
-  assert.match(controller, /selectedAttachment\?\.frame/);
-  assert.match(controller, /createMessage\("user", displayText, \{ attachment: selectedAttachment \}\)/);
+  assert.match(controller, /window\.addEventListener\("drop"/);
+  assert.match(controller, /attachFiles\(Array\.from\(event\.dataTransfer\?\.files \|\| \[\]\)\)/);
+  assert.match(controller, /selectedAttachment.*\.frame/s);
+  assert.match(controller, /createMessage\("user", displayText, \{[\s\S]*attachments: selectedAttachments/);
 });

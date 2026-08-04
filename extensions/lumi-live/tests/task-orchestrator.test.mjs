@@ -207,6 +207,28 @@ test("treats an explicit success=false result as a failed harness step", () => {
   assert.equal(finished.checkpoint.consecutiveFailures, 1);
 });
 
+test("treats MCP isError results as failed harness steps", () => {
+  const orchestrator = createTaskOrchestrator({ maxSteps: 6 });
+  const taskId = orchestrator.startTask("Run one MCP tool and preserve its error.");
+  const step = orchestrator.beginStep({
+    taskId,
+    reflection,
+    action: {
+      name: "mcp__demo__run",
+      kind: "tool_action",
+      input: { target: "demo" },
+    },
+  });
+  const finished = orchestrator.finishStep(step.stepId, {
+    result: {
+      isError: true,
+      data: { message: "The MCP provider rejected the request." },
+    },
+  });
+  assert.equal(finished.step.action.status, "failed");
+  assert.equal(finished.step.action.error, "The MCP provider rejected the request.");
+});
+
 test("asks Gemini Live to re-plan after three failed approaches", () => {
   const orchestrator = createTaskOrchestrator({ maxSteps: 8 });
   const taskId = orchestrator.startTask("Complete a recoverable multi-step workflow.");

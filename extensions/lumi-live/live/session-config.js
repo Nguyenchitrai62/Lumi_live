@@ -443,12 +443,16 @@ ${LIVE_TRANSLATION_GUIDANCE}
 
 ${VIDEO_ANALYSIS_GUIDANCE}`;
 
-export function configureMcpTools(mcpInfo, activeMcpTools) {
+export function configureMcpTools(mcpInfo, activeMcpTools, localProviders = []) {
   activeMcpTools.clear();
   const declarations = [];
   const usedNames = new Set(BUILTIN_TOOLS.map((tool) => tool.name));
 
-  for (const [serverIndex, server] of (mcpInfo?.servers || []).entries()) {
+  const servers = [
+    ...(Array.isArray(localProviders) ? localProviders : []),
+    ...(mcpInfo?.servers || []),
+  ];
+  for (const [serverIndex, server] of servers.entries()) {
     if (server?.enabled === false || server?.error) continue;
     const serverName = String(server?.serverName || `MCP server ${serverIndex + 1}`);
     const serverSlug = serverName.replace(/[^a-zA-Z0-9_]/g, "_").replace(/^_+|_+$/g, "")
@@ -470,6 +474,8 @@ export function configureMcpTools(mcpInfo, activeMcpTools) {
         serverName,
         toolName: tool.name,
         permission: tool.permission || "allow",
+        localProvider: server.localProvider || "",
+        readOnly: tool.readOnly !== false,
       });
 
       const parameters = tool.gemini.parameters;
@@ -479,7 +485,9 @@ export function configureMcpTools(mcpInfo, activeMcpTools) {
       }
       declarations.push({
         name: functionName,
-        description: `[${serverName}; permission: ${tool.permission === "allow" ? "always allow" : "ask every time"}] ${String(tool.description || `Run MCP tool ${tool.name}.`).slice(0, 1020)} Before using this tool for the current page, file, document, node, or project, refresh browser_get_active_context and interpret its complete URL directly. Use only parameters declared by this tool.`,
+        description: server.localProvider
+          ? `[${serverName}; local provider; permission: always allow] ${String(tool.description || `Run local spreadsheet tool ${tool.name}.`).slice(0, 1020)} Use only parameters declared by this tool.`
+          : `[${serverName}; permission: ${tool.permission === "allow" ? "always allow" : "ask every time"}] ${String(tool.description || `Run MCP tool ${tool.name}.`).slice(0, 1020)} Before using this tool for the current page, file, document, node, or project, refresh browser_get_active_context and interpret its complete URL directly. Use only parameters declared by this tool.`,
         parameters,
       });
     }
@@ -518,7 +526,7 @@ export function buildSessionInstruction(
   mcpInfo,
   activeTabContext,
   actionDeclarations = BUILTIN_TOOLS,
-  { fastMode = false } = {},
+  { fastMode = false, excelGuidance = "" } = {},
 ) {
   const baseInstruction = `${SYSTEM_INSTRUCTION}
 
@@ -526,7 +534,9 @@ ${buildAgentProtocolInstruction(actionDeclarations)}
 
 ${formatActiveTabSessionContext(activeTabContext)}
 
-${formatFastModeSessionContext(fastMode)}`;
+${formatFastModeSessionContext(fastMode)}
+
+${String(excelGuidance || "").trim()}`;
   const servers = (mcpInfo?.servers || [])
     .filter((server) => server?.enabled !== false && !server?.error && server?.tools?.length);
   if (!servers.length) return baseInstruction;

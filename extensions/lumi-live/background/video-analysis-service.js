@@ -1162,6 +1162,7 @@ export function createVideoAnalysisService({
   getTargetTab,
   maxInlineMediaBytes = MAX_INLINE_MEDIA_BYTES,
   onProgress = () => {},
+  prepareTemporaryTab = () => {},
   remuxMp4AudioImpl = remuxMp4AudioToAdts,
 } = {}) {
   let activeController = null;
@@ -1230,34 +1231,22 @@ export function createVideoAnalysisService({
         return false;
       }
     })();
-    if (currentTab?.id && requestedIdentity && requestedIdentity === currentIdentity) {
+    if (
+      !isFacebookSource
+      && currentTab?.id
+      && requestedIdentity
+      && requestedIdentity === currentIdentity
+    ) {
       return { ...currentTab, lumiSourcePageOpened: false };
     }
-    // Reuse a Facebook tab so its authenticated state stays warm. If the locked
-    // tab is unrelated, isolate the exact permalink in a background tab instead
-    // of scanning media from a different site.
+    // A scrolling Facebook Reels feed keeps adjacent and previously viewed
+    // players mounted. Even when the address bar already contains the requested
+    // Reel ID, its DOM and media-resource history can therefore remain
+    // ambiguous. Always load an explicitly supplied Facebook URL in a fresh
+    // background tab and bind every discovered caption/audio candidate to the
+    // requested ID. The caller may attach that tab to Agent Space before page
+    // inspection begins.
     if (isFacebookSource) {
-      const currentIsFacebook = (() => {
-        try {
-          const hostname = new URL(currentTab?.url || "").hostname.toLowerCase().replace(/^www\./, "");
-          return hostname === "facebook.com"
-            || hostname.endsWith(".facebook.com")
-            || hostname === "fb.watch"
-            || hostname.endsWith(".fb.watch");
-        } catch {
-          return false;
-        }
-      })();
-      // Short/share URLs do not expose a numeric ID until Facebook redirects
-      // them, so they must load in the isolated tab even when another Facebook
-      // page is already open.
-      if (currentTab?.id && currentIsFacebook && facebookVideoId) {
-        return {
-          ...currentTab,
-          lumiSourcePageOpened: false,
-          lumiRequestedFacebookVideoId: facebookVideoId || "",
-        };
-      }
       if (typeof chromeApi?.tabs?.create !== "function") {
         throw new Error("Lumi cannot open the supplied Facebook Reel because Chrome tab access is unavailable.");
       }
@@ -1267,9 +1256,15 @@ export function createVideoAnalysisService({
       const openedFacebookTab = await chromeApi.tabs.create({
         url: normalizedSourceUrl,
         active: false,
+        ...(Number.isInteger(currentTab?.windowId) ? { windowId: currentTab.windowId } : {}),
       });
       let readyFacebookTab;
       try {
+        await prepareTemporaryTab(openedFacebookTab, {
+          currentTab,
+          facebookVideoId,
+          sourceUrl: normalizedSourceUrl,
+        });
         readyFacebookTab = await waitForTabReady(openedFacebookTab, signal);
       } catch (error) {
         if (Number.isInteger(openedFacebookTab?.id) && typeof chromeApi?.tabs?.remove === "function") {

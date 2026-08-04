@@ -20,7 +20,13 @@ export function createMcpPanelController({
 
 function renderCurrentMcpToolNotice() {
   const notice = currentMcpToolNotice;
+  const isPermissionPrompt = notice?.kind === "permission";
   elements.mcpToolNotice.hidden = !notice;
+  elements.mcpPermissionBackdrop.hidden = !isPermissionPrompt;
+  elements.mcpToolNotice.dataset.kind = notice?.kind || "notice";
+  elements.mcpToolNotice.setAttribute("role", isPermissionPrompt ? "alertdialog" : "alert");
+  if (isPermissionPrompt) elements.mcpToolNotice.setAttribute("aria-modal", "true");
+  else elements.mcpToolNotice.removeAttribute("aria-modal");
   if (!notice) return;
   elements.mcpToolNoticeTitle.textContent = notice.title;
   elements.mcpToolNoticeMessage.textContent = notice.message;
@@ -29,6 +35,7 @@ function renderCurrentMcpToolNotice() {
   elements.mcpToolNoticeSecondary.hidden = !notice.secondaryLabel;
   elements.mcpToolNoticeTertiary.textContent = notice.tertiaryLabel || "";
   elements.mcpToolNoticeTertiary.hidden = !notice.tertiaryLabel;
+  if (isPermissionPrompt) queueMicrotask(() => elements.mcpToolNoticePrimary.focus());
 }
 
 function showNextMcpToolNotice() {
@@ -161,6 +168,7 @@ function requestMcpToolPermission(tool, args, callId) {
     pendingMcpPermissionPrompts.set(noticeKey, () => finish(false));
     queueMcpToolNotice({
       key: noticeKey,
+      kind: "permission",
       title: `Allow MCP tool: ${tool.toolName}?`,
       message: `${tool.serverName} wants to run this tool with: ${formatMcpActivityValue(args).slice(0, 260)}`,
       primaryLabel: "Allow once",
@@ -214,6 +222,10 @@ function applyMcpToolPolicies(records) {
       && ["block", "allow", "ask"].includes(record.mode))
     .map((record) => [`${record.serverId}\u0000${record.toolName}`, record.mode]));
   for (const tool of getActiveMcpTools().values()) {
+    if (tool.localProvider) {
+      tool.permission = "allow";
+      continue;
+    }
     tool.permission = policies.get(`${tool.serverId}\u0000${tool.toolName}`) || "allow";
   }
 }

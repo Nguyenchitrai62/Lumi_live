@@ -10,7 +10,7 @@
     <main class="settings-shell">
       <header class="settings-head">
         <div class="brand">
-          <img src="../icons/lumi-live.png" alt="" />
+          <img id="lumiSettingsIcon" src="../icons/lumi-live.png" alt="" draggable="false" />
           <div>
             <div class="brand-meta">
               <span>LUMI LIVE</span>
@@ -239,13 +239,13 @@
         <header class="mcp-tools-view-header">
           <button id="backToMcpServersButton" class="mcp-back-button" type="button" aria-label="Back to MCP servers">← <span>Back</span></button>
           <div>
-            <span class="eyebrow">MCP TOOL PERMISSIONS</span>
+            <span id="mcpToolsViewEyebrow" class="eyebrow">MCP TOOL PERMISSIONS</span>
             <h2 id="mcpToolsViewTitle">Tool permissions</h2>
             <p id="mcpToolsViewSubtitle"></p>
           </div>
         </header>
 
-        <section class="mcp-bulk-permission" aria-labelledby="mcpBulkPermissionTitle">
+        <section id="mcpBulkPermissionSection" class="mcp-bulk-permission" aria-labelledby="mcpBulkPermissionTitle">
           <div>
             <strong id="mcpBulkPermissionTitle">All tools</strong>
             <p>Apply one choice to every tool.</p>

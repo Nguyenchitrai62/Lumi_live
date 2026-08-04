@@ -111,4 +111,16 @@ await build({
   },
 });
 
+await build({
+  entryPoints: [path.join(extensionRoot, "documents", "document-parser-worker.js")],
+  outfile: path.join(outputDirectory, "document-parser-worker.js"),
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: ["chrome120"],
+  sourcemap: false,
+  minify: false,
+  legalComments: "inline",
+});
+
 console.log("Built the Lumi Live extension");

@@ -166,7 +166,7 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
   );
   assert.match(controller, /sendJson\(buildInitialHistoryClientContent\(conversationHistory\),\s*sourceSocket\)/);
   assert.match(controller, /elements\.messageInput\.disabled\s*=\s*textSendPending/);
-  assert.match(controller, /queueUserMessage\(message,\s*attachment\)/);
+  assert.match(controller, /queueUserMessage\(message,\s*attachments\)/);
   assert.match(controller, /function steerQueuedUserMessage\(\)/);
   assert.match(controller, /getTranscriptRevealDurationMs\(remainingCharacterCount\)/);
   assert.match(controller, /function setVisibleTranscriptText\(message,\s*text\)[^]*message\.role === "lumi"[^]*renderMarkdown\(message\.content,\s*visibleText\)/);
@@ -351,6 +351,8 @@ test("side panel keeps Lumi's layout while improving contrast and primary contro
   assert.match(styles, /\.message \.message-meta/);
   assert.match(styles, /\.turn-work-status/);
   assert.match(styles, /@keyframes turn-work-dot/);
+  assert.match(styles, /\.markdown-body code\s*\{[^}]*color:\s*#49317f;[^}]*background:\s*#eee9f8;/);
+  assert.match(styles, /\.message-lumi \.markdown-body code\s*\{[^}]*color:\s*#f0eaff;[^}]*background:\s*#44385f;/);
   assert.match(styles, /body\.fast-mode \.agent-step-card\[data-state="running"\] \.agent-step-marker::after\s*\{[^}]*animation-duration:[^}]*animation-iteration-count:\s*infinite/);
   assert.match(styles, /@media \(prefers-contrast: more\)/);
   assert.match(styles, /@media \(forced-colors: active\)/);
@@ -455,11 +457,13 @@ test("opens a requested website even when the current tab cannot host PageAgent"
   assert.doesNotMatch(openTabSource, /needs a controllable current page/);
 });
 
-test("reuses an authenticated Facebook tab or isolates the exact permalink in a background tab", async () => {
+test("isolates every supplied Facebook permalink in an Agent Space-ready background tab", async () => {
   const worker = await readFile(new URL("background/index.js", extensionRoot), "utf8");
   const analysis = await readFile(new URL("background/video-analysis-service.js", extensionRoot), "utf8");
   assert.doesNotMatch(worker, /openTemporaryAnalysisTab|closeTemporaryAnalysisTab/);
   assert.doesNotMatch(analysis, /createTemporaryFacebookTab|openFreshFacebookReelTab|reloadFreshFacebookTabOnce/);
+  assert.match(worker, /prepareTemporaryTab:[\s\S]+fastWorkspace\.addTab\(tab\.id\)/);
+  assert.match(analysis, /!isFacebookSource[\s\S]+requestedIdentity === currentIdentity/);
   assert.match(analysis, /if \(isFacebookSource\)[\s\S]+lumiRequestedFacebookVideoId/);
   assert.match(analysis, /openedFacebookTab[\s\S]+active:\s*false/);
   assert.match(analysis, /retry the same locked tab instead of[\s\S]+collectSources\(tab\.id, discoveredFacebookVideoId, true, signal\)/i);

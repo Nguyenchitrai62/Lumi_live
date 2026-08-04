@@ -529,12 +529,19 @@ export function createTaskOrchestrator({
   const finishStep = (stepId, { result, error = "", durationMs = 0 } = {}) => {
     const step = history.find((event) => event.id === stepId && event.type === "step");
     if (!step) throw new Error(`Unknown Lumi step: ${stepId}`);
-    const failed = Boolean(error || result?.error || result?.success === false);
+    const failed = Boolean(
+      error
+      || result?.error
+      || result?.success === false
+      || result?.isError === true,
+    );
     const failureDetail = failed
       ? cleanText(
           error
           || result?.error
           || result?.message
+          || result?.data?.message
+          || result?.content?.find?.((item) => item?.type === "text")?.text
           || "The action returned success=false.",
           2400,
         )
