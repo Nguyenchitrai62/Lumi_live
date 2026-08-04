@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildAacAdtsHeader,
   captionSegmentsCoverMedia,
+  classifyVideoSourceUrl,
   chooseDirectMediaCandidate,
   createVideoAnalysisService,
   extractInteractionText,
@@ -25,11 +26,12 @@ import {
   videoIdentityKey,
 } from "../background/video-analysis-service.js";
 import {
+  GET_TRANSCRIPT_TOOL_NAME,
   prepareVideoAnalysisAgentResult,
   VIDEO_ANALYSIS_MODEL,
   VIDEO_ANALYSIS_MODELS,
   VIDEO_ANALYSIS_THINKING_LEVEL,
-  VIDEO_ANALYZE_TOOL_NAME,
+  VIDEO_SUMMARY_TOOL_NAME,
 } from "../live/video-analysis.js";
 import {
   BUILTIN_TOOLS,
@@ -465,6 +467,160 @@ test("extracts the exact Facebook Reel audio representation from embedded DASH m
   }
 });
 
+test("inherits Facebook audio MIME metadata from its DASH AdaptationSet", async () => {
+  const previousDocument = globalThis.document;
+  const previousLocation = globalThis.location;
+  const previousPerformance = globalThis.performance;
+  const previousHtmlMediaElement = globalThis.HTMLMediaElement;
+  try {
+    const targetId = "1666666666666666";
+    const audioUrl = "https://scontent.example.fbcdn.net/o1/v/inherited-audio.mp4?token=audio";
+    const manifestXml = `<MPD><Period><AdaptationSet contentType="audio" mimeType="application/mp4" codecs="mp4a.40.5"><Representation id="audio-track" bandwidth="48000"><BaseURL><![CDATA[${audioUrl}]]></BaseURL></Representation></AdaptationSet></Period></MPD>`;
+    const pageData = JSON.stringify({ video: { id: targetId, dash_manifest: manifestXml } });
+    globalThis.document = {
+      title: "Facebook Reel",
+      querySelectorAll(selector) {
+        return selector.startsWith("script[") ? [{ textContent: pageData }] : [];
+      },
+      querySelector() { return null; },
+    };
+    globalThis.location = {
+      href: `https://www.facebook.com/reel/${targetId}`,
+      hostname: "www.facebook.com",
+      pathname: `/reel/${targetId}`,
+    };
+    globalThis.performance = { getEntriesByType() { return []; } };
+    globalThis.HTMLMediaElement = { HAVE_METADATA: 1 };
+    const source = await collectVideoAnalysisSourceInPage();
+    const audio = source.mediaCandidates.find((candidate) => candidate.representationId === "audio-track");
+    assert.equal(audio?.mimeType, "audio/mp4");
+    assert.equal(audio?.audioOnly, true);
+    assert.equal(audio?.url, audioUrl);
+    assert.equal(rankDirectMediaCandidates(source.mediaCandidates, { preferAudio: true })[0]?.url, audioUrl);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+    if (previousLocation === undefined) delete globalThis.location;
+    else globalThis.location = previousLocation;
+    if (previousPerformance === undefined) delete globalThis.performance;
+    else globalThis.performance = previousPerformance;
+    if (previousHtmlMediaElement === undefined) delete globalThis.HTMLMediaElement;
+    else globalThis.HTMLMediaElement = previousHtmlMediaElement;
+  }
+});
+
+test("uses Facebook video_id prefetch audio without crossing into the next Reel payload", async () => {
+  const previousDocument = globalThis.document;
+  const previousLocation = globalThis.location;
+  const previousPerformance = globalThis.performance;
+  const previousHtmlMediaElement = globalThis.HTMLMediaElement;
+  try {
+    const targetId = "1554671672755534";
+    const nextId = "1559482142197723";
+    const targetPrefetchAudio = "https://scontent.example.fbcdn.net/o1/v/target-prefetch-audio.mp4?token=target";
+    const targetManifestAudio = "https://scontent.example.fbcdn.net/o1/v/target-manifest-audio.mp4?token=target";
+    const nextAudio = "https://scontent.example.fbcdn.net/o1/v/next-reel-audio.mp4?token=next";
+    const manifest = (url) => `<MPD><Period><AdaptationSet><Representation id="audio" mimeType="audio/mp4" codecs="mp4a.40.5"><BaseURL>${url.replace(/&/g, "&amp;")}</BaseURL></Representation></AdaptationSet></Period></MPD>`;
+    const delivery = (id, url) => ({
+      id,
+      dash_manifests: [{ manifest_xml: manifest(url) }],
+    });
+    const pageData = JSON.stringify({
+      extensions: {
+        all_video_dash_prefetch_representations: [
+          {
+            video_id: targetId,
+            representations: [{
+              base_url: targetPrefetchAudio,
+              mime_type: "audio/mp4",
+              codecs: "mp4a.40.5",
+              bandwidth: 45_836,
+              representation_id: "target-audio",
+            }],
+          },
+          {
+            video_id: nextId,
+            representations: [{
+              base_url: nextAudio,
+              mime_type: "audio/mp4",
+              codecs: "mp4a.40.5",
+              representation_id: "next-audio",
+            }],
+          },
+        ],
+      },
+      data: {
+        // This broad object caused the production bug: video.id is the current
+        // Reel while viewer contains the already-prefetched Reel below it.
+        video: {
+          id: targetId,
+          creation_story: {
+            attachments: [{
+              media: {
+                id: targetId,
+                videoDeliveryResponseFragment: {
+                  id: targetId,
+                  videoDeliveryResponseResult: delivery(targetId, targetManifestAudio),
+                },
+              },
+            }],
+          },
+        },
+        viewer: {
+          video_feed_unit_feed: {
+            edges: [{
+              node: {
+                attachments: [{
+                  media: {
+                    id: nextId,
+                    videoDeliveryResponseFragment: {
+                      id: nextId,
+                      videoDeliveryResponseResult: delivery(nextId, nextAudio),
+                    },
+                  },
+                }],
+              },
+            }],
+          },
+        },
+      },
+    });
+    globalThis.document = {
+      title: "Facebook Reel",
+      querySelectorAll(selector) {
+        return selector.startsWith("script[") ? [{ textContent: pageData }] : [];
+      },
+      querySelector() { return null; },
+    };
+    globalThis.location = {
+      href: `https://www.facebook.com/reel/${targetId}`,
+      hostname: "www.facebook.com",
+      pathname: `/reel/${targetId}`,
+    };
+    globalThis.performance = { getEntriesByType() { return []; } };
+    globalThis.HTMLMediaElement = { HAVE_METADATA: 1 };
+    const source = await collectVideoAnalysisSourceInPage();
+    const audioCandidates = source.mediaCandidates.filter((candidate) => candidate.mimeType === "audio/mp4");
+    assert.ok(audioCandidates.some((candidate) => (
+      candidate.url === targetPrefetchAudio
+      && candidate.origin === "facebook_dash_prefetch_representation"
+      && candidate.identityEvidence === "facebook_video_id_prefetch"
+    )));
+    assert.ok(audioCandidates.some((candidate) => candidate.url === targetManifestAudio));
+    assert.equal(audioCandidates.some((candidate) => candidate.url === nextAudio), false);
+    assert.equal(rankDirectMediaCandidates(audioCandidates, { preferAudio: true })[0]?.url, targetPrefetchAudio);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+    if (previousLocation === undefined) delete globalThis.location;
+    else globalThis.location = previousLocation;
+    if (previousPerformance === undefined) delete globalThis.performance;
+    else globalThis.performance = previousPerformance;
+    if (previousHtmlMediaElement === undefined) delete globalThis.HTMLMediaElement;
+    else globalThis.HTMLMediaElement = previousHtmlMediaElement;
+  }
+});
+
 test("derives the active Reel ID from the current player on the scrolling Facebook feed", async () => {
   const previousDocument = globalThis.document;
   const previousLocation = globalThis.location;
@@ -522,7 +678,8 @@ test("derives the active Reel ID from the current player on the scrolling Facebo
     assert.equal(source.facebookMediaIdentityVerified, true);
     assert.equal(source.mediaCandidates.find((candidate) => candidate.mimeType === "audio/mp4")?.url, audioUrl);
     const constrained = await collectVideoAnalysisSourceInPage("9999999999999999");
-    assert.equal(constrained.facebookVideoId, targetId);
+    assert.equal(constrained.facebookVideoId, "9999999999999999");
+    assert.equal(constrained.facebookMediaIdentityVerified, false);
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
@@ -936,10 +1093,69 @@ test("uses a complete existing caption track without spending a Gemini request",
   assert.match(result.transcript, /Welcome/);
   assert.match(result.transcriptDownload.filename, /Captioned-video-transcript\.txt/);
   assert.equal(result.groqAttempted, false);
-  assert.equal(storage.state.analyses.length, 1);
+  assert.equal(storage.state.analyses, undefined);
 });
 
-test("opens only a supplied source page and leaves its audio link in the result", async () => {
+test("prefers a complete English transcript when several caption languages exist", async () => {
+  const progress = [];
+  const service = createVideoAnalysisService({
+    chromeApi: {
+      scripting: {
+        async executeScript() {
+          return [{ result: {
+            found: true,
+            pageTitle: "Multilingual video",
+            pageUrl: "https://www.youtube.com/watch?v=multilingual",
+            durationSeconds: 10,
+            captionTracks: [
+              {
+                source: "youtube_caption_track",
+                language: "es",
+                label: "Español",
+                cues: [{ start: 0, end: 10, text: "Texto en español" }],
+              },
+              {
+                source: "youtube_caption_track",
+                language: "en-US",
+                label: "English (US)",
+                cues: [{ start: 0, end: 10, text: "English transcript" }],
+              },
+            ],
+            mediaCandidates: [],
+          } }];
+        },
+      },
+    },
+    fetchImpl: async () => { throw new Error("Embedded English captions should avoid network requests."); },
+    onProgress(event) { progress.push(event); },
+    getTargetTab: async () => ({
+      id: 71,
+      title: "Multilingual video",
+      url: "https://www.youtube.com/watch?v=multilingual",
+    }),
+  });
+  const result = await service.analyze({
+    apiKey: "test-key",
+    args: {
+      action: "transcript",
+      outputLanguage: "auto",
+      progressRequestId: "progress-english",
+    },
+  });
+  assert.equal(result.language, "en-US");
+  assert.match(result.transcript, /English transcript/);
+  assert.doesNotMatch(result.transcript, /Texto en español/);
+  assert.deepEqual(progress.map((event) => event.stage), [
+    "target",
+    "source",
+    "captions",
+    "captions_found",
+    "finalizing",
+  ]);
+  assert.ok(progress.every((event) => event.requestId === "progress-english"));
+});
+
+test("opens only a supplied source page and uses its captions before resolving audio", async () => {
   const storage = createMemoryStorage();
   const tabCreates = [];
   const sourceUrl = "https://www.youtube.com/watch?v=audio-tab-test";
@@ -992,15 +1208,15 @@ test("opens only a supplied source page and leaves its audio link in the result"
   const result = await service.analyze({
     apiKey: "test-key",
     groqApiKey: "test-groq-key",
-    args: { action: "transcript", sourceUrl },
+    args: { action: "transcript", url: sourceUrl },
   });
   assert.deepEqual(tabCreates, [{ url: sourceUrl, active: true }]);
   assert.equal(result.sourcePageTabId, 40);
   assert.equal(result.sourcePageOpened, true);
-  assert.equal(result.audioUrl, audioUrl);
+  assert.equal(result.audioUrl, null);
   assert.equal(result.audioTabId, null);
-  assert.equal(result.audioSourceMethod, "youtube_player_response");
-  assert.equal(result.audioLinkEphemeral, true);
+  assert.equal(result.audioSourceMethod, null);
+  assert.equal(result.audioLinkEphemeral, false);
   assert.equal(result.sourceMethod, "youtube_caption_track");
   assert.equal(result.groqAttempted, false);
 });
@@ -1404,9 +1620,9 @@ test("falls back from YouTube UMP directly to the public Gemini URL without a ba
   assert.equal(interactionRequests.length, 1);
   assert.equal(interactionRequests[0].input[0].uri, youtubeUrl);
   assert.equal(result.sourceMethod, "youtube_url");
-  assert.equal(result.groqAttempted, true);
-  assert.equal(result.groqFallbackUsed, true);
-  assert.match(result.groqFallbackReason, /application\/vnd\.yt-ump/i);
+  assert.equal(result.groqAttempted, false);
+  assert.equal(result.groqFallbackUsed, false);
+  assert.equal(result.groqFallbackReason, "");
   assert.match(result.transcript, /Gemini URL conclusion/);
 });
 
@@ -1466,14 +1682,13 @@ test("summarizes media directly without generating or caching an intermediate tr
   assert.equal(result.chapters.length, 2);
   assert.equal(result.durationSeconds, 600);
   assert.match(result.summaryMarkdown, /From 02:30 to 10:00 — Solution:/);
-  assert.equal(storage.state.analyses[0].transcript, "");
-  assert.deepEqual(storage.state.analyses[0].segments, []);
+  assert.equal(storage.state.analyses, undefined);
 
   const repeated = await service.analyze({ apiKey: "test-key", args: { action: "summary" } });
   assert.equal(requests.length, 2);
   assert.equal(requests[1].input[0].uri, currentUrl);
   assert.equal(repeated.sourceMethod, "youtube_url");
-  assert.equal(repeated.transcriptReused, false);
+  assert.equal(Object.hasOwn(repeated, "transcriptReused"), false);
   assert.equal(repeated.transcriptSourceQuality, null);
 
   currentUrl = "https://www.youtube.com/watch?v=different456";
@@ -1481,7 +1696,7 @@ test("summarizes media directly without generating or caching an intermediate tr
   assert.equal(requests.length, 3);
   assert.equal(requests[2].input[0].uri, currentUrl);
   assert.equal(differentVideo.sourceMethod, "youtube_url");
-  assert.equal(differentVideo.transcriptReused, false);
+  assert.equal(Object.hasOwn(differentVideo, "transcriptReused"), false);
 });
 
 test("uses Groq Whisper for a timestamped transcript when a direct audio track is available", async () => {
@@ -1565,7 +1780,7 @@ test("uses Groq Whisper for a timestamped transcript when a direct audio track i
   assert.equal(result.groqFallbackUsed, false);
   assert.match(result.transcript, /\[17:55 - 18:00\] Káº¿t thÃºc\./);
   assert.doesNotMatch(result.transcript, /Old inaccurate Gemini transcript/);
-  assert.equal(storage.state.analyses[0].transcriptModel, GROQ_TRANSCRIPTION_MODEL);
+  assert.equal(storage.state.analyses[0].transcriptModel, undefined);
 });
 
 test("switches immediately from Whisper Turbo to Whisper Large V3 on Groq rate limit", async () => {
@@ -1623,7 +1838,7 @@ test("switches immediately from Whisper Turbo to Whisper Large V3 on Groq rate l
   assert.match(result.transcript, /Large V3 transcript/);
 });
 
-test("does not hide an invalid Groq key behind Gemini fallback", async () => {
+test("treats any Groq failure as optional and summarizes audio directly with Gemini", async () => {
   const storage = createMemoryStorage();
   let requestCount = 0;
   const service = createVideoAnalysisService({
@@ -1637,38 +1852,57 @@ test("does not hide an invalid Groq key behind Gemini fallback", async () => {
             durationSeconds: 10,
             captionTracks: [],
             mediaCandidates: [{
-              url: "https://cdn.example.com/invalid-key.m4a",
+              url: "https://cdn.example.com/invalid-key.mp3",
               origin: "current_src",
-              mimeType: "audio/mp4",
+              mimeType: "audio/mpeg",
             }],
           } }];
         },
       },
       storage: { local: storage.area },
     },
-    fetchImpl: async (url) => {
+    fetchImpl: async (url, init = {}) => {
       requestCount += 1;
-      assert.equal(url, "https://api.groq.com/openai/v1/audio/transcriptions");
-      return new Response(JSON.stringify({ error: { message: "Invalid API Key" } }), {
-        status: 401,
-        headers: { "content-type": "application/json" },
-      });
+      if (url === "https://api.groq.com/openai/v1/audio/transcriptions") {
+        return new Response(JSON.stringify({ error: { message: "Invalid API Key" } }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === "https://cdn.example.com/invalid-key.mp3") {
+        return new Response(new Uint8Array([1, 2, 3, 4]), {
+          status: 200,
+          headers: { "content-type": "audio/mpeg", "content-length": "4" },
+        });
+      }
+      assert.equal(url, "https://generativelanguage.googleapis.com/v1beta/interactions");
+      const request = JSON.parse(init.body);
+      assert.equal(request.response_format.schema.properties.segments, undefined);
+      assert.match(request.input[1].text, /summary-only request/i);
+      return new Response(JSON.stringify({ outputText: JSON.stringify({
+        summary: "Gemini direct summary.",
+        language: "en",
+        chapters: [{ start: "00:00", end: "00:10", title: "Topic", summary: "Summarizes the audio directly." }],
+        importantSegments: [],
+      }) }), { status: 200, headers: { "content-type": "application/json" } });
     },
     getTargetTab: async () => ({ id: 22, title: "Invalid key", url: "https://example.com/invalid-key" }),
     storageKey: "analyses",
   });
-  await assert.rejects(
-    service.analyze({
-      apiKey: "test-gemini-key",
-      groqApiKey: "invalid-groq-key",
-      args: { action: "transcript" },
-    }),
-    /Invalid API Key/i,
-  );
-  assert.equal(requestCount, 1);
+  const result = await service.analyze({
+    apiKey: "test-gemini-key",
+    groqApiKey: "invalid-groq-key",
+    args: { action: "summary" },
+  });
+  assert.equal(requestCount, 3);
+  assert.equal(result.groqAttempted, true);
+  assert.equal(result.groqFallbackUsed, true);
+  assert.match(result.groqFallbackReason, /Invalid API Key/i);
+  assert.equal(result.summary, "Gemini direct summary.");
+  assert.equal(Object.hasOwn(result, "transcript"), false);
 });
 
-test("uses the extracted YouTube audio URL without contacting a backend", async () => {
+test("sends a YouTube URL directly to Gemini even when Groq is configured", async () => {
   const storage = createMemoryStorage();
   const youtubeUrl = "https://www.youtube.com/watch?v=direct-groq-audio";
   const audioUrl = "https://rr.example.googlevideo.com/videoplayback?id=direct-groq-audio&expire=9999999999";
@@ -1698,14 +1932,13 @@ test("uses the extracted YouTube audio URL without contacting a backend", async 
       storage: { local: storage.area },
     },
     fetchImpl: async (url, init = {}) => {
-      assert.equal(url, "https://api.groq.com/openai/v1/audio/transcriptions");
-      assert.equal(init.body.get("url"), audioUrl);
-      assert.equal(init.body.get("file"), null);
-      return new Response(JSON.stringify({
+      assert.equal(url, "https://generativelanguage.googleapis.com/v1beta/interactions");
+      const request = JSON.parse(init.body);
+      assert.equal(request.input[0].uri, youtubeUrl);
+      return new Response(JSON.stringify({ outputText: JSON.stringify({
         language: "en",
-        duration: 9,
-        segments: [{ start: 0, end: 9, text: "YouTube fast path transcript" }],
-      }), { status: 200, headers: { "content-type": "application/json" } });
+        segments: [{ start: "00:00", end: "00:09", speaker: "Speaker", text: "YouTube fast path transcript" }],
+      }) }), { status: 200, headers: { "content-type": "application/json" } });
     },
     getTargetTab: async () => ({ id: 23, title: "YouTube", url: youtubeUrl }),
     storageKey: "analyses",
@@ -1715,11 +1948,12 @@ test("uses the extracted YouTube audio URL without contacting a backend", async 
     groqApiKey: "test-groq-key",
     args: { action: "transcript" },
   });
-  assert.equal(result.groqInputMethod, "audio_url");
+  assert.equal(result.groqAttempted, false);
+  assert.equal(result.groqInputMethod, null);
   assert.match(result.transcript, /YouTube fast path transcript/);
 });
 
-test("downloads a small YouTube audio file inside the extension when Groq rejects its URL", async () => {
+test("does not download YouTube audio before direct Gemini URL transcription", async () => {
   const storage = createMemoryStorage();
   const youtubeUrl = "https://www.youtube.com/watch?v=extension-upload";
   const audioUrl = "https://rr.example.googlevideo.com/videoplayback?id=extension-upload&expire=9999999999";
@@ -1746,27 +1980,13 @@ test("downloads a small YouTube audio file inside the extension when Groq reject
       storage: { local: storage.area },
     },
     fetchImpl: async (url, init = {}) => {
-      if (url === audioUrl) {
-        assert.equal(init.credentials, "include");
-        return new Response(new Uint8Array([1, 2, 3, 4]), {
-          status: 200,
-          headers: { "content-type": "audio/webm", "content-length": "4" },
-        });
-      }
-      assert.equal(url, "https://api.groq.com/openai/v1/audio/transcriptions");
-      groqRequests += 1;
-      if (init.body.get("url")) {
-        return new Response(JSON.stringify({ error: { message: "URL fetch failed" } }), {
-          status: 400,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      assert.ok(init.body.get("file") instanceof Blob);
-      return new Response(JSON.stringify({
+      assert.equal(url, "https://generativelanguage.googleapis.com/v1beta/interactions");
+      const request = JSON.parse(init.body);
+      assert.equal(request.input[0].uri, youtubeUrl);
+      return new Response(JSON.stringify({ outputText: JSON.stringify({
         language: "en",
-        duration: 7,
-        segments: [{ start: 0, end: 7, text: "Extension file upload transcript" }],
-      }), { status: 200, headers: { "content-type": "application/json" } });
+        segments: [{ start: "00:00", end: "00:07", speaker: "Speaker", text: "Direct Gemini transcript" }],
+      }) }), { status: 200, headers: { "content-type": "application/json" } });
     },
     getTargetTab: async () => ({ id: 24, title: "YouTube", url: youtubeUrl }),
     storageKey: "analyses",
@@ -1776,12 +1996,13 @@ test("downloads a small YouTube audio file inside the extension when Groq reject
     groqApiKey: "test-groq-key",
     args: { action: "transcript" },
   });
-  assert.equal(groqRequests, 2);
-  assert.equal(result.groqInputMethod, "audio_file");
-  assert.match(result.transcript, /Extension file upload transcript/);
+  assert.equal(groqRequests, 0);
+  assert.equal(result.groqAttempted, false);
+  assert.equal(result.groqInputMethod, null);
+  assert.match(result.transcript, /Direct Gemini transcript/);
 });
 
-test("falls back to the public Gemini URL when Groq cannot read oversized YouTube audio", async () => {
+test("uses the public Gemini URL without probing oversized YouTube audio", async () => {
   const storage = createMemoryStorage();
   const youtubeUrl = "https://www.youtube.com/watch?v=chunked-audio";
   const audioUrl = "https://googlevideo.example/audio.webm?expire=9999999999";
@@ -1841,13 +2062,12 @@ test("falls back to the public Gemini URL when Groq cannot read oversized YouTub
     args: { action: "transcript" },
   });
   assert.deepEqual(requestedUrls, [
-    "https://api.groq.com/openai/v1/audio/transcriptions",
     "https://generativelanguage.googleapis.com/v1beta/interactions",
   ]);
   assert.equal(result.sourceMethod, "youtube_url");
-  assert.equal(result.groqAttempted, true);
-  assert.equal(result.groqFallbackUsed, true);
-  assert.match(result.groqFallbackReason, /larger than 19\.5 MB/i);
+  assert.equal(result.groqAttempted, false);
+  assert.equal(result.groqFallbackUsed, false);
+  assert.equal(result.groqFallbackReason, "");
   assert.match(result.transcript, /Gemini fallback conclusion/);
 });
 
@@ -1905,7 +2125,7 @@ test("builds a summary from complete page captions before calling Groq", async (
   assert.deepEqual(requests, ["https://generativelanguage.googleapis.com/v1beta/interactions"]);
   assert.equal(result.sourceMethod, "html_text_track");
   assert.equal(result.transcriptModel, null);
-  assert.match(storage.state.analyses[0].transcript, /Authoritative page caption/);
+  assert.equal(storage.state.analyses, undefined);
 });
 
 test("falls back to Gemini transcription only after both Groq Whisper models are limited", async () => {
@@ -1997,6 +2217,152 @@ test("gives the Live agent only the complete timestamped summary presentation", 
   assert.equal(Object.hasOwn(result, "summaryMarkdown"), false);
   assert.equal(Object.hasOwn(result, "chapters"), false);
   assert.equal(Object.hasOwn(result, "transcriptDownload"), false);
+});
+
+test("binds Facebook media to the visible playing Reel when the SPA address bar is stale", async () => {
+  const previousDocument = globalThis.document;
+  const previousLocation = globalThis.location;
+  const previousPerformance = globalThis.performance;
+  const previousHtmlMediaElement = globalThis.HTMLMediaElement;
+  try {
+    const staleId = "1111111111111111";
+    const activeId = "2222222222222222";
+    const activeAudioUrl = "https://scontent.example.fbcdn.net/o1/v/active-audio.mp4?token=active";
+    const manifestXml = `<MPD><Period><AdaptationSet><Representation id="audio" mimeType="audio/mp4"><BaseURL>${activeAudioUrl}</BaseURL></Representation></AdaptationSet></Period></MPD>`;
+    const pageData = JSON.stringify({ video: { id: activeId, dash_manifest: manifestXml } });
+    const makePlayer = ({ id, paused, rect }) => ({
+      attributes: [{ name: "data-video-id", value: id }],
+      parentElement: null,
+      readyState: 4,
+      paused,
+      ended: false,
+      duration: 30,
+      currentTime: 2,
+      currentSrc: `blob:https://www.facebook.com/${id}`,
+      src: "",
+      poster: "",
+      textTracks: [],
+      tagName: "VIDEO",
+      getBoundingClientRect() { return rect; },
+      getAttribute() { return ""; },
+      querySelectorAll() { return []; },
+    });
+    const stalePlayer = makePlayer({
+      id: staleId,
+      paused: true,
+      rect: { top: -900, right: 540, bottom: -100, left: 0, width: 540, height: 800 },
+    });
+    const activePlayer = makePlayer({
+      id: activeId,
+      paused: false,
+      rect: { top: 0, right: 540, bottom: 900, left: 0, width: 540, height: 900 },
+    });
+    globalThis.document = {
+      title: "Facebook Reels",
+      documentElement: { clientWidth: 1200, clientHeight: 900 },
+      querySelectorAll(selector) {
+        if (selector === "video, audio") return [stalePlayer, activePlayer];
+        if (selector.startsWith("script[")) return [{ textContent: pageData }];
+        return [];
+      },
+      querySelector() { return null; },
+    };
+    globalThis.location = {
+      href: `https://www.facebook.com/reel/${staleId}`,
+      origin: "https://www.facebook.com",
+      hostname: "www.facebook.com",
+      pathname: `/reel/${staleId}`,
+    };
+    globalThis.performance = { getEntriesByType() { return []; } };
+    globalThis.HTMLMediaElement = { HAVE_METADATA: 1 };
+    const source = await collectVideoAnalysisSourceInPage();
+    assert.equal(source.pageFacebookVideoId, staleId);
+    assert.equal(source.selectedElementFacebookVideoId, activeId);
+    assert.equal(source.facebookVideoId, activeId);
+    assert.equal(source.facebookPlayerIdentityMismatch, true);
+    assert.equal(source.mediaCandidates.find((candidate) => candidate.mimeType === "audio/mp4")?.url, activeAudioUrl);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+    if (previousLocation === undefined) delete globalThis.location;
+    else globalThis.location = previousLocation;
+    if (previousPerformance === undefined) delete globalThis.performance;
+    else globalThis.performance = previousPerformance;
+    if (previousHtmlMediaElement === undefined) delete globalThis.HTMLMediaElement;
+    else globalThis.HTMLMediaElement = previousHtmlMediaElement;
+  }
+});
+
+test("probes the exact Facebook permalink when the scrolling feed has no bound audio", async () => {
+  const previousDocument = globalThis.document;
+  const previousLocation = globalThis.location;
+  const previousPerformance = globalThis.performance;
+  const previousHtmlMediaElement = globalThis.HTMLMediaElement;
+  const previousDomParser = globalThis.DOMParser;
+  const previousFetch = globalThis.fetch;
+  try {
+    const targetId = "3333333333333333";
+    const audioUrl = "https://scontent.example.fbcdn.net/o1/v/permalink-audio.mp4?token=exact";
+    const manifestXml = `<MPD><Period><AdaptationSet><Representation id="audio" mimeType="audio/mp4"><BaseURL>${audioUrl}</BaseURL></Representation></AdaptationSet></Period></MPD>`;
+    const permalinkPayload = JSON.stringify({ payload: { video: { id: targetId, dash_manifest: manifestXml } } });
+    globalThis.document = {
+      title: "Facebook Reels",
+      querySelectorAll() { return []; },
+      querySelector() { return null; },
+    };
+    globalThis.location = {
+      href: "https://www.facebook.com/reels/",
+      origin: "https://www.facebook.com",
+      hostname: "www.facebook.com",
+      pathname: "/reels/",
+    };
+    globalThis.performance = { getEntriesByType() { return []; } };
+    globalThis.HTMLMediaElement = { HAVE_METADATA: 1 };
+    globalThis.DOMParser = class {
+      parseFromString() {
+        return { querySelectorAll() { return [{ textContent: permalinkPayload }]; } };
+      }
+    };
+    globalThis.fetch = async (url, init) => {
+      assert.equal(url, `https://www.facebook.com/reel/${targetId}/`);
+      assert.equal(init.credentials, "include");
+      return new Response("<html></html>", { status: 200 });
+    };
+    const source = await collectVideoAnalysisSourceInPage(targetId);
+    assert.equal(source.facebookVideoId, targetId);
+    assert.equal(source.facebookPermalinkProbeUsed, true);
+    assert.equal(source.pageUrl, `https://www.facebook.com/reel/${targetId}/`);
+    const audio = source.mediaCandidates.find((candidate) => candidate.mimeType === "audio/mp4");
+    assert.equal(audio?.url, audioUrl);
+    assert.equal(audio?.origin, "facebook_permalink_dash_manifest");
+    assert.equal(audio?.identityEvidence, "facebook_permalink_payload");
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+    if (previousLocation === undefined) delete globalThis.location;
+    else globalThis.location = previousLocation;
+    if (previousPerformance === undefined) delete globalThis.performance;
+    else globalThis.performance = previousPerformance;
+    if (previousHtmlMediaElement === undefined) delete globalThis.HTMLMediaElement;
+    else globalThis.HTMLMediaElement = previousHtmlMediaElement;
+    if (previousDomParser === undefined) delete globalThis.DOMParser;
+    else globalThis.DOMParser = previousDomParser;
+    if (previousFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = previousFetch;
+  }
+});
+
+test("keeps the full transcript out of agent and task-history state", () => {
+  const result = prepareVideoAnalysisAgentResult({
+    success: true,
+    transcript: "[00:00 - 00:10] Complete private transcript payload",
+    transcriptDownload: { text: "Complete private transcript payload" },
+    transcriptCharacterCount: 43,
+  }, { action: "transcript" });
+  assert.equal(result.transcriptAvailable, true);
+  assert.equal(Object.hasOwn(result, "transcript"), false);
+  assert.equal(Object.hasOwn(result, "transcriptDownload"), false);
+  assert.match(result.presentationInstruction, /Download transcript card/i);
 });
 
 test("immediately fails over on temporary model capacity errors but retries 3.5 on a new prompt", async () => {
@@ -2134,6 +2500,62 @@ test("reports an error only after both video models are unavailable", async () =
     },
   );
   assert.deepEqual(requestedModels, VIDEO_ANALYSIS_MODELS);
+});
+
+test("isolates a supplied Facebook URL in a temporary background tab when the active tab is unrelated", async () => {
+  const storage = createMemoryStorage();
+  const targetId = "5555555555555555";
+  const audioUrl = "https://scontent.fbcdn.net/o1/v/isolated-audio.mp4?token=signed";
+  const createdTabs = [];
+  const removedTabs = [];
+  const service = createVideoAnalysisService({
+    chromeApi: {
+      scripting: {
+        async executeScript({ target }) {
+          assert.equal(target.tabId, 91);
+          return [{ frameId: 0, result: {
+            found: true,
+            pageTitle: "Isolated Facebook Reel",
+            pageUrl: `https://www.facebook.com/reel/${targetId}`,
+            facebookVideoId: targetId,
+            facebookMediaIdentityVerified: true,
+            captionTracks: [],
+            mediaCandidates: [{
+              url: audioUrl,
+              origin: "facebook_permalink_dash_manifest",
+              mimeType: "audio/mp4",
+              facebookVideoId: targetId,
+              identityVerified: true,
+            }],
+          } }];
+        },
+      },
+      storage: { local: storage.area },
+      tabs: {
+        async create(properties) {
+          createdTabs.push(properties);
+          return {
+            id: 91,
+            status: "complete",
+            title: "Isolated Facebook Reel",
+            url: properties.url,
+          };
+        },
+        async remove(tabId) { removedTabs.push(tabId); },
+      },
+    },
+    fetchImpl: async () => { throw new Error("An audio-link request must not download media."); },
+    getTargetTab: async () => ({ id: 10, title: "Unrelated", url: "https://example.com/" }),
+    storageKey: "analyses",
+  });
+  const result = await service.analyze({
+    args: { action: "audio", url: `https://www.facebook.com/reel/${targetId}` },
+  });
+  assert.deepEqual(createdTabs, [{ url: `https://www.facebook.com/reel/${targetId}`, active: false }]);
+  assert.deepEqual(removedTabs, [91]);
+  assert.equal(result.sourcePageOpened, true);
+  assert.equal(result.sourcePageClosedAfterAnalysis, true);
+  assert.equal(result.audioUrl, audioUrl);
 });
 
 test("retries the active Facebook Reel in place without creating or reloading a tab", async () => {
@@ -2459,7 +2881,99 @@ test("retries Facebook source discovery while a newly selected Reel is settling"
   assert.equal(result.summary, "Reel overview.");
   assert.equal(result.transcriptDownload, null);
   assert.equal(Object.hasOwn(result, "transcript"), false);
-  assert.equal(storage.state.analyses[0].transcript, "");
+  assert.equal(storage.state.analyses, undefined);
+});
+
+test("requires two observations of the same Facebook player before accepting its audio", async () => {
+  const storage = createMemoryStorage();
+  const targetId = "4444444444444444";
+  const staleAudioUrl = "https://scontent.fbcdn.net/o1/v/stale-player-audio.mp4";
+  const stableAudioUrl = "https://scontent.fbcdn.net/o1/v/stable-player-audio.mp4";
+  let sourceAttempts = 0;
+  const service = createVideoAnalysisService({
+    chromeApi: {
+      scripting: {
+        async executeScript() {
+          sourceAttempts += 1;
+          const stablePlayer = sourceAttempts > 1;
+          return [{ frameId: 0, result: {
+            found: true,
+            pageTitle: "Facebook Reel",
+            pageUrl: `https://www.facebook.com/reel/${targetId}`,
+            facebookVideoId: targetId,
+            activePlayerToken: stablePlayer ? "player-b" : "player-a",
+            facebookMediaIdentityVerified: true,
+            captionTracks: [],
+            mediaCandidates: [{
+              url: stablePlayer ? stableAudioUrl : staleAudioUrl,
+              origin: "facebook_dash_manifest",
+              mimeType: "audio/mp4",
+              facebookVideoId: targetId,
+              identityVerified: true,
+            }],
+          } }];
+        },
+      },
+      storage: { local: storage.area },
+    },
+    fetchImpl: async () => { throw new Error("An audio-link request must not download the candidate."); },
+    getTargetTab: async () => ({
+      id: 22,
+      title: "Facebook Reel",
+      url: `https://www.facebook.com/reel/${targetId}`,
+    }),
+    storageKey: "analyses",
+  });
+  const result = await service.analyze({ args: { action: "audio" } });
+  assert.equal(sourceAttempts, 3);
+  assert.equal(result.audioUrl, stableAudioUrl);
+});
+
+test("accepts exact Facebook prefetch audio on the first source scan", async () => {
+  const storage = createMemoryStorage();
+  const targetId = "7777777777777777";
+  const exactAudioUrl = "https://scontent.fbcdn.net/o1/v/exact-prefetch-audio.mp4?token=signed";
+  let sourceAttempts = 0;
+  const service = createVideoAnalysisService({
+    chromeApi: {
+      scripting: {
+        async executeScript() {
+          sourceAttempts += 1;
+          return [{ frameId: 0, result: {
+            found: true,
+            pageTitle: "Facebook Reel",
+            pageUrl: `https://www.facebook.com/reel/${targetId}`,
+            facebookVideoId: targetId,
+            selectedElementFacebookVideoId: targetId,
+            activePlayerToken: `video:${targetId}`,
+            facebookMediaIdentityVerified: true,
+            captionTracks: [],
+            mediaCandidates: [{
+              url: exactAudioUrl,
+              origin: "facebook_dash_prefetch_representation",
+              mimeType: "audio/mp4",
+              facebookVideoId: targetId,
+              identityVerified: true,
+              identityEvidence: "facebook_video_id_prefetch",
+            }],
+          } }];
+        },
+      },
+      storage: { local: storage.area },
+    },
+    fetchImpl: async () => { throw new Error("An audio-link request must not download the candidate."); },
+    getTargetTab: async () => ({
+      id: 23,
+      title: "Facebook Reel",
+      url: `https://www.facebook.com/reel/${targetId}`,
+    }),
+    storageKey: "analyses",
+  });
+  const result = await service.analyze({
+    args: { action: "audio", url: `https://www.facebook.com/reel/${targetId}` },
+  });
+  assert.equal(sourceAttempts, 1);
+  assert.equal(result.audioUrl, exactAudioUrl);
 });
 
 test("remuxes a small Facebook MP4 audio container to inline AAC for Gemini", async () => {
@@ -2560,17 +3074,13 @@ test("remuxes a small Facebook MP4 audio container to inline AAC for Gemini", as
   assert.equal(result.sourceMethod, "inline_media");
   assert.equal(result.facebookVideoId, "1554671672755534");
   assert.equal(result.mediaIdentityVerified, true);
-  assert.equal(result.transcriptReused, false);
+  assert.equal(Object.hasOwn(result, "transcriptReused"), false);
   assert.equal(result.uploadedMediaDeleted, false);
   assert.match(result.transcript, /Xin chào/);
   assert.equal(calls.filter((call) => call.url.endsWith("/interactions")).length, 1);
   assert.equal(calls.some((call) => call.url.includes("/upload/v1beta/files")), false);
   assert.equal(storage.state.analyses.length, 1);
-  assert.equal(storage.state.analyses[0].mediaIdentityVerified, true);
-  assert.equal(storage.state.analyses[0].facebookVideoId, "1554671672755534");
-  assert.equal(storage.state.analyses[0].videoIdentity, "facebook:1554671672755534");
-  assert.equal(storage.state.analyses[0].pageUrl, "https://www.facebook.com/reel/1554671672755534");
-  assert.doesNotMatch(storage.state.analyses[0].transcript, /Wrong Reel/);
+  assert.match(storage.state.analyses[0].transcript, /Wrong Reel/);
 });
 
 test("stops when the Facebook player Reel ID disagrees with the active tab", async () => {
@@ -2818,86 +3328,86 @@ part-2.m4s
   assert.ok(requestedUrls.includes("https://cdn.example/course/audio/part-2.m4s"));
 });
 
-test("reuses a locally stored transcript for focused follow-up inspection", async () => {
-  const storage = createMemoryStorage();
-  storage.state.analyses = [{
-    id: "analysis-1",
-    createdAt: Date.now(),
-    pageTitle: "Stored video",
-    pageUrl: "https://example.com/watch?id=1",
-    transcript: [
-      "Stored video",
-      "Source: https://example.com/watch?id=1",
-      "",
-      "[00:00 - 00:30] Introduction",
-      "[04:10 - 04:40] The central claim",
-      "[04:40 - 05:05] Supporting evidence",
-    ].join("\n"),
-  }];
-  const requests = [];
-  const chromeApi = {
-    scripting: { async executeScript() { throw new Error("inspect should not scan media again"); } },
-    storage: { local: storage.area },
-  };
+test("waits for an aborted video request to finish before accepting new work", async () => {
+  const youtubeUrl = "https://www.youtube.com/watch?v=cancel-cleanly";
+  let interactionCount = 0;
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
   const service = createVideoAnalysisService({
-    chromeApi,
-    fetchImpl: async (_url, init) => {
-      requests.push(JSON.parse(init.body));
-      return new Response(JSON.stringify({
-        outputText: JSON.stringify({
-          answer: "The central claim is supported by the following evidence.",
-          citedSegments: [{ start: "04:10", end: "05:05", evidence: "Claim and evidence" }],
-        }),
-      }), { status: 200, headers: { "content-type": "application/json" } });
+    chromeApi: {
+      scripting: {
+        async executeScript() {
+          return [{ result: {
+            found: true,
+            pageTitle: "Cancellation test",
+            pageUrl: youtubeUrl,
+            durationSeconds: 5,
+            captionTracks: [],
+            mediaCandidates: [],
+          } }];
+        },
+      },
     },
-    getTargetTab: async () => ({ id: 9, title: "Stored video", url: "https://example.com/watch?id=1" }),
-    storageKey: "analyses",
+    fetchImpl: async (_url, init = {}) => {
+      interactionCount += 1;
+      if (interactionCount === 1) {
+        markStarted();
+        return new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => {
+            reject(new DOMException("cancelled", "AbortError"));
+          }, { once: true });
+        });
+      }
+      return new Response(JSON.stringify({ outputText: JSON.stringify({
+        language: "en",
+        segments: [{ start: "00:00", end: "00:05", speaker: "Speaker", text: "Fresh request" }],
+      }) }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+    getTargetTab: async () => ({ id: 90, title: "Cancellation test", url: youtubeUrl }),
   });
-  const result = await service.analyze({
+
+  const running = service.analyze({
     apiKey: "test-key",
-    args: {
-      action: "inspect",
-      startTime: "04:10",
-      endTime: "05:05",
-      question: "What is the evidence?",
-    },
+    args: { action: "transcript", url: youtubeUrl },
   });
-  assert.equal(result.analysisId, "analysis-1");
-  assert.equal(result.sourceMethod, "stored_transcript");
-  assert.match(result.answer, /central claim/i);
-  assert.match(requests[0].input[0].text, /The central claim/);
-  assert.doesNotMatch(requests[0].input[0].text, /Introduction/);
+  await started;
+  assert.deepEqual(await service.cancelActive(), { cancelled: true });
+  await assert.rejects(running, { name: "AbortError" });
+
+  const fresh = await service.analyze({
+    apiKey: "test-key",
+    args: { action: "transcript", url: youtubeUrl },
+  });
+  assert.match(fresh.transcript, /Fresh request/);
 });
 
 test("publishes the built-in video tool and its routing guidance", () => {
-  const tool = BUILTIN_TOOLS.find((candidate) => candidate.name === VIDEO_ANALYZE_TOOL_NAME);
-  assert.ok(tool);
-  assert.deepEqual(tool.parameters.properties.action.enum, ["audio", "summary", "transcript", "both", "inspect"]);
-  assert.equal(tool.parameters.properties.sourceUrl.type, "STRING");
-  assert.equal(tool.parameters.properties.audioUrl.type, "STRING");
-  assert.match(tool.parameters.properties.sourceUrl.description, /never opened automatically/i);
+  const transcriptTool = BUILTIN_TOOLS.find((candidate) => candidate.name === GET_TRANSCRIPT_TOOL_NAME);
+  const summaryTool = BUILTIN_TOOLS.find((candidate) => candidate.name === VIDEO_SUMMARY_TOOL_NAME);
+  assert.ok(transcriptTool);
+  assert.ok(summaryTool);
+  assert.deepEqual(transcriptTool.parameters.required, ["url"]);
+  assert.deepEqual(summaryTool.parameters.required, ["url"]);
+  assert.equal(transcriptTool.parameters.properties.url.type, "STRING");
+  assert.equal(summaryTool.parameters.properties.url.type, "STRING");
+  assert.equal(transcriptTool.parameters.properties.action, undefined);
+  assert.equal(summaryTool.parameters.properties.action, undefined);
+  assert.equal(classifyVideoSourceUrl("https://youtu.be/video-id"), "youtube");
+  assert.equal(classifyVideoSourceUrl("https://www.facebook.com/reel/123"), "facebook");
+  assert.equal(classifyVideoSourceUrl("https://www.udemy.com/course/demo/learn/lecture/456"), "udemy");
+  assert.equal(classifyVideoSourceUrl("https://example.com/video"), "unsupported");
   const instruction = buildSessionInstruction();
-  assert.match(instruction, /summarize a video or get its transcript/i);
-  assert.match(instruction, /downloadable timestamped transcript/i);
+  assert.match(instruction, /call get_transcript/i);
+  assert.match(instruction, /call video_summary/i);
   assert.match(instruction, /Gemini 3\.5 Flash-Lite/i);
   assert.match(instruction, /Gemini 3\.1 Flash-Lite/i);
   assert.match(instruction, /high-demand, or temporary-capacity errors/i);
-  assert.match(instruction, /first reuse a complete stored transcript/i);
-  assert.match(instruction, /exact existing captions or subtitles/i);
-  assert.match(instruction, /19\.5 MB/i);
+  assert.match(instruction, /caption or subtitle track/i);
+  assert.match(instruction, /Do not reuse a transcript/i);
   assert.match(instruction, /whisper-large-v3-turbo first/i);
-  assert.match(instruction, /immediately tries whisper-large-v3/i);
-  assert.match(instruction, /summary sends the complete chosen timestamped transcript/i);
-  assert.match(instruction, /action=inspect/i);
-  assert.match(instruction, /copy the complete link into sourceUrl/i);
-  assert.match(instruction, /Never open an audio URL automatically/i);
-  assert.match(instruction, /extension upload a file/i);
-  assert.match(instruction, /inspect only the prompt-locked active Agent Space tab/i);
-  assert.match(instruction, /Never create, switch to, reload, or close a duplicate Facebook tab/i);
-  assert.match(instruction, /retry media discovery in the same tab/i);
-  assert.match(instruction, /public YouTube watch URL directly to Gemini/i);
-  assert.match(instruction, /If no Groq key is configured, skip Groq completely/i);
-  assert.match(instruction, /Never call a Lumi backend or loopback helper/i);
-  assert.match(instruction, /retry it inside the exact player frame/i);
-  assert.match(instruction, /action=audio/i);
+  assert.match(instruction, /whisper-large-v3 second/i);
+  assert.match(instruction, /YouTube.*public watch URL directly to Gemini/is);
+  assert.match(instruction, /Groq is only a speed optimization/i);
+  assert.match(instruction, /summarize it directly in one pass/i);
+  assert.match(instruction, /authenticated player frame/i);
 });

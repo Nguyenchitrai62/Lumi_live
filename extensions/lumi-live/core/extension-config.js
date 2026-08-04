@@ -5,6 +5,7 @@ export const EXTENSION_EVENTS = Object.freeze({
   request: "lumi_live_request",
   targetChanged: "lumi_live_target_changed",
   translationState: "lumi_live_translation_state",
+  videoAnalysisProgress: "lumi_live_video_analysis_progress",
 });
 
 export const STORAGE_KEYS = Object.freeze({
@@ -28,6 +29,5 @@ export const STORAGE_KEYS = Object.freeze({
   microphoneGrantedAt: "lumiMicrophoneGrantedAt",
   targetTabId: "lumiLiveTargetTabId",
   thinkingLevel: "lumiGeminiThinkingLevel",
-  videoAnalyses: "lumiVideoAnalyses",
   voice: "lumiGeminiVoice",
 });

@@ -50,6 +50,8 @@ test("wires IndexedDB snapshots into full transcript replay and local-only stora
   assert.ok(manifest.permissions.includes("unlimitedStorage"));
   assert.match(panelController, /createLocalChatSnapshotStore/);
   assert.match(panelController, /transcriptHtml:\s*createTranscriptSnapshotHtml\(\)/);
+  assert.match(panelController, /data-transient-video-transcript/);
+  assert.match(panelController, /transientTranscript\.remove\(\)/);
   assert.match(panelController, /taskHistory:\s*taskOrchestrator\.history/);
   assert.match(panelController, /restoreActiveChatSessionSnapshot/);
   assert.match(panelController, /attachRestoredTranscriptDisclosures/);

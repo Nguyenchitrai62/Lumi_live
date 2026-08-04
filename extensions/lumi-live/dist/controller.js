@@ -4599,7 +4599,8 @@ ${clippedAnchor.content}`);
     lifecycle: "lumi_live_lifecycle",
     request: "lumi_live_request",
     targetChanged: "lumi_live_target_changed",
-    translationState: "lumi_live_translation_state"
+    translationState: "lumi_live_translation_state",
+    videoAnalysisProgress: "lumi_live_video_analysis_progress"
   });
   var STORAGE_KEYS = Object.freeze({
     apiKey: "lumiGeminiApiKey",
@@ -4622,7 +4623,6 @@ ${clippedAnchor.content}`);
     microphoneGrantedAt: "lumiMicrophoneGrantedAt",
     targetTabId: "lumiLiveTargetTabId",
     thinkingLevel: "lumiGeminiThinkingLevel",
-    videoAnalyses: "lumiVideoAnalyses",
     voice: "lumiGeminiVoice"
   });
 

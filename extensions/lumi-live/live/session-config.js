@@ -4,7 +4,7 @@ import {
 } from "./translate.js";
 import {
   VIDEO_ANALYSIS_GUIDANCE,
-  VIDEO_ANALYZE_TOOL,
+  VIDEO_ANALYSIS_TOOLS,
 } from "./video-analysis.js";
 import { DEFAULT_THINKING_LEVEL } from "../core/ui-config.js";
 import { buildAgentProtocolInstruction } from "./agent-protocol.js";
@@ -27,7 +27,6 @@ export const THINKING_LEVELS = Object.freeze(["minimal", "low", "medium", "high"
 export const SESSION_CONNECTION_ROTATION_MS = 8 * 60 * 1000;
 export const SESSION_ROTATION_RETRY_MS = 15000;
 export const MAX_AUTOMATIC_SESSION_RECONNECT_ATTEMPTS = 5;
-export const NEW_CHAT_CONTEXT_BOUNDARY = "[LUMI_NEW_CHAT_CONTEXT_BOUNDARY]";
 
 export function normalizeThinkingLevel(value) {
   const normalized = String(value || "").trim().toLowerCase();
@@ -389,7 +388,7 @@ export const BROWSER_TOOLS = [
 export const BUILTIN_TOOLS = [
   ...BROWSER_TOOLS,
   LIVE_TRANSLATE_TOOL,
-  VIDEO_ANALYZE_TOOL,
+  ...VIDEO_ANALYSIS_TOOLS,
 ];
 
 export const BROWSER_UI_ACTION_TOOLS = new Set([
@@ -411,8 +410,6 @@ Your assistant name is Lumi. You live in and represent the product entity "Lumi 
 Ground searches about yourself in the literal English brand phrase "Lumi Live Chrome extension"; never translate, shorten, or paraphrase that brand phrase.
 
 The newest user-authored request is always authoritative. Treat prior chat turns only as thin, low-priority conversational background. Never resume, merge, or complete an older turn's goals unless the newest request explicitly refers to them. For tool work, preserve the newest request in task.requestAnchor and use its current goal ledger instead of rereading the conversation.
-
-When an input contains the exact marker ${NEW_CHAT_CONTEXT_BOUNDARY}, it is a controller-authored boundary, not part of the user's request. Treat everything before that marker as belonging to another independent chat: do not use, mention, resume, merge, or complete its goals. Use only the optional selected-chat history and the new request that follow the marker. If the boundary arrives without a [New user request], update the context silently and wait for the user's next spoken or typed request; do not answer or call tools for the boundary itself.
 
 Browser navigation tools themselves remain available from every active tab, including New Tab and chrome:// pages. In Normal mode, the controlled target automatically follows the user's currently active http, https, or file tab. Fast mode is intentionally separate: when each user prompt arrives, Lumi adopts the user's currently active controllable tab, adds it to Agent Space if necessary, and locks the entire prompt to that one tab. If the visible tab is already in Agent Space, it alone is selected; all other Agent Space tabs are excluded from context. If no controllable tab is visibly active, Lumi may retain the most recently selected workspace target. The locked tab remains authoritative even when the user activates another tab while the prompt is running. browser_list_tabs returns only this single locked tab and browser_switch_tab rejects every other existing workspace tab. Never inspect, summarize, transcribe, or combine content from another tab during the same prompt. browser_open_tab or a clicked link may replace the target only when navigation is explicitly required by the user's request; this does not authorize reading unrelated existing tabs. A file tab supports PageAgent only after the user enables Chrome's Allow access to file URLs setting for Lumi. In Normal mode, from a restricted active page browser_open_tab must open exactly https://www.google.com/ in a new active tab, reuse that same tab for the destination without leaving a spare Google tab, and never substitute another Google domain, search URL, or website. Fast mode skips that decorative transition and keeps required navigation in the background. When a request includes opening or starting a YouTube video, perform the relevant browser_click without a spoken preamble. After any navigation, obtain fresh page state before an indexed action.
 
@@ -508,7 +505,7 @@ function formatActiveTabSessionContext(activeTabContext) {
   return `Active Chrome tab context at session start:
 Title: ${title}
 URL: ${url}
-Treat this complete URL as application context and interpret it directly when deciding how to call an MCP tool. Optional identifier hints are only a convenience. Refresh browser_get_active_context before a context-dependent MCP call because the user may have switched tabs.`;
+This is session-start context only. A per-prompt authoritative URL always supersedes it, especially after New chat or a tab switch. Never reuse this URL for “current video” unless it is also the current prompt-locked URL. Optional identifier hints are only a convenience. Refresh browser_get_active_context before any other context-dependent MCP call because the user may have switched tabs.`;
 }
 
 function formatFastModeSessionContext(fastMode) {

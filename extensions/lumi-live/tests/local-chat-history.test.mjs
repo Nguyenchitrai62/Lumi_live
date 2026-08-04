@@ -207,18 +207,55 @@ test("wires New chat, the saved-session dialog, switching, deletion, and clearin
   );
   assert.match(newChatSource, /findReusableBlankChatSession/);
   assert.match(newChatSource, /cancelConversationWorkForChatChange\(\)/);
+  assert.doesNotMatch(newChatSource, /force:\s*true/);
+  assert.match(newChatSource, /await chatChangeCancellationPromise/);
   assert.match(newChatSource, /clearConversationContext\(\)/);
-  assert.match(newChatSource, /isolateChatTransportAfterCancelledTurn\(cancelledInFlightTurn\)/);
+  assert.match(newChatSource, /preserveChatTransportForNewChat\(\)/);
   assert.doesNotMatch(
     newChatSource,
-    /stopSession|autoStartSessionIfReady|websocket(?:\?|)\.close|cleanupMedia/,
+    /stopSession|autoStartSessionIfReady|openGeminiSocket|websocket(?:\?|)\.close|cleanupMedia/,
   );
+  const preserveTransportSource = panelController.slice(
+    panelController.indexOf("function preserveChatTransportForNewChat"),
+    panelController.indexOf("function isolateChatContextAfterCancelledTurn"),
+  );
+  assert.match(preserveTransportSource, /websocket\?\.readyState === WebSocket\.OPEN/);
+  assert.doesNotMatch(
+    preserveTransportSource,
+    /openGeminiSocket|closePendingSessionHandoff|sessionResumptionHandle|websocket\s*=|\.close\(/,
+  );
+  assert.match(panelController, /Authoritative prompt URL/);
   assert.match(panelController, /restoreLocalChatHistory\(\)/);
-  assert.match(panelController, /pendingConversationBoundary = true/);
-  assert.match(panelController, /sendPendingConversationBoundary\(\)/);
-  assert.match(panelController, /function isolateChatTransportAfterCancelledTurn/);
-  assert.match(panelController, /allowInFlight:\s*true/);
-  assert.match(panelController, /discardOldContext:\s*true/);
+  assert.doesNotMatch(panelController, /NEW_CHAT_CONTEXT_BOUNDARY|pendingConversationBoundary/);
+  const cancelForChatChangeSource = panelController.slice(
+    panelController.indexOf("function cancelConversationWorkForChatChange"),
+    panelController.indexOf("function preserveChatTransportForNewChat"),
+  );
+  assert.match(
+    cancelForChatChangeSource,
+    /if \(!hadInFlightWork\) return false;[^]*suppressServerOutputUntilNextUserTurn = true/,
+  );
+  const clearContextSource = panelController.slice(
+    panelController.indexOf("function clearConversationContext"),
+    panelController.indexOf("function showConnectionNotice"),
+  );
+  assert.match(clearContextSource, /conversationHistory\.length = 0/);
+  assert.match(clearContextSource, /queuedUserMessages\.length = 0/);
+  assert.match(clearContextSource, /finishTurnWork\(\{ cancelled: true \}\)/);
+  assert.match(clearContextSource, /typedTurnInFlight = false/);
+  assert.match(clearContextSource, /suppressServerOutputUntilNextUserTurn = false/);
+  assert.match(clearContextSource, /cancelledTurnBoundarySeen = false/);
+  assert.match(clearContextSource, /freshUserInputStarted = false/);
+  assert.match(clearContextSource, /taskOrchestrator\.clear\(\)/);
+  assert.match(panelController, /function isolateChatContextAfterCancelledTurn/);
+  const isolateContextSource = panelController.slice(
+    panelController.indexOf("function isolateChatContextAfterCancelledTurn"),
+    panelController.indexOf("function clearConversationContext"),
+  );
+  assert.doesNotMatch(
+    isolateContextSource,
+    /openGeminiSocket|scheduleAutomaticSessionReconnect|websocket\s*=|\.close\(/,
+  );
   assert.match(panelController, /cancelledTurnBoundarySeen = false/);
   assert.match(panelController, /await chatHistoryStore\.clear\(\)/);
   assert.match(panelStyles, /\.chat-history-dialog/);

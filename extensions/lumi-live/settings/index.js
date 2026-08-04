@@ -140,8 +140,8 @@ async function saveSettings() {
   });
   elements.saveNote.dataset.state = "saved";
   elements.saveNote.textContent = groqApiKey
-    ? `Saved. Lumi will use complete video captions first, then Groq Whisper when audio transcription is needed; ${elements.voiceInput.value} remains Lumi's voice.`
-    : `Saved. Without a Groq key, Lumi will use complete video captions first and then Gemini 3.5 Flash-Lite; ${elements.voiceInput.value} remains Lumi's voice.`;
+    ? `Saved. Lumi uses exact captions first, direct Gemini for YouTube, and Groq as a Facebook/Udemy speedup; ${elements.voiceInput.value} remains Lumi's voice.`
+    : `Saved. Lumi uses exact captions first and Gemini Flash-Lite for media fallback; ${elements.voiceInput.value} remains Lumi's voice.`;
 }
 
 async function saveVisualPreference() {

@@ -93,7 +93,7 @@ export default function PrivacyPolicyPage() {
                   services, connected service addresses, permissions, and extension preferences.
                 </li>
                 <li>
-                  <strong>Local activity and history:</strong> chat sessions, transcripts,
+                  <strong>Local activity and history:</strong> chat sessions, conversation transcripts,
                   task steps, captured screenshots, recorded browser flows, and related
                   settings saved by the extension.
                 </li>
@@ -113,7 +113,7 @@ export default function PrivacyPolicyPage() {
               <ul>
                 <li>Respond to voice, text, and image requests.</li>
                 <li>Translate user-selected media audio.</li>
-                <li>Create requested video summaries, transcripts, downloads, and timestamp-based follow-up analysis.</li>
+                <li>Create requested video summaries and downloadable transcripts for the current request.</li>
                 <li>Understand page context and perform browser actions requested by the user.</li>
                 <li>Run tools through MCP services selected and configured by the user.</li>
                 <li>Restore local conversations, preferences, and recorded workflows.</li>
@@ -128,10 +128,11 @@ export default function PrivacyPolicyPage() {
               <h2>Local storage and retention</h2>
               <p>
                 Lumi Live stores extension data locally using Chrome extension storage and
-                IndexedDB. This can include credentials, settings, chat history, transcript
-                snapshots, the latest five video-analysis transcripts, screenshots, and
-                recorded flows. The developer does not receive or have access to this locally
-                stored information.
+                IndexedDB. This can include credentials, settings, chat history, conversation
+                snapshots, screenshots, and recorded flows. Video transcript payloads created
+                by the transcript tool are not retained in reusable chat/task history or a
+                video-analysis cache. The developer does not receive or have access to this
+                locally stored information.
               </p>
               <p>
                 Local information remains on the device until it is deleted through Lumi
@@ -165,12 +166,12 @@ export default function PrivacyPolicyPage() {
                   requests a transcript or video summary, a direct audio URL, a small audio
                   file downloaded by the extension is sent to Groq&apos;s Whisper speech-to-text API.
                   Whisper Large V3 Turbo is attempted first and Whisper Large V3 is attempted
-                  on rate limit. Gemini is the general transcription fallback when both Groq
-                  models are limited. If no Groq key is saved, Groq is skipped completely and
-                  Gemini 3.5 Flash-Lite is used after exact captions. For YouTube, the public
-                  watch URL may also be sent directly to Gemini when the site exposes UMP media,
-                  the signed audio URL is inaccessible, or the audio exceeds the extension upload
-                  limit. No Lumi backend or loopback helper is used for video analysis.
+                  when needed. For Facebook and Udemy, Groq is an optional speed optimization;
+                  if its key is missing or a request fails, Gemini processes the verified audio.
+                  A Facebook/Udemy summary is generated directly from that audio in one Gemini
+                  pass. For YouTube, the public watch URL is sent directly to Gemini after exact
+                  captions, without first extracting audio for Groq. No Lumi backend or loopback
+                  helper is used for video analysis.
                 </li>
                 <li>
                   <strong>User-configured MCP services:</strong> tool arguments and relevant

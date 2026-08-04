@@ -78,7 +78,10 @@ const recordedFlows = createRecordedFlowService({
 });
 const videoAnalysis = createVideoAnalysisService({
   chromeApi: chrome,
-  storageKey: STORAGE_KEYS.videoAnalyses,
+  onProgress: (progress) => chrome.runtime.sendMessage({
+    type: EXTENSION_EVENTS.videoAnalysisProgress,
+    ...progress,
+  }).catch(() => {}),
   getTargetTab: async () => {
     if (fastModeEnabled && Number.isInteger(fastPromptTargetTabId)) {
       const lockedTab = await chrome.tabs.get(fastPromptTargetTabId).catch(() => null);

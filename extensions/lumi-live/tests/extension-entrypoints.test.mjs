@@ -248,8 +248,7 @@ test("side panel exposes an upward thinking picker and sends it in Gemini Live s
     controller.indexOf("initialConnectionPromise = autoStartSessionIfReady()")
       < controller.indexOf("await avatarController.applyMode"),
   );
-  assert.match(controller, /NEW_CHAT_CONTEXT_BOUNDARY/);
-  assert.match(controller, /function sendPendingConversationBoundary\(\)/);
+  assert.doesNotMatch(controller, /NEW_CHAT_CONTEXT_BOUNDARY|pendingConversationBoundary/);
   const queueSource = controller.slice(
     controller.indexOf("function queueUserMessage"),
     controller.indexOf("function steerQueuedUserMessage"),
@@ -348,7 +347,7 @@ test("side panel keeps Lumi's layout while improving contrast and primary contro
   assert.match(controller, /function finishTurnWork\(/);
   assert.match(controller, /function createVideoSummaryPresentationMessage\(/);
   assert.match(controller, /directVideoPresentationTurnSequence === turnExecutionSequence/);
-  assert.match(controller, /prepareVideoAnalysisAgentResult\(result, args\)/);
+  assert.match(controller, /prepareVideoAnalysisAgentResult\(result, normalizedArgs\)/);
   assert.match(styles, /\.message \.message-meta/);
   assert.match(styles, /\.turn-work-status/);
   assert.match(styles, /@keyframes turn-work-dot/);
@@ -414,7 +413,7 @@ test("captures visual context only when the agent requests it and renders rich c
   );
   const failedMessageSendSource = controller.slice(
     controller.indexOf("if (!videoSent || !textSent)"),
-    controller.indexOf("if (boundaryPrompt) pendingConversationBoundary = false"),
+    controller.indexOf("activeTurnUserRequest = userRequestText"),
   );
   assert.doesNotMatch(failedMessageSendSource, /\.close\(|cleanupMedia\(/);
   const speechStartCallback = controller.match(
@@ -456,14 +455,15 @@ test("opens a requested website even when the current tab cannot host PageAgent"
   assert.doesNotMatch(openTabSource, /needs a controllable current page/);
 });
 
-test("keeps Facebook analysis in the prompt-locked active tab", async () => {
+test("reuses an authenticated Facebook tab or isolates the exact permalink in a background tab", async () => {
   const worker = await readFile(new URL("background/index.js", extensionRoot), "utf8");
   const analysis = await readFile(new URL("background/video-analysis-service.js", extensionRoot), "utf8");
   assert.doesNotMatch(worker, /openTemporaryAnalysisTab|closeTemporaryAnalysisTab/);
   assert.doesNotMatch(analysis, /createTemporaryFacebookTab|openFreshFacebookReelTab|reloadFreshFacebookTabOnce/);
   assert.match(analysis, /if \(isFacebookSource\)[\s\S]+lumiRequestedFacebookVideoId/);
-  assert.match(analysis, /retry the same locked tab instead of[\s\S]+collectSources\(tab\.id, discoveredFacebookVideoId, true\)/i);
-  assert.match(analysis, /sourcePageClosedAfterAnalysis:\s*false/);
+  assert.match(analysis, /openedFacebookTab[\s\S]+active:\s*false/);
+  assert.match(analysis, /retry the same locked tab instead of[\s\S]+collectSources\(tab\.id, discoveredFacebookVideoId, true, signal\)/i);
+  assert.match(analysis, /lumiCloseAfterAnalysis[\s\S]+chromeApi\.tabs\.remove/);
   assert.doesNotMatch(worker, /videoAudioHelperUrl|api\/video-audio|127\.0\.0\.1:3000/);
   assert.doesNotMatch(analysis, /transcribeYouTubeWithLocalHelper|normalizeVideoAudioHelperUrl/);
 });
@@ -492,7 +492,7 @@ test("settings ships OAuth and URL-key connectors, app icons, URL copy, and a te
   assert.match(html, /href="https:\/\/console\.groq\.com\/keys"[^>]*>Get key/);
   assert.doesNotMatch(html, /videoAudioHelperUrlInput|Local yt-dlp helper/i);
   assert.doesNotMatch(settingsController, /videoAudioHelperUrl|127\.0\.0\.1|api\/video-audio/);
-  assert.match(settingsController, /Without a Groq key[^`]+Gemini 3\.5 Flash-Lite/);
+  assert.match(settingsController, /exact captions first and Gemini Flash-Lite for media fallback/);
   assert.match(styles, /\.groq-field[^}]+grid-column:\s*1 \/ -1/);
   assert.match(html, /class="connection-field voice-field"/);
   assert.match(styles, /\.connection-fields[^}]+repeat\(2, minmax\(0, 1fr\)\)[^}]+gap:\s*14px/);

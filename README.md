@@ -30,7 +30,7 @@ Lumi includes two avatar models:
 - Visual activity feedback for conversations, browser actions, tool calls, results, and errors.
 - Voice, avatar, theme, scene, and outfit customization.
 - Optional live translation for supported audio and video workflows.
-- Fast video summaries from the current tab or a supplied YouTube/Facebook/Udemy link, with a verified audio URL shown behind an explicit side-panel button, timestamped transcripts, downloadable transcript files, and cached follow-up analysis.
+- URL-routed `get_transcript` and `video_summary` tools for YouTube, Facebook, and Udemy, with caption-first processing, optional Groq speedups for Facebook/Udemy, direct Gemini YouTube analysis, and transient downloadable transcripts that are not cached into chat history.
 
 ## Choose how to run Lumi
 
