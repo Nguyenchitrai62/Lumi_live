@@ -1826,6 +1826,14 @@ async function handleMessage(message) {
     broadcastFlowRecordingChanged(result.draft);
     return result;
   }
+  if (message.command === "flow_record_import_preview") {
+    return recordedFlows.previewImport(message.exportData);
+  }
+  if (message.command === "flow_record_import") {
+    const result = await recordedFlows.importFlows(message.exportData, message.resolutions);
+    broadcastFlowRecordingChanged();
+    return { ...result, draft: recordedFlows.snapshot() };
+  }
   if (message.command === "flow_record_open") {
     if (recordedFlows.snapshot()?.recording) {
       throw new Error("Stop the current recording before opening another flow.");

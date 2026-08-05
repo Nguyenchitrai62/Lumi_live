@@ -4,6 +4,8 @@ export const MAX_RECORDED_FLOW_STEPS = 100;
 export const MAX_RECORDED_STEP_PROMPT_CHARACTERS = 1200;
 export const RECORDED_STEP_GROUP_ACTION = "agent_group";
 export const RECORDED_FORM_BATCH_TYPE = "form_batch";
+export const RECORDED_FLOW_EXPORT_FORMAT = "lumi-recorded-flows";
+export const RECORDED_FLOW_EXPORT_VERSION = 1;
 
 const MAX_NAME_CHARACTERS = 120;
 const MAX_TARGET_TEXT_CHARACTERS = 240;
@@ -254,6 +256,45 @@ export function normalizeRecordedFlows(value) {
     })
     .sort((left, right) => right.updatedAt - left.updatedAt)
     .slice(0, MAX_RECORDED_FLOWS);
+}
+
+export function recordedFlowNameKey(value) {
+  return clipText(value, MAX_NAME_CHARACTERS).normalize("NFKC").toLowerCase();
+}
+
+export function createRecordedFlowsExport(value, { exportedAt = Date.now() } = {}) {
+  const flows = normalizeRecordedFlows(value);
+  if (!flows.length) throw new Error("Select at least one saved flow to export.");
+  return {
+    format: RECORDED_FLOW_EXPORT_FORMAT,
+    formatVersion: RECORDED_FLOW_EXPORT_VERSION,
+    exportedAt: new Date(normalizeTimestamp(exportedAt)).toISOString(),
+    flows,
+  };
+}
+
+export function parseRecordedFlowsImport(value) {
+  let source = value;
+  if (typeof source === "string") {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      throw new Error("The selected file is not valid JSON.");
+    }
+  }
+
+  if (!isObject(source) || source.format !== RECORDED_FLOW_EXPORT_FORMAT) {
+    throw new Error("This is not a Lumi recorded flows export file.");
+  }
+  if (Number(source.formatVersion) !== RECORDED_FLOW_EXPORT_VERSION) {
+    throw new Error("This recorded flows export version is not supported.");
+  }
+  if (!Array.isArray(source.flows)) {
+    throw new Error("The recorded flows export does not contain a flow list.");
+  }
+  const flows = normalizeRecordedFlows(source.flows);
+  if (!flows.length) throw new Error("The selected file does not contain any valid saved flows.");
+  return flows;
 }
 
 export function recordedStepTitle(step, index = 0) {

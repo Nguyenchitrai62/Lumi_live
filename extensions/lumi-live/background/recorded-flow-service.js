@@ -3,12 +3,24 @@ import {
   MAX_RECORDED_FLOWS,
   normalizeRecordedFlow,
   normalizeRecordedFlows,
+  parseRecordedFlowsImport,
+  recordedFlowNameKey,
 } from "../core/recorded-flows.js";
 
 function clone(value) {
   return value === null || value === undefined
     ? value
     : JSON.parse(JSON.stringify(value));
+}
+
+function uniqueImportedFlowId(usedIds) {
+  let id = "";
+  do {
+    const suffix = globalThis.crypto?.randomUUID?.()
+      || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    id = `flow-import-${suffix}`;
+  } while (usedIds.has(id));
+  return id;
 }
 
 function createDraft({ sessionId, tabId, startUrl, startTitle }) {
@@ -212,6 +224,91 @@ export function createRecordedFlowService({
     return normalizeRecordedFlows(stored[flowsStorageKey]);
   }
 
+  async function previewImport(value) {
+    const importedFlows = parseRecordedFlowsImport(value);
+    return {
+      importedFlows,
+      savedFlows: await list(),
+    };
+  }
+
+  async function importFlows(value, resolutions) {
+    const importedFlows = parseRecordedFlowsImport(value);
+    const currentFlows = await list();
+    const importedById = new Map(importedFlows.map((flow) => [flow.id, flow]));
+    const currentById = new Map(currentFlows.map((flow) => [flow.id, flow]));
+    const selectedResolutions = Array.isArray(resolutions) ? resolutions : [];
+    if (!selectedResolutions.length) throw new Error("Select at least one reviewed flow to import.");
+
+    const usedImportedIds = new Set();
+    const usedFlowIds = new Set(currentById.keys());
+    const occupiedNames = new Set(currentFlows.map((flow) => recordedFlowNameKey(flow.name)));
+    const overwrittenFlowIds = new Set();
+    const selectedFlows = [];
+    let addedCount = 0;
+    let updatedCount = 0;
+
+    for (const resolution of selectedResolutions) {
+      const importedFlowId = String(resolution?.flowId || "");
+      const importedFlow = importedById.get(importedFlowId);
+      if (!importedFlow || usedImportedIds.has(importedFlowId)) {
+        throw new Error("The import review contains an invalid or duplicate flow selection.");
+      }
+      usedImportedIds.add(importedFlowId);
+
+      if (resolution.action === "overwrite") {
+        const existingFlow = currentById.get(String(resolution.existingFlowId || ""));
+        if (!existingFlow || overwrittenFlowIds.has(existingFlow.id)) {
+          throw new Error("Choose a valid saved flow to overwrite for every name conflict.");
+        }
+        if (recordedFlowNameKey(existingFlow.name) !== recordedFlowNameKey(importedFlow.name)) {
+          throw new Error("A flow can only overwrite a saved flow with the same name.");
+        }
+        overwrittenFlowIds.add(existingFlow.id);
+        selectedFlows.push(normalizeRecordedFlow({
+          ...importedFlow,
+          id: existingFlow.id,
+          name: existingFlow.name,
+          createdAt: existingFlow.createdAt,
+          updatedAt: Date.now(),
+        }));
+        updatedCount += 1;
+        continue;
+      }
+
+      if (resolution.action !== "add" && resolution.action !== "rename") {
+        throw new Error("Choose Add, Overwrite, or Rename for every selected flow.");
+      }
+
+      const requestedName = resolution.action === "rename"
+        ? String(resolution.name || "").trim()
+        : importedFlow.name;
+      const normalized = normalizeRecordedFlow({ ...importedFlow, name: requestedName });
+      const nameKey = recordedFlowNameKey(normalized.name);
+      if (!requestedName || occupiedNames.has(nameKey)) {
+        throw new Error(`Resolve the duplicate flow name “${normalized.name || importedFlow.name}” before importing.`);
+      }
+      occupiedNames.add(nameKey);
+      if (usedFlowIds.has(normalized.id)) normalized.id = uniqueImportedFlowId(usedFlowIds);
+      usedFlowIds.add(normalized.id);
+      selectedFlows.push(normalized);
+      addedCount += 1;
+    }
+
+    const retainedFlows = currentFlows.filter((flow) => !overwrittenFlowIds.has(flow.id));
+    if (selectedFlows.length + retainedFlows.length > MAX_RECORDED_FLOWS) {
+      throw new Error(`Importing these flows would exceed the ${MAX_RECORDED_FLOWS}-flow limit.`);
+    }
+    const flows = normalizeRecordedFlows([...selectedFlows, ...retainedFlows]);
+    await localStorageArea.set({ [flowsStorageKey]: flows });
+    return {
+      addedCount,
+      flows,
+      importedCount: selectedFlows.length,
+      updatedCount,
+    };
+  }
+
   async function saveDraft() {
     if (!draft) throw new Error("Record or open a flow before saving.");
     if (!draft.steps.length) throw new Error("Record at least one step before saving this flow.");
@@ -257,10 +354,12 @@ export function createRecordedFlowService({
   return {
     append,
     clearDraft,
+    importFlows,
     initialize,
     isRecordingTab,
     list,
     load,
+    previewImport,
     recordNavigation,
     remove,
     saveDraft,

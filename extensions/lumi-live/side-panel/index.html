@@ -190,11 +190,73 @@
           <section class="flow-library-section" aria-labelledby="flowLibraryTitle">
             <header>
               <h3 id="flowLibraryTitle">Saved flows</h3>
+              <div class="flow-library-header-actions">
+                <button id="flowImportOpenButton" class="flow-library-file-action" type="button">Import</button>
+                <button id="flowExportOpenButton" class="flow-library-file-action" type="button" disabled>Export</button>
+                <input id="flowImportFileInput" type="file" accept=".json,application/json" hidden />
+              </div>
             </header>
+            <button id="flowImportDropZone" class="flow-import-drop-zone" type="button">
+              <strong>Drop flow JSON here</strong>
+              <span>or click to choose an export file</span>
+            </button>
+            <p id="flowImportFeedback" class="flow-import-feedback" hidden></p>
             <div id="flowLibraryList" class="flow-library-list"></div>
             <p id="flowLibraryEmpty" class="flow-empty">No saved flows yet.</p>
           </section>
         </aside>
+
+        <dialog
+          id="flowExportDialog"
+          class="flow-export-dialog"
+          aria-labelledby="flowExportTitle"
+          aria-describedby="flowExportDescription"
+        >
+          <header>
+            <div>
+              <small>EXPORT SAVED FLOWS</small>
+              <h2 id="flowExportTitle">Choose flows to export</h2>
+            </div>
+            <button id="flowExportCloseButton" class="flow-export-close" type="button" aria-label="Close export dialog" title="Close">&times;</button>
+          </header>
+          <p id="flowExportDescription">All saved flows are selected by default. Clear any flow you do not want in the JSON file.</p>
+          <label class="flow-export-select-all" for="flowExportSelectAll">
+            <input id="flowExportSelectAll" type="checkbox" checked />
+            <span>Select all saved flows</span>
+          </label>
+          <div id="flowExportList" class="flow-export-list" role="group" aria-label="Flows to export"></div>
+          <footer>
+            <span id="flowExportSelectionCount" aria-live="polite">0 flows selected</span>
+            <div>
+              <button id="flowExportCancelButton" type="button">Cancel</button>
+              <button id="flowExportConfirmButton" class="is-primary" type="button" disabled>Export JSON</button>
+            </div>
+          </footer>
+        </dialog>
+
+        <dialog
+          id="flowImportReviewDialog"
+          class="flow-import-dialog"
+          aria-labelledby="flowImportReviewTitle"
+          aria-describedby="flowImportReviewDescription"
+        >
+          <header>
+            <div>
+              <small>REVIEW IMPORT</small>
+              <h2 id="flowImportReviewTitle">Review flows to import</h2>
+            </div>
+            <button id="flowImportReviewCloseButton" class="flow-import-close" type="button" aria-label="Close import review" title="Close">&times;</button>
+          </header>
+          <p id="flowImportReviewDescription">Green flows are ready and selected by default. Resolve each red name conflict by overwriting a matching flow or choosing a unique name.</p>
+          <div id="flowImportReviewList" class="flow-import-review-list" role="group" aria-label="Flows available to import"></div>
+          <footer>
+            <span id="flowImportSelectionCount" aria-live="polite">0 flows selected</span>
+            <div>
+              <button id="flowImportReviewCancelButton" type="button">Cancel</button>
+              <button id="flowImportConfirmButton" class="is-primary" type="button" disabled>Import selected</button>
+            </div>
+          </footer>
+        </dialog>
       </section>
 
       <footer class="composer-area">
@@ -341,6 +403,10 @@
     <div id="imageDropHint" class="image-drop-hint" aria-hidden="true">
       <strong>Drop files anywhere in Lumi</strong>
       <span>Supported attachments will be added to your message</span>
+    </div>
+    <div id="flowImportDropHint" class="flow-import-drop-hint" aria-hidden="true">
+      <strong>Drop Lumi flow JSON to import</strong>
+      <span>The import review will open automatically</span>
     </div>
     <script type="module" src="index.js"></script>
   </body>

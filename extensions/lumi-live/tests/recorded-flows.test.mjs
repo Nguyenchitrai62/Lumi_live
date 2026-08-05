@@ -5,12 +5,22 @@ import test from "node:test";
 import {
   appendRecordedStep,
   buildRecordedFlowAgentPrompt,
+  createRecordedFlowsExport,
   normalizeRecordedFlow,
+  parseRecordedFlowsImport,
+  RECORDED_FLOW_EXPORT_FORMAT,
+  RECORDED_FLOW_EXPORT_VERSION,
   RECORDED_STEP_GROUP_ACTION,
   recordedStepTitle,
 } from "../core/recorded-flows.js";
 import { createRecordedFlowService } from "../background/recorded-flow-service.js";
-import { applyRecordedStepPromptEditorView } from "../side-panel/recorded-flow-panel.js";
+import {
+  applyRecordedStepPromptEditorView,
+  dataTransferContainsRecordedFlowJson,
+  downloadRecordedFlowsExport,
+  recordedFlowJsonFilesFromTransfer,
+  recordedFlowsExportFilename,
+} from "../side-panel/recorded-flow-panel.js";
 
 const extensionRoot = new URL("../", import.meta.url);
 
@@ -151,6 +161,116 @@ test("flow normalization retains ordered actions and redacts sensitive values", 
   assert.equal(recordedStepTitle(flow.steps[1], 1), "Uncheck “Delete project”");
 });
 
+test("recorded flow export creates a versioned JSON payload for the selected flows", () => {
+  const exportedAt = Date.UTC(2026, 7, 5, 9, 30, 0);
+  const payload = createRecordedFlowsExport([
+    {
+      id: "flow-older",
+      name: "Older flow",
+      steps: [recordedStep()],
+      createdAt: 1000,
+      updatedAt: 2000,
+    },
+    {
+      id: "flow-newer",
+      name: "Newer flow",
+      steps: [recordedStep({ id: "step-b" })],
+      createdAt: 2000,
+      updatedAt: 3000,
+    },
+  ], { exportedAt });
+
+  assert.equal(payload.format, RECORDED_FLOW_EXPORT_FORMAT);
+  assert.equal(payload.formatVersion, RECORDED_FLOW_EXPORT_VERSION);
+  assert.equal(payload.exportedAt, "2026-08-05T09:30:00.000Z");
+  assert.deepEqual(payload.flows.map((flow) => flow.id), ["flow-newer", "flow-older"]);
+  assert.equal(recordedFlowsExportFilename(exportedAt), "lumi-recorded-flows-2026-08-05.json");
+  assert.deepEqual(
+    parseRecordedFlowsImport(JSON.stringify(payload)).map((flow) => flow.id),
+    ["flow-newer", "flow-older"],
+  );
+  assert.throws(() => createRecordedFlowsExport([]), /Select at least one saved flow/);
+  assert.throws(() => parseRecordedFlowsImport("not-json"), /not valid JSON/);
+  assert.throws(() => parseRecordedFlowsImport({ flows: [] }), /not a Lumi recorded flows export/);
+});
+
+test("recorded flow export downloads one dated JSON file", () => {
+  const exportedAt = Date.UTC(2026, 7, 5, 9, 30, 0);
+  let createdBlobParts = null;
+  let createdBlobType = "";
+  let appendedAnchor = null;
+  let clicked = false;
+  let removed = false;
+  let revokedHref = "";
+  class MemoryBlob {
+    constructor(parts, options) {
+      this.parts = parts;
+      this.type = options.type;
+      createdBlobParts = parts;
+      createdBlobType = options.type;
+    }
+  }
+  const anchor = {
+    click() { clicked = true; },
+    remove() { removed = true; },
+  };
+  const documentObject = {
+    body: {
+      append(element) { appendedAnchor = element; },
+    },
+    createElement(tagName) {
+      assert.equal(tagName, "a");
+      return anchor;
+    },
+  };
+  const urlObject = {
+    createObjectURL(blob) {
+      assert.equal(blob.parts, createdBlobParts);
+      assert.equal(blob.type, createdBlobType);
+      return "blob:lumi-flow-export";
+    },
+    revokeObjectURL(href) { revokedHref = href; },
+  };
+
+  const payload = downloadRecordedFlowsExport([{
+    id: "flow-a",
+    name: "Export me",
+    steps: [recordedStep()],
+  }], {
+    BlobClass: MemoryBlob,
+    documentObject,
+    exportedAt,
+    urlObject,
+  });
+
+  assert.equal(appendedAnchor, anchor);
+  assert.equal(anchor.href, "blob:lumi-flow-export");
+  assert.equal(anchor.download, "lumi-recorded-flows-2026-08-05.json");
+  assert.equal(clicked, true);
+  assert.equal(removed, true);
+  assert.equal(revokedHref, "blob:lumi-flow-export");
+  assert.equal(createdBlobType, "application/json;charset=utf-8");
+  assert.deepEqual(JSON.parse(createdBlobParts.join("")), payload);
+});
+
+test("flow JSON drag detection works when Chrome omits the file MIME type", () => {
+  const jsonFile = { name: "lumi-recorded-flows-2026-08-05.json", type: "" };
+  assert.deepEqual(recordedFlowJsonFilesFromTransfer({ files: [jsonFile] }), [jsonFile]);
+  assert.equal(dataTransferContainsRecordedFlowJson({
+    files: [],
+    items: [{
+      kind: "file",
+      type: "",
+      getAsFile: () => null,
+      webkitGetAsEntry: () => ({ name: jsonFile.name }),
+    }],
+  }), true);
+  assert.equal(dataTransferContainsRecordedFlowJson({
+    files: [{ name: "notes.txt", type: "text/plain" }],
+    items: [],
+  }), false);
+});
+
 test("agent flow prompt treats page metadata as context and per-step prompts as user instructions", () => {
   const prompt = buildRecordedFlowAgentPrompt({
     id: "permissions-flow",
@@ -268,6 +388,61 @@ test("recorded flow service persists drafts, edits prompts, saves, reopens, and 
   );
 
   assert.deepEqual(await restoredService.remove(saved.flow.id), []);
+
+  const importPayload = createRecordedFlowsExport([
+    saved.flow,
+  ], { exportedAt: 5000 });
+  const preview = await restoredService.previewImport(importPayload);
+  assert.equal(preview.importedFlows[0].name, "Create project");
+  assert.deepEqual(preview.savedFlows, []);
+  const imported = await restoredService.importFlows(importPayload, [{
+    action: "add",
+    flowId: saved.flow.id,
+  }]);
+  assert.equal(imported.importedCount, 1);
+  assert.equal(imported.addedCount, 1);
+  assert.equal(imported.updatedCount, 0);
+  assert.equal(imported.flows[0].name, "Create project");
+
+  const overwritePayload = createRecordedFlowsExport([{
+    ...saved.flow,
+    startTitle: "Imported project form",
+    updatedAt: saved.flow.updatedAt + 1,
+  }], { exportedAt: 6000 });
+  await assert.rejects(
+    restoredService.importFlows(overwritePayload, [{
+      action: "add",
+      flowId: saved.flow.id,
+    }]),
+    /Resolve the duplicate flow name/,
+  );
+  const updatedImport = await restoredService.importFlows(overwritePayload, [{
+    action: "overwrite",
+    existingFlowId: saved.flow.id,
+    flowId: saved.flow.id,
+  }]);
+  assert.equal(updatedImport.addedCount, 0);
+  assert.equal(updatedImport.updatedCount, 1);
+  assert.equal(updatedImport.flows[0].name, "Create project");
+  assert.equal(updatedImport.flows[0].startTitle, "Imported project form");
+
+  await assert.rejects(
+    restoredService.importFlows(overwritePayload, [{
+      action: "rename",
+      flowId: saved.flow.id,
+      name: "  CREATE   PROJECT  ",
+    }]),
+    /Resolve the duplicate flow name/,
+  );
+  const renamedImport = await restoredService.importFlows(overwritePayload, [{
+    action: "rename",
+    flowId: saved.flow.id,
+    name: "Create project imported copy",
+  }]);
+  assert.equal(renamedImport.addedCount, 1);
+  assert.equal(renamedImport.updatedCount, 0);
+  assert.equal(renamedImport.flows.length, 2);
+  assert.equal(renamedImport.flows.some((flow) => flow.name === "Create project imported copy"), true);
 });
 
 test("recorded flow service automatically batches form actions and starts a new batch after a click", async () => {
@@ -347,16 +522,18 @@ test("recorded flow service automatically batches form actions and starts a new 
 });
 
 test("extension wires recording, review, persistence, and agent replay through its runtime", async () => {
-  const [html, panel, panelEntry, worker, controller, bundle, config, model, recorder] = await Promise.all([
+  const [html, panel, panelEntry, worker, controller, bundle, backgroundBundle, config, model, recorder, styles] = await Promise.all([
     readFile(new URL("side-panel/index.html", extensionRoot), "utf8"),
     readFile(new URL("side-panel/recorded-flow-panel.js", extensionRoot), "utf8"),
     readFile(new URL("side-panel/index.js", extensionRoot), "utf8"),
     readFile(new URL("background/index.js", extensionRoot), "utf8"),
     readFile(new URL("browser/controller.js", extensionRoot), "utf8"),
     readFile(new URL("dist/controller.js", extensionRoot), "utf8"),
+    readFile(new URL("dist/background.js", extensionRoot), "utf8"),
     readFile(new URL("core/extension-config.js", extensionRoot), "utf8"),
     readFile(new URL("core/recorded-flows.js", extensionRoot), "utf8"),
     readFile(new URL("browser/flow-recorder.js", extensionRoot), "utf8"),
+    readFile(new URL("side-panel/styles.css", extensionRoot), "utf8"),
   ]);
 
   assert.match(html, /id="flowRecordButton"/);
@@ -367,6 +544,16 @@ test("extension wires recording, review, persistence, and agent replay through i
   assert.doesNotMatch(html, /id="flowDiscardButton"/);
   assert.doesNotMatch(html, /id="flowNewButton"/);
   assert.match(html, /id="flowLibraryList"/);
+  assert.match(html, /id="flowImportOpenButton"/);
+  assert.match(html, /id="flowImportFileInput"[^>]*accept="\.json,application\/json"/);
+  assert.match(html, /id="flowImportReviewDialog"/);
+  assert.match(html, /id="flowImportReviewList"/);
+  assert.match(html, /id="flowImportDropZone"/);
+  assert.match(html, /id="flowImportDropHint"/);
+  assert.match(html, /id="flowExportOpenButton"/);
+  assert.match(html, /id="flowExportDialog"/);
+  assert.match(html, /id="flowExportSelectAll"[^>]*checked/);
+  assert.match(html, /id="flowExportConfirmButton"/);
   assert.match(html, /id="flowRunDraftButton"/);
   assert.match(html, /automatically recorded as one batch step/);
   assert.match(panel, /data-flow-step-prompt/);
@@ -377,6 +564,18 @@ test("extension wires recording, review, persistence, and agent replay through i
   assert.match(panel, /focusout/);
   assert.match(panel, /collapsedPromptIds/);
   assert.match(panel, /confirmAction/);
+  assert.match(panel, /selectedExportFlowIds/);
+  assert.match(panel, /elements\.exportDialog\.showModal\(\)/);
+  assert.match(panel, /downloadRecordedFlowsExport/);
+  assert.match(panel, /flow_record_import_preview/);
+  assert.match(panel, /flow_record_import/);
+  assert.match(panel, /is-flow-import-dragging/);
+  assert.match(panel, /if \(elements\.panel\.hidden\) return/);
+  assert.match(panel, /addEventListener\("drop", handleFlowDrop, true\)/);
+  assert.match(panel, /Will overwrite/);
+  assert.match(styles, /\.flow-import-review-item\.is-ready/);
+  assert.match(styles, /\.flow-import-review-item\.is-conflict/);
+  assert.match(styles, /html\.is-flow-import-dragging/);
   assert.doesNotMatch(panel, /Keep this recorded flow/);
   assert.doesNotMatch(panel, /window\.confirm/);
   assert.match(panel, /deleteButton\.disabled = busy/);
@@ -388,6 +587,10 @@ test("extension wires recording, review, persistence, and agent replay through i
   assert.match(panelEntry, /confirmAction:\s*requestChatConfirmation/);
   assert.match(worker, /message\.command === "flow_record_start"/);
   assert.match(worker, /message\.command === "flow_record_save"/);
+  assert.match(worker, /message\.command === "flow_record_import_preview"/);
+  assert.match(worker, /message\.command === "flow_record_import"/);
+  assert.match(backgroundBundle, /message\.command === "flow_record_import_preview"/);
+  assert.match(backgroundBundle, /message\.command === "flow_record_import"/);
   assert.match(worker, /recordNavigation/);
   assert.match(worker, /onHistoryStateUpdated/);
   assert.match(controller, /bridge_flow_record_start/);
