@@ -2,13 +2,22 @@ import {
   buildRecordedFlowAgentPrompt,
   buildRecordedFlowHybridReplayPlan,
   createRecordedFlowsExport,
+  isAbsoluteRecordedFilePath,
+  normalizeRecordedFilePath,
   RECORDED_STEP_GROUP_ACTION,
   recordedFlowNameKey,
+  recordedFlowUploadBindingIssues,
   recordedStepTitle,
 } from "../core/recorded-flows.js";
 import { EXTENSION_EVENTS } from "../core/extension-config.js";
 
 const MAX_RECORDED_FLOW_IMPORT_BYTES = 5 * 1024 * 1024;
+
+export function recordedUploadPathState(value) {
+  const path = normalizeRecordedFilePath(value);
+  if (!path) return "missing";
+  return isAbsoluteRecordedFilePath(path) ? "valid" : "invalid";
+}
 
 function formatUpdatedAt(timestamp) {
   try {
@@ -119,7 +128,10 @@ export function recordedFlowReplayFailureNotice(flow, result = {}) {
     || (step ? recordedStepTitle(step, stepIndex) : "Recorded action");
   const action = String(result.failedAction || step?.action || "unknown").trim();
   const reason = String(result.error || "The recorded action could not be completed.").trim();
-  return `Flow “${flow?.name || "Untitled flow"}” stopped at step ${stepIndex + 1}: ${title}. Lumi could not perform action “${action}”. Reason: ${reason}`;
+  const batchAction = Number.isInteger(result.failedChildIndex)
+    ? `, batch action ${result.failedChildIndex + 1}`
+    : "";
+  return `Flow “${flow?.name || "Untitled flow"}” stopped at step ${stepIndex + 1}${batchAction}: ${title}. Lumi could not perform action “${action}”. Reason: ${reason}`;
 }
 
 export function recordedFlowAgentUnavailableNotice(flow, stepIndex = 0, detail = "") {
@@ -292,6 +304,7 @@ export function createRecordedFlowPanel({
   let initialized = false;
   let flowRunSequence = 0;
   const promptTimers = new Map();
+  const uploadPathTimers = new Map();
   const expandedPromptIds = new Set();
   const collapsedPromptIds = new Set();
   const selectedExportFlowIds = new Set();
@@ -326,6 +339,30 @@ export function createRecordedFlowPanel({
       start: input.selectionStart,
       end: input.selectionEnd,
     };
+  }
+
+  function currentUploadPathFocus() {
+    const input = documentObject.activeElement?.closest?.("[data-flow-upload-path]");
+    if (!input) return null;
+    return {
+      end: input.selectionEnd,
+      index: input.dataset.flowUploadPathIndex,
+      start: input.selectionStart,
+      stepId: input.dataset.flowUploadPath,
+    };
+  }
+
+  function restoreUploadPathFocus(focus) {
+    if (!focus?.stepId) return;
+    const input = elements.stepList.querySelector(
+      `[data-flow-upload-path="${CSS.escape(focus.stepId)}"]`
+      + `[data-flow-upload-path-index="${CSS.escape(String(focus.index || "0"))}"]`,
+    );
+    if (!input) return;
+    input.focus({ preventScroll: true });
+    if (Number.isInteger(focus.start) && Number.isInteger(focus.end)) {
+      input.setSelectionRange(focus.start, focus.end);
+    }
   }
 
   function restorePromptFocus(focus) {
@@ -387,6 +424,81 @@ export function createRecordedFlowPanel({
     };
   }
 
+  function uploadInputsForStep(stepId) {
+    return Array.from(elements.stepList.querySelectorAll(
+      `[data-flow-upload-path="${CSS.escape(stepId)}"]`,
+    )).sort((left, right) => (
+      Number(left.dataset.flowUploadPathIndex) - Number(right.dataset.flowUploadPathIndex)
+    ));
+  }
+
+  function updateUploadEditorState(editor) {
+    if (!editor) return;
+    const inputs = Array.from(editor.querySelectorAll("[data-flow-upload-path]"));
+    const states = inputs.map((input) => {
+      const state = recordedUploadPathState(input.value);
+      input.dataset.state = state;
+      input.setAttribute("aria-invalid", String(state === "invalid"));
+      return state;
+    });
+    const state = states.includes("invalid")
+      ? "invalid"
+      : states.includes("missing") ? "missing" : "valid";
+    editor.dataset.state = state;
+    const feedback = editor.querySelector("[data-flow-upload-feedback]");
+    if (feedback) {
+      feedback.textContent = state === "missing"
+        ? "Required: enter an absolute path. This path stays on this device and is not exported."
+        : state === "invalid"
+          ? "Use an absolute path such as C:\\Users\\you\\document.pdf or \\\\server\\share\\file.pdf."
+          : "Absolute path format is valid. Lumi will verify access when the flow runs.";
+    }
+  }
+
+  function createUploadEditor(step) {
+    const editor = documentObject.createElement("section");
+    editor.className = "flow-step-upload";
+    editor.dataset.flowUploadEditor = step.id;
+    const heading = documentObject.createElement("div");
+    heading.className = "flow-step-upload-heading";
+    const title = documentObject.createElement("strong");
+    title.textContent = "Local upload path";
+    const privacy = documentObject.createElement("span");
+    privacy.textContent = "Stored locally only";
+    heading.append(title, privacy);
+    editor.append(heading);
+
+    const fileCount = Math.max(1, step.fileVariables?.length || step.files?.length || 1);
+    for (let index = 0; index < fileCount; index += 1) {
+      const field = documentObject.createElement("label");
+      field.className = "flow-step-upload-field";
+      const file = step.files?.[index];
+      const variable = step.fileVariables?.[index] || `UPLOAD_FILE_${index + 1}`;
+      const label = documentObject.createElement("span");
+      label.textContent = file?.name
+        ? `${file.name} · \${${variable}}`
+        : `File ${index + 1} · \${${variable}}`;
+      const input = documentObject.createElement("input");
+      input.type = "text";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.placeholder = "C:\\absolute\\path\\file.ext";
+      input.value = normalizeRecordedFilePath(step.localFilePaths?.[index]);
+      input.disabled = controlsAreLocked();
+      input.dataset.flowUploadPath = step.id;
+      input.dataset.flowUploadPathIndex = String(index);
+      input.setAttribute("aria-label", `Absolute local path for ${file?.name || `file ${index + 1}`}`);
+      field.append(label, input);
+      editor.append(field);
+    }
+    const feedback = documentObject.createElement("small");
+    feedback.className = "flow-step-upload-feedback";
+    feedback.dataset.flowUploadFeedback = step.id;
+    editor.append(feedback);
+    updateUploadEditorState(editor);
+    return editor;
+  }
+
   function createStepCard(step, index) {
     const hasPrompt = Boolean(String(step.prompt || "").trim());
     const promptExpanded = expandedPromptIds.has(step.id)
@@ -413,6 +525,8 @@ export function createRecordedFlowPanel({
         ? String(step.value ?? "").slice(0, 120)
         : step.action === "select_option"
           ? String(step.optionText || step.value || "")
+          : step.action === "upload_file"
+            ? (step.files || []).map((file) => file.name).join(", ") || "Local file required"
           : step.resultUrl || step.url || step.target.selector || "";
     copy.append(title, detail);
 
@@ -470,12 +584,15 @@ export function createRecordedFlowPanel({
         prompt,
       }, promptLabel.hidden, { focusEditor: promptLabel.hidden });
     });
-    item.append(header, promptLabel);
+    item.append(header);
+    if (step.action === "upload_file") item.append(createUploadEditor(step));
+    item.append(promptLabel);
     return item;
   }
 
   function renderDraft() {
     const focus = currentPromptFocus();
+    const uploadFocus = currentUploadPathFocus();
     const hasDraft = Boolean(draft);
     const steps = draft?.steps || [];
     const recording = draft?.recording === true;
@@ -503,8 +620,17 @@ export function createRecordedFlowPanel({
     }
     elements.name.disabled = controlsAreLocked() || !hasDraft;
     if (documentObject.activeElement !== elements.name) elements.name.value = draft?.name || "";
-    elements.runDraft.disabled = controlsAreLocked() || recording || !steps.length;
+    elements.runDraft.disabled = controlsAreLocked()
+      || recording
+      || !steps.length
+      || recordedFlowUploadBindingIssues(draft).length > 0;
+    if (recordedFlowUploadBindingIssues(draft).length) {
+      elements.runDraft.title = "Enter a valid absolute path for every upload step before running.";
+    } else {
+      elements.runDraft.removeAttribute("title");
+    }
     restorePromptFocus(focus);
+    restoreUploadPathFocus(uploadFocus);
   }
 
   function createLibraryItem(flow) {
@@ -530,7 +656,12 @@ export function createRecordedFlowPanel({
       button.dataset.flowId = flow.id;
       button.className = className;
       button.textContent = label;
-      button.disabled = controlsAreLocked() || draft?.recording;
+      const missingUploadPath = action === "run"
+        && recordedFlowUploadBindingIssues(flow).length > 0;
+      button.disabled = controlsAreLocked() || draft?.recording || missingUploadPath;
+      if (missingUploadPath) {
+        button.title = "Edit this flow and enter the required absolute upload path first.";
+      }
       actions.append(button);
     }
     item.append(copy, actions);
@@ -866,6 +997,8 @@ export function createRecordedFlowPanel({
     nameTimerId = null;
     for (const timerId of promptTimers.values()) clearTimeout(timerId);
     promptTimers.clear();
+    for (const timerId of uploadPathTimers.values()) clearTimeout(timerId);
+    uploadPathTimers.clear();
     let result = await sendRuntime("flow_record_update", {
       name: elements.name.value.trim(),
     });
@@ -874,6 +1007,14 @@ export function createRecordedFlowPanel({
       result = await sendRuntime("flow_record_update", {
         stepId: prompt.dataset.flowStepPrompt,
         prompt: prompt.value,
+      });
+      acceptFlowState(result);
+    }
+    for (const editor of elements.stepList.querySelectorAll("[data-flow-upload-editor]")) {
+      result = await sendRuntime("flow_record_update", {
+        localFilePaths: Array.from(editor.querySelectorAll("[data-flow-upload-path]"))
+          .map((input) => input.value),
+        stepId: editor.dataset.flowUploadEditor,
       });
       acceptFlowState(result);
     }
@@ -925,10 +1066,10 @@ export function createRecordedFlowPanel({
       failureDetail = error instanceof Error ? error.message : unavailableDetail;
     }
     if (started) {
-      setStatus(`Agent is processing “${flow.name}” from step ${stepIndex + 1}.`);
+      setStatus(`Agent processing “${flow.name}” at prompted step ${stepIndex + 1}.`);
       publishFlowEvent(
         "progress",
-        `Step ${stepIndex + 1} of ${flow.steps.length} · Agent processing`,
+        `Step ${stepIndex + 1} of ${flow.steps.length} · Agent prompt`,
         flow,
         run,
         { phase: "agent", stepIndex, stepState: "running" },
@@ -957,6 +1098,28 @@ export function createRecordedFlowPanel({
     render();
   }
 
+  async function cancelActiveRun() {
+    const run = activeFlowRun;
+    if (!run) return false;
+    activeFlowRun = null;
+    const notice = `Stopped flow “${run.flow.name}” at step ${run.currentStepIndex + 1}.`;
+    setStatus(notice);
+    publishFlowEvent("cancelled", notice, run.flow, run, {
+      completedSteps: run.completedSteps,
+      phase: "cancelled",
+      stepIndex: run.currentStepIndex,
+      stepState: "cancelled",
+    });
+    try {
+      onFlowRunStateChange(false, run.flow);
+    } catch {
+      // Cancellation still proceeds when the host UI callback fails.
+    }
+    render();
+    await sendRuntime("cancel_active_browser_action").catch(() => null);
+    return true;
+  }
+
   function stopFlowRun(run, stepIndex, completion) {
     if (activeFlowRun !== run) return;
     const notice = recordedFlowAgentStepFailureNotice(run.flow, stepIndex, completion);
@@ -970,22 +1133,6 @@ export function createRecordedFlowPanel({
     finishFlowRun(run);
   }
 
-  function stopDirectFlowRun(run, result) {
-    if (activeFlowRun !== run) return false;
-    const stepIndex = normalizedStepIndex(run.flow, result?.resumeStepIndex);
-    const notice = recordedFlowReplayFailureNotice(run.flow, result);
-    setStatus(notice);
-    publishFlowEvent("error", notice, run.flow, run, {
-      completedSteps: run.completedSteps,
-      phase: "direct",
-      stepIndex,
-      stepState: "failed",
-    });
-    setPanelOpen(false);
-    finishFlowRun(run);
-    return false;
-  }
-
   function segmentAtStep(plan, stepIndex) {
     return plan.segments.find((segment) => (
       stepIndex >= segment.startStepIndex
@@ -993,14 +1140,15 @@ export function createRecordedFlowPanel({
     )) || null;
   }
 
-  function stopUnexpectedFlowRun(run, stepIndex, error) {
+  async function stopUnexpectedFlowRun(run, stepIndex, error) {
     const index = normalizedStepIndex(run.flow, stepIndex);
     const detail = error instanceof Error ? error.message : "Hybrid replay could not continue.";
     if (segmentAtStep(run.plan, index)?.type === "direct") {
-      return stopDirectFlowRun(run, {
+      stopDirectFlowRun(run, index, {
         error: detail,
         resumeStepIndex: index,
       });
+      return false;
     }
     stopFlowRun(run, index, { error: detail });
     return false;
@@ -1034,9 +1182,9 @@ export function createRecordedFlowPanel({
         stepState: "completed",
       },
     );
-    setStatus(`Agent completed step ${stepIndex + 1}; continuing direct replay…`);
+    setStatus(`Agent completed prompted step ${stepIndex + 1}; continuing direct replay…`);
     void continueFlowRun(run, stepIndex + 1).catch((error) => {
-      stopUnexpectedFlowRun(run, stepIndex + 1, error);
+      void stopUnexpectedFlowRun(run, stepIndex + 1, error);
     });
   }
 
@@ -1054,6 +1202,23 @@ export function createRecordedFlowPanel({
     );
     if (!started) finishFlowRun(run);
     return started;
+  }
+
+  function stopDirectFlowRun(run, stepIndex, result = {}) {
+    if (activeFlowRun !== run) return;
+    const notice = recordedFlowReplayFailureNotice(run.flow, {
+      ...result,
+      resumeStepIndex: stepIndex,
+    });
+    setStatus(notice);
+    publishFlowEvent("error", notice, run.flow, run, {
+      completedSteps: run.completedSteps,
+      phase: "direct",
+      stepIndex,
+      stepState: "failed",
+    });
+    setPanelOpen(false);
+    finishFlowRun(run);
   }
 
   async function continueFlowRun(run, nextStepIndex) {
@@ -1106,14 +1271,35 @@ export function createRecordedFlowPanel({
       run,
       { phase: "direct", stepIndex: nextStepIndex, stepState: "running" },
     );
-    const directResult = await sendRuntime("flow_record_run_direct", {
-      flow: directFlow,
-      replayContext: {
-        runId: run.id,
-        startStepIndex: nextStepIndex,
-        totalSteps: run.flow.steps.length,
-      },
-    });
+    let directResult;
+    try {
+      directResult = await sendRuntime("flow_record_run_direct", {
+        flow: directFlow,
+        replayContext: {
+          runId: run.id,
+          startStepIndex: nextStepIndex,
+          totalSteps: run.flow.steps.length,
+          uploadAuthorization: run.uploadAuthorization,
+        },
+      });
+    } catch (error) {
+      directResult = {
+        success: false,
+        completedSteps: 0,
+        completedFlowSteps: 0,
+        error: error instanceof Error ? error.message : "Direct replay could not start.",
+        resumeStepIndex: 0,
+      };
+    }
+    if (!directResult || typeof directResult !== "object") {
+      directResult = {
+        success: false,
+        completedSteps: 0,
+        completedFlowSteps: 0,
+        error: "Direct replay returned no verifiable result.",
+        resumeStepIndex: 0,
+      };
+    }
     if (activeFlowRun !== run) return false;
     const completedDirectSteps = Math.max(
       0,
@@ -1127,6 +1313,7 @@ export function createRecordedFlowPanel({
     for (let completedStepIndex = nextStepIndex;
       completedStepIndex < completedDirectEnd;
       completedStepIndex += 1) {
+      if (run.reportedDirectStepIndexes.has(completedStepIndex)) continue;
       run.reportedDirectStepIndexes.add(completedStepIndex);
       publishFlowEvent(
         "progress",
@@ -1154,7 +1341,80 @@ export function createRecordedFlowPanel({
       ...directResult,
       resumeStepIndex: failedStepIndex,
     };
-    return stopDirectFlowRun(run, translatedResult);
+    stopDirectFlowRun(run, failedStepIndex, translatedResult);
+    return false;
+  }
+
+  function recordedUploadSteps(flow) {
+    return (flow?.steps || []).flatMap((step, stepIndex) => {
+      const children = step.action === RECORDED_STEP_GROUP_ACTION ? step.children || [] : [step];
+      return children.flatMap((child) => {
+        if (child.action !== "upload_file") return [];
+        let destinationOrigin = "";
+        try {
+          destinationOrigin = new URL(child.url || step.url || flow.startUrl).origin;
+        } catch {
+          // Validation in the background rejects an upload without an exact web origin.
+        }
+        return [{
+          destinationOrigins: destinationOrigin ? [destinationOrigin] : [],
+          filePaths: Array.from(child.localFilePaths || [], (path) => String(path).trim()),
+          stepId: child.id,
+          stepIndex,
+        }];
+      });
+    });
+  }
+
+  function recordedUploadDestinationOrigins(flow) {
+    const origins = new Set();
+    const add = (value) => {
+      try {
+        const url = new URL(String(value || ""));
+        if (["http:", "https:"].includes(url.protocol)) origins.add(url.origin);
+      } catch {
+        // The confirmation falls back to the current flow page when no URL was recorded.
+      }
+    };
+    add(flow?.startUrl);
+    for (const step of flow?.steps || []) {
+      add(step.url);
+      add(step.resultUrl);
+    }
+    return [...origins];
+  }
+
+  async function authorizeRecordedUploads(flow) {
+    const uploads = recordedUploadSteps(flow);
+    if (!uploads.length) return null;
+    const destinationOrigins = recordedUploadDestinationOrigins(flow);
+    const pathLines = uploads.flatMap((upload) => upload.filePaths.map(
+      (filePath) => `Step ${upload.stepIndex + 1}: ${filePath}`,
+    ));
+    const destinationText = destinationOrigins.length
+      ? destinationOrigins.join(", ")
+      : "the current browser page used by this flow";
+    const confirmed = await confirmAction({
+      confirmLabel: "Run and upload files",
+      message: [
+        "Running this flow will transmit these local files:",
+        ...pathLines,
+        `Destination page(s): ${destinationText}`,
+        "Only continue if every path and destination is expected.",
+      ].join("\n"),
+      title: "Authorize recorded file upload?",
+    });
+    if (!confirmed) return false;
+    return {
+      confirmedAt: Date.now(),
+      destinationOrigins,
+      entries: uploads.map((upload) => ({
+        destinationOrigins: upload.destinationOrigins,
+        filePaths: upload.filePaths,
+        stepId: upload.stepId,
+      })),
+      flowId: String(flow.id || ""),
+    };
   }
 
   async function runFlow(flow) {
@@ -1165,6 +1425,25 @@ export function createRecordedFlowPanel({
     const plan = buildRecordedFlowHybridReplayPlan(flow);
     if (!plan.flow || !plan.segments.length) {
       setStatus(plan.reason || "This recorded flow has no steps to run.");
+      return false;
+    }
+    const uploadIssues = recordedFlowUploadBindingIssues(plan.flow);
+    if (uploadIssues.length) {
+      const issue = uploadIssues[0];
+      setStatus(
+        `Step ${issue.stepIndex + 1} needs a valid absolute local file path before this flow can run.`,
+      );
+      setPanelOpen(true);
+      const input = elements.stepList.querySelector(
+        `[data-flow-upload-path="${CSS.escape(issue.stepId)}"]`,
+      );
+      input?.focus({ preventScroll: false });
+      return false;
+    }
+    const uploadAuthorization = await authorizeRecordedUploads(plan.flow);
+    if (uploadAuthorization === false) {
+      setStatus("Recorded flow cancelled before any local file was uploaded.");
+      setPanelOpen(true);
       return false;
     }
     setStatus(`Opening a new chat for “${plan.flow.name}”…`);
@@ -1187,6 +1466,7 @@ export function createRecordedFlowPanel({
       id: `recorded-flow-run-${Date.now()}-${++flowRunSequence}`,
       plan,
       reportedDirectStepIndexes: new Set(),
+      uploadAuthorization,
     };
     activeFlowRun = run;
     try {
@@ -1214,8 +1494,7 @@ export function createRecordedFlowPanel({
     try {
       return await continueFlowRun(run, 0);
     } catch (error) {
-      stopUnexpectedFlowRun(run, run.currentStepIndex, error);
-      return false;
+      return await stopUnexpectedFlowRun(run, run.currentStepIndex, error);
     }
   }
 
@@ -1261,6 +1540,15 @@ export function createRecordedFlowPanel({
         );
         if (step) step.prompt = prompt.value;
       }
+      for (const editor of elements.stepList.querySelectorAll("[data-flow-upload-editor]")) {
+        const step = incoming.steps.find(
+          (candidate) => candidate.id === editor.dataset.flowUploadEditor,
+        );
+        if (step) {
+          step.localFilePaths = Array.from(editor.querySelectorAll("[data-flow-upload-path]"))
+            .map((input) => input.value);
+        }
+      }
     }
     draft = incoming;
     if (Array.isArray(message.flows)) flows = message.flows;
@@ -1276,6 +1564,21 @@ export function createRecordedFlowPanel({
         .then((result) => {
           acceptFlowState(result);
         })
+        .catch((error) => setStatus(error.message));
+    }, 280));
+  }
+
+  function scheduleUploadPathUpdate(stepId) {
+    clearTimeout(uploadPathTimers.get(stepId));
+    uploadPathTimers.set(stepId, setTimeout(() => {
+      uploadPathTimers.delete(stepId);
+      const localFilePaths = uploadInputsForStep(stepId).map((input) => {
+        const path = normalizeRecordedFilePath(input.value);
+        if (input.value !== path) input.value = path;
+        return path;
+      });
+      void sendRuntime("flow_record_update", { stepId, localFilePaths })
+        .then((result) => acceptFlowState(result))
         .catch((error) => setStatus(error.message));
     }, 280));
   }
@@ -1470,6 +1773,26 @@ export function createRecordedFlowPanel({
     }, 280);
   });
   elements.stepList.addEventListener("input", (event) => {
+    const uploadPath = event.target.closest?.("[data-flow-upload-path]");
+    if (uploadPath) {
+      const normalizedPath = normalizeRecordedFilePath(uploadPath.value);
+      if (uploadPath.value !== normalizedPath) uploadPath.value = normalizedPath;
+      const editor = uploadPath.closest("[data-flow-upload-editor]");
+      updateUploadEditorState(editor);
+      const step = draft?.steps?.find(
+        (candidate) => candidate.id === uploadPath.dataset.flowUploadPath,
+      );
+      if (step) {
+        step.localFilePaths = Array.from(editor.querySelectorAll("[data-flow-upload-path]"))
+          .map((input) => input.value);
+      }
+      elements.runDraft.disabled = controlsAreLocked()
+        || draft?.recording
+        || !draft?.steps?.length
+        || recordedFlowUploadBindingIssues(draft).length > 0;
+      scheduleUploadPathUpdate(uploadPath.dataset.flowUploadPath);
+      return;
+    }
     const prompt = event.target.closest?.("[data-flow-step-prompt]");
     if (!prompt) return;
     expandedPromptIds.add(prompt.dataset.flowStepPrompt);
@@ -1559,9 +1882,11 @@ export function createRecordedFlowPanel({
   });
 
   return {
+    cancelActiveRun,
     dispose() {
       if (draft?.recording) void sendRuntime("flow_record_stop").catch(() => {});
       if (activeFlowRun) {
+        void sendRuntime("cancel_active_browser_action").catch(() => null);
         try {
           onFlowRunStateChange(false, activeFlowRun.flow);
         } catch {
@@ -1578,6 +1903,8 @@ export function createRecordedFlowPanel({
       flowDropEventTarget.removeEventListener("drop", handleFlowDrop, true);
       chrome.runtime.onMessage.removeListener(onRuntimeMessage);
       clearTimeout(nameTimerId);
+      for (const timerId of uploadPathTimers.values()) clearTimeout(timerId);
+      uploadPathTimers.clear();
       for (const timerId of promptTimers.values()) clearTimeout(timerId);
       promptTimers.clear();
     },

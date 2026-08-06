@@ -465,17 +465,26 @@ const taskOrchestrator = createTaskOrchestrator({
     else taskStepView.render(visibleHistory);
     if (!internalRecordedFlowTask) syncTaskFailureNotice(event, change);
     scheduleActiveChatSnapshotPersist();
-    if (event?.type === "task_done" && settleRecordedFlowAgentTurn()) {
-      // A structured done action is authoritative. Continue the saved flow now
-      // instead of depending on a later model turnComplete frame that may never
-      // arrive after the tool response.
-      setAgentTurnActive(false);
-      finishTurnWork();
-      userTurnAuthorized = false;
-      activeTurnUserRequest = "";
+    if (
+      event?.type === "task_done"
+      && internalRecordedFlowTask
+      && pendingRecordedFlowAgentTurn
+    ) {
+      pendingRecordedFlowAgentTurn.structuredDone = true;
     }
   },
 });
+
+function finishRecordedFlowAgentTurnBoundary() {
+  setAgentTurnActive(false);
+  finishTurnWork();
+  const settled = settleRecordedFlowAgentTurn();
+  if (settled) {
+    userTurnAuthorized = false;
+    activeTurnUserRequest = "";
+  }
+  return settled;
+}
 
 function settleRecordedFlowAgentTurn(fallback = {}) {
   const pending = pendingRecordedFlowAgentTurn;
@@ -806,10 +815,9 @@ function syncMessageComposer() {
   const hasContent = hasText
     || pendingAttachments.some((attachment) => attachment.parseStatus === "ready");
   const cancelMode = !translationLocked
-    && ready
-    && agentTurnActive
     && !turnCancellationPending
-    && !hasContent;
+    && !hasContent
+    && (flowLocked || ready && agentTurnActive);
   const queueMode = ready
     && !translationLocked
     && (agentTurnActive || turnCancellationPending || !transportReady)
@@ -833,7 +841,7 @@ function syncMessageComposer() {
       : "Message Lumi…";
   elements.messageSubmit.dataset.mode = cancelMode ? "cancel" : "send";
   const submitLabel = cancelMode
-    ? "Cancel current action"
+    ? flowLocked ? "Stop recorded flow" : "Cancel current action"
     : queueMode ? "Add message to queue" : "Send message";
   elements.messageSubmit.setAttribute("aria-label", submitLabel);
   elements.messageSubmit.title = submitLabel;
@@ -3221,26 +3229,43 @@ async function handleServerMessage(event, sourceSocket) {
     || serverContent?.outputTranscription?.text
     || functionCalls.length
   ) setAgentTurnActive(true);
-  if (serverContent?.inputTranscription?.text) {
+  const silentRecordedFlowTurn = pendingRecordedFlowAgentTurn?.silent === true;
+  if (serverContent?.inputTranscription?.text && !silentRecordedFlowTurn) {
     updateTranscript("user", serverContent.inputTranscription.text);
   }
   for (const part of serverContent?.modelTurn?.parts || []) {
     const transcriptRole = getLiveModelPartTranscriptRole(part);
-    if (transcriptRole) {
+    if (transcriptRole && !silentRecordedFlowTurn) {
       updateTranscript(transcriptRole, part.text);
     }
     if (transcriptRole === "thinking") {
       avatarController.transitionState("thinking");
     }
-    if (part.inlineData?.data && responseAudioGate.shouldPlay()) {
+    if (
+      part.inlineData?.data
+      && !silentRecordedFlowTurn
+      && responseAudioGate.shouldPlay()
+    ) {
       panelAudio.playPcmChunk(part.inlineData.data);
     }
   }
-  if (serverContent?.outputTranscription?.text) {
+  if (serverContent?.outputTranscription?.text && !silentRecordedFlowTurn) {
     updateTranscript("lumi", serverContent.outputTranscription.text);
   }
   if (serverContent?.generationComplete || functionCalls.length) {
     finalizeTranscript("thinking");
+  }
+  if (
+    serverContent?.generationComplete
+    && !serverContent?.turnComplete
+    && !serverContent?.interrupted
+    && !functionCalls.length
+    && pendingRecordedFlowAgentTurn?.structuredDone
+  ) {
+    // Some Live responses close with generationComplete before (or without)
+    // a separate turnComplete frame. This is still after the done tool response,
+    // so the following direct segment cannot overlap the prompted agent step.
+    finishRecordedFlowAgentTurnBoundary();
   }
   if (serverContent?.interrupted && !ignoreStaleTypedTurnBoundary) {
     const wasUserCancellation = turnCancellationPending;
@@ -3527,15 +3552,18 @@ async function handleServerMessage(event, sourceSocket) {
       finalizeTranscript("user");
       finalizeTranscript("lumi");
       finalizeTranscript("thinking");
-      setAgentTurnActive(false);
-      finishTurnWork({ cancelled: wasUserCancellation });
-      settleRecordedFlowAgentTurn({
-        result: wasUserCancellation
-          ? "The flow agent step was cancelled by the user."
-          : "The agent turn ended without a verified structured completion.",
-        reason: wasUserCancellation ? "cancelled" : "missing_structured_completion",
-        force: wasUserCancellation,
-      });
+      if (wasUserCancellation) {
+        setAgentTurnActive(false);
+        finishTurnWork({ cancelled: true });
+        settleRecordedFlowAgentTurn({
+          result: "The flow agent step was cancelled by the user.",
+          reason: "cancelled",
+          force: true,
+        });
+      } else if (!finishRecordedFlowAgentTurnBoundary()) {
+        setAgentTurnActive(false);
+        finishTurnWork();
+      }
       userTurnAuthorized = false;
       activeTurnUserRequest = "";
       if (wasUserCancellation) {
@@ -4085,6 +4113,7 @@ async function sendText(
     render = true,
     remember = true,
     onAgentTaskComplete = null,
+    silentAgentTurn = false,
   } = {},
 ) {
   const clean = String(text || "").trim();
@@ -4174,6 +4203,7 @@ async function sendText(
     pendingRecordedFlowAgentTurn = {
       turnSequence: turnExecutionSequence,
       onComplete: onAgentTaskComplete,
+      silent: silentAgentTurn === true,
     };
   }
   directVideoPresentationTurnSequence = null;
@@ -4488,15 +4518,19 @@ function renderRecordedFlowEvent({
   const currentStep = total
     ? Math.min(total, Math.max(1, (Number(stepIndex) || 0) + 1))
     : 0;
-  const terminal = kind === "success" || kind === "error";
+  const terminal = kind === "success" || kind === "error" || kind === "cancelled";
   const state = kind === "success"
     ? "success"
-    : kind === "error" ? "error" : kind === "warning" ? "recovering" : "running";
+    : kind === "error"
+      ? "error"
+      : kind === "cancelled" ? "cancelled" : kind === "warning" ? "recovering" : "running";
   const stateLabel = kind === "success"
     ? "Complete"
     : kind === "error"
       ? "Failed"
-      : phase === "recovery" || kind === "warning"
+      : kind === "cancelled"
+        ? "Stopped"
+        : phase === "recovery" || kind === "warning"
         ? "Recovering"
         : phase === "agent" ? "Agent" : phase === "direct" ? "Direct" : "Starting";
   const progressPercent = total ? Math.round(completed / total * 100) : 0;
@@ -4511,18 +4545,21 @@ function renderRecordedFlowEvent({
       item.row.dataset.mode = modeOverride;
     }
     const labels = {
+      cancelled: "Stopped by user",
       completed: "Completed",
       failed: "Could not perform this step",
       pending: "Waiting",
-      recovered: "Recovered by agent",
-      recovering: "Direct replay failed; agent is recovering",
+      recovered: "Completed",
+      recovering: "Waiting for page",
       running: item.row.dataset.mode === "agent" ? "Agent is working" : "Replaying saved locator",
     };
     item.status.textContent = labels[nextState] || "Waiting";
     item.badge.textContent = nextState === "recovered"
-      ? "Recovered"
+      ? "Completed"
       : nextState === "failed"
         ? "Failed"
+        : nextState === "cancelled"
+          ? "Stopped"
         : nextState === "recovering"
           ? "Recovering"
           : item.row.dataset.mode === "agent" ? "Agent" : "Direct";
@@ -4551,6 +4588,8 @@ function renderRecordedFlowEvent({
       setStepRowState(normalizedStepIndex, "recovered", "agent");
     } else if (stepState === "recovering" || kind === "warning") {
       setStepRowState(normalizedStepIndex, "recovering");
+    } else if (stepState === "cancelled" || kind === "cancelled") {
+      setStepRowState(normalizedStepIndex, "cancelled", rowMode);
     } else if (stepState === "failed" || kind === "error") {
       setStepRowState(normalizedStepIndex, "failed", rowMode);
     } else if (stepState === "running") {
@@ -4571,7 +4610,7 @@ function renderRecordedFlowEvent({
     : total ? `${completed}/${total} complete · step ${currentStep}` : "Preparing";
   card.mode.textContent = phase === "agent"
     ? "Prompt step"
-    : phase === "recovery" ? "Agent fallback" : phase === "direct" ? "Saved locator" : "";
+    : phase === "direct" ? "Saved locator" : "";
   card.progress.setAttribute("aria-valuemax", String(total || 1));
   card.progress.setAttribute("aria-valuenow", String(completed));
   card.progressValue.style.width = `${progressPercent}%`;
@@ -4597,11 +4636,12 @@ const recordedFlowPanel = createRecordedFlowPanel({
   onFlowRunStateChange: setRecordedFlowRunActive,
   reportFlowEvent: renderRecordedFlowEvent,
   sendRuntime,
-  runAgentFlow: (flow, prompt, { onComplete } = {}) => sendText(prompt, {
+  runAgentFlow: (flow, prompt, { onComplete, silent = false } = {}) => sendText(prompt, {
     displayTextOverride: `Run saved flow “${flow.name}”`,
     onAgentTaskComplete: onComplete,
     remember: false,
     render: false,
+    silentAgentTurn: silent,
   }),
   setStatus: (message) => {
     elements.statusLine.textContent = message;
@@ -4789,6 +4829,12 @@ elements.messageInput.addEventListener("keydown", (event) => {
 });
 elements.messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (recordedFlowRunActive) {
+    elements.statusLine.textContent = "Stopping the recorded flowâ€¦";
+    void recordedFlowPanel.cancelActiveRun();
+    if (agentTurnActive) cancelCurrentTurn();
+    return;
+  }
   if (isLiveTranslationChatLocked()) {
     elements.statusLine.textContent = "Stop Live Translate before continuing the chat.";
     return;

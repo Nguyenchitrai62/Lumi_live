@@ -168,7 +168,14 @@ export function createRecordedFlowService({
     ) return snapshot();
     if (
       previous
-      && ["click", "select_option", "set_checked"].includes(previous.action)
+      && [
+        "click",
+        "double_click",
+        "select_option",
+        "set_checked",
+        "submit",
+        "upload_file",
+      ].includes(previous.action)
       && now - previous.recordedAt < 6000
     ) {
       previous.resultUrl = String(url);
@@ -191,6 +198,7 @@ export function createRecordedFlowService({
     name,
     stepId,
     prompt,
+    localFilePaths,
     move,
     remove,
   }) {
@@ -204,6 +212,16 @@ export function createRecordedFlowService({
       } else {
         if (prompt !== undefined) {
           draft.steps[index].prompt = String(prompt).trim().slice(0, 1200);
+        }
+        if (localFilePaths !== undefined) {
+          if (draft.steps[index].action !== "upload_file") {
+            throw new Error("Local file paths can only be assigned to an upload step.");
+          }
+          draft.steps[index].localFilePaths = (Array.isArray(localFilePaths)
+            ? localFilePaths
+            : [])
+            .map((path) => String(path ?? "").slice(0, 4096))
+            .slice(0, 20);
         }
         if (move === "up" && index > 0) {
           [draft.steps[index - 1], draft.steps[index]] = [draft.steps[index], draft.steps[index - 1]];

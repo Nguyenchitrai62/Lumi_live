@@ -180,7 +180,7 @@
               <span id="flowStepCount">0 steps</span>
             </header>
             <ol id="flowStepList" class="flow-step-list"></ol>
-            <p id="flowStepEmpty" class="flow-empty">Clicks are recorded as steps. Consecutive form inputs are automatically recorded as one batch step. Steps without prompts replay directly from saved locators; adaptive prompts hand off to the agent.</p>
+            <p id="flowStepEmpty" class="flow-empty">Clicks and standard form controls are recorded as semantic steps. Consecutive form inputs are automatically recorded as one batch step. Only a step with a prompt uses the agent; every prompt-free step replays strictly from its saved UI target.</p>
           </section>
 
           <div class="flow-draft-actions">

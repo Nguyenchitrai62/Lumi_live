@@ -53,6 +53,20 @@ function fakeElement({
     focus() {},
     getAttribute(name) { return attributes.get(name) || null; },
     hasAttribute(name) { return attributes.has(name); },
+    matches(selector) {
+      return String(selector).split(",").some((rawToken) => {
+        const token = rawToken.trim();
+        if (token === ":disabled") return this.disabled;
+        if (token === this.tagName.toLowerCase()) return true;
+        if (token.startsWith(".")) {
+          const classes = String(this.getAttribute("class") || "").split(/\s+/);
+          return token.slice(1).split(".").every((name) => classes.includes(name));
+        }
+        const attribute = token.match(/^\[([^=\]]+)='([^']+)'\]$/);
+        return attribute ? this.getAttribute(attribute[1]) === attribute[2] : false;
+      });
+    },
+    setAttribute(name, nextValue) { attributes.set(name, String(nextValue)); },
     getBoundingClientRect() {
       return visible
         ? { height: 30, width: 120, x: 10, y: 20 }
@@ -265,6 +279,144 @@ test("direct replay never falls back from a disabled exact target to another ena
   assert.deepEqual(cancelButton.events, []);
 });
 
+test("target waiting ignores a global dropdown until the recorded labelled field appears", async () => {
+  const wrong = fakeElement({
+    attrs: { "data-control": "dropdown" },
+    text: "Project management",
+    tag: "div",
+  });
+  wrong.labels = [{ innerText: "Project management", textContent: "Project management" }];
+  const target = fakeElement({
+    attrs: { "data-control": "dropdown" },
+    text: "Choose sheet",
+    tag: "div",
+  });
+  target.labels = [{ innerText: "Sheet name", textContent: "Sheet name" }];
+  const elements = [wrong];
+  const documentObject = fakeDocument(elements);
+  target.ownerDocument = documentObject;
+  const windowObject = fakeWindow();
+  let waits = 0;
+  windowObject.setTimeout = (callback) => {
+    waits += 1;
+    if (waits === 3) elements.push(target);
+    callback();
+  };
+
+  const match = await waitForRecordedTarget({
+    label: "Sheet name",
+    selector: '[data-control="dropdown"]',
+    tag: "div",
+  }, {
+    action: "select_option",
+    documentObject,
+    timeoutMs: 1000,
+    windowObject,
+  });
+
+  assert.equal(match.element, target);
+  assert.ok(waits >= 3);
+});
+
+test("field-label protection works for an unknown custom widget without framework classes", async () => {
+  const wrong = fakeElement({
+    attrs: { "data-widget": "chooser" },
+    text: "Global workspace",
+    tag: "div",
+  });
+  wrong.labels = [{ innerText: "Workspace", textContent: "Workspace" }];
+  const target = fakeElement({
+    attrs: { "data-widget": "chooser" },
+    text: "Quarterly report",
+    tag: "div",
+  });
+  target.labels = [{ innerText: "Report source", textContent: "Report source" }];
+  const documentObject = fakeDocument([wrong, target]);
+
+  const match = await waitForRecordedTarget({
+    label: "Report source",
+    selector: '[data-widget="chooser"]',
+    tag: "div",
+  }, {
+    action: "select_option",
+    documentObject,
+    windowObject: fakeWindow(),
+  });
+
+  assert.equal(match.element, target);
+});
+
+test("a field can use recorded semantic text when its live label is unavailable", async () => {
+  const target = fakeElement({
+    attrs: { "data-widget": "chooser" },
+    text: "Approval round 4",
+    tag: "div",
+  });
+  target.labels = [{ innerText: "Unreadable wrapper", textContent: "Unreadable wrapper" }];
+  const documentObject = fakeDocument([target]);
+
+  const match = await waitForRecordedTarget({
+    label: "Sheet name",
+    selector: '[data-widget="chooser"]',
+    tag: "div",
+    text: "Approval round 4",
+  }, {
+    action: "select_option",
+    documentObject,
+    windowObject: fakeWindow(),
+  });
+
+  assert.equal(match.element, target);
+});
+
+test("target waiting stops immediately when recorded replay is cancelled", async () => {
+  const controller = new AbortController();
+  const documentObject = fakeDocument([]);
+  const windowObject = fakeWindow();
+  windowObject.setTimeout = (callback) => {
+    controller.abort();
+    callback();
+  };
+
+  await assert.rejects(
+    waitForRecordedTarget({ name: "Never appears", tag: "button" }, {
+      documentObject,
+      signal: controller.signal,
+      timeoutMs: 30000,
+      windowObject,
+    }),
+    /cancelled by the user/,
+  );
+});
+
+test("a weak shared selector cannot click the wrong generic button while the target is absent", async () => {
+  const wrong = fakeElement({ attrs: { "data-kind": "action" }, text: "Delete" });
+  const target = fakeElement({ attrs: { "data-kind": "action" }, text: "Continue" });
+  const elements = [wrong];
+  const documentObject = fakeDocument(elements);
+  target.ownerDocument = documentObject;
+  const windowObject = fakeWindow();
+  let waits = 0;
+  windowObject.setTimeout = (callback) => {
+    waits += 1;
+    if (waits === 2) elements.push(target);
+    callback();
+  };
+
+  const match = await waitForRecordedTarget({
+    name: "Continue",
+    selector: '[data-kind="action"]',
+    tag: "button",
+  }, {
+    action: "click",
+    documentObject,
+    timeoutMs: 1000,
+    windowObject,
+  });
+
+  assert.equal(match.element, target);
+});
+
 test("direct target lookup uses an additional recorded data locator when the primary selector changed", () => {
   const wrong = fakeElement({ attrs: { "data-action": "cancel" }, text: "Save" });
   const target = fakeElement({ attrs: { "data-action": "save-boq" }, text: "Save" });
@@ -297,6 +449,43 @@ test("direct target lookup uses recorded ancestor context to disambiguate duplic
 
   assert.equal(match.element, target);
   assert.ok(match.score > scoreRecordedTargetCandidate({ name: "Save", tag: "button" }, wrong));
+});
+
+test("DOM fingerprint recovers a semantically empty button from its recorded tree context", () => {
+  const wrongContainer = fakeElement({ attrs: { class: "secondary-actions" }, tag: "div" });
+  const recordedContainer = fakeElement({
+    attrs: { "data-section": "import-footer", class: "primary-actions" },
+    tag: "div",
+  });
+  const wrong = fakeElement({ attrs: { class: "icon-button" }, parent: wrongContainer, text: "" });
+  const target = fakeElement({ attrs: { class: "icon-button" }, parent: recordedContainer, text: "" });
+  wrongContainer.children = [wrong];
+  recordedContainer.children = [target];
+  const documentObject = fakeDocument([wrongContainer, recordedContainer, wrong, target]);
+
+  const match = findRecordedTarget({
+    domFingerprint: {
+      path: [
+        {
+          childIndex: 0,
+          classNames: ["icon-button"],
+          sameTagIndex: 0,
+          tag: "button",
+        },
+        {
+          childIndex: 1,
+          classNames: ["primary-actions"],
+          dataAttributes: { "data-section": "import-footer" },
+          sameTagIndex: 1,
+          tag: "div",
+        },
+      ],
+    },
+    tag: "button",
+  }, { documentObject });
+
+  assert.equal(match.element, target);
+  assert.equal(match.strategy, "domFingerprint");
 });
 
 test("direct target lookup can recover the button from a recorded child origin id", () => {
@@ -493,4 +682,309 @@ test("direct replay fails instead of reporting success when a checkbox rejects t
     }),
     /could not be checked/,
   );
+});
+
+test("direct replay opens a custom combobox and clicks the recorded option", async () => {
+  const option = fakeElement({
+    attrs: { id: "status-approved", role: "option" },
+    tag: "div",
+    text: "Approved",
+  });
+  const elements = [];
+  const trigger = fakeElement({
+    attrs: { id: "status-combobox", role: "combobox" },
+    tag: "div",
+    text: "Status",
+  });
+  trigger.click = () => {
+    trigger.events.push({ type: "click" });
+    if (!elements.includes(option)) elements.push(option);
+  };
+  option.click = () => {
+    option.events.push({ type: "click" });
+    trigger.innerText = "Approved";
+    trigger.textContent = "Approved";
+  };
+  elements.push(trigger);
+  const documentObject = fakeDocument(elements);
+  option.ownerDocument = documentObject;
+
+  const result = await executeRecordedFlowStep({
+    action: "select_option",
+    optionTarget: {
+      elementId: "status-approved",
+      name: "Approved",
+      role: "option",
+      tag: "div",
+    },
+    optionText: "Approved",
+    target: {
+      elementId: "status-combobox",
+      name: "Status",
+      role: "combobox",
+      tag: "div",
+    },
+    value: "approved",
+  }, {
+    documentObject,
+    timeoutMs: 1000,
+    windowObject: fakeWindow(),
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(trigger.events.map((event) => event.type), ["click"]);
+  assert.deepEqual(option.events.map((event) => event.type), ["click"]);
+});
+
+test("legacy custom-select recording resolves the live combobox and exact linked option", async () => {
+  const wrapper = fakeElement({
+    attrs: { class: "ant-select ant-select-single", id: "sheet-select-wrapper" },
+    tag: "div",
+    text: "Approval round 4",
+  });
+  const trigger = fakeElement({
+    attrs: {
+      "aria-controls": "rc_select_36_list",
+      id: "rc_select_36",
+      role: "combobox",
+      type: "search",
+    },
+    tag: "input",
+  });
+  const popup = fakeElement({
+    attrs: { id: "rc_select_36_list", role: "listbox" },
+    tag: "div",
+  });
+  const activeOption = fakeElement({
+    attrs: {
+      class: "ant-select-item ant-select-item-option ant-select-item-option-active",
+      role: "option",
+    },
+    tag: "div",
+    text: "Approval round 4",
+  });
+  const prefixOption = fakeElement({
+    attrs: { class: "ant-select-item ant-select-item-option", role: "option" },
+    tag: "div",
+    text: "BOQ (2)",
+  });
+  const exactOption = fakeElement({
+    attrs: { class: "ant-select-item ant-select-item-option", role: "option" },
+    tag: "div",
+    text: "BOQ",
+  });
+  const unrelatedExactOption = fakeElement({
+    attrs: { class: "ant-select-item ant-select-item-option", role: "option" },
+    tag: "div",
+    text: "BOQ",
+  });
+  wrapper.querySelectorAll = (selector) => (
+    selector.includes('[role="combobox"]') ? [trigger] : []
+  );
+  trigger.closest = (selector) => (selector.includes(".ant-select") ? wrapper : null);
+  popup.querySelectorAll = (selector) => (
+    selector.includes('[role="option"]') ? [activeOption, prefixOption, exactOption] : []
+  );
+  exactOption.click = () => {
+    exactOption.events.push({ type: "click" });
+    wrapper.innerText = "BOQ";
+    wrapper.textContent = "BOQ";
+  };
+  unrelatedExactOption.click = () => {
+    unrelatedExactOption.events.push({ type: "click" });
+  };
+  const elements = [
+    wrapper,
+    trigger,
+    popup,
+    activeOption,
+    prefixOption,
+    exactOption,
+    unrelatedExactOption,
+  ];
+  const documentObject = fakeDocument(elements);
+
+  const result = await executeRecordedFlowStep({
+    action: "select_option",
+    optionTarget: {
+      classNames: [
+        "ant-select-item",
+        "ant-select-item-option",
+        "ant-select-item-option-active",
+      ],
+      label: "Approval round 4 Approval round 3 BOQ (2) BOQ",
+      name: "Approval round 4 Approval round 3 BOQ (2) BOQ",
+      selector: ".ant-select-item-option-active",
+      tag: "div",
+      text: "BOQ",
+      title: "BOQ",
+    },
+    optionText: "BOQ",
+    target: {
+      elementId: "sheet-select-wrapper",
+      label: "Sheet name",
+      tag: "div",
+    },
+    value: "BOQ",
+    values: ["BOQ"],
+    optionTexts: ["BOQ"],
+  }, {
+    documentObject,
+    timeoutMs: 1000,
+    windowObject: fakeWindow(),
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(wrapper.events, []);
+  assert.deepEqual(trigger.events, []);
+  assert.deepEqual(activeOption.events, []);
+  assert.deepEqual(prefixOption.events, []);
+  assert.deepEqual(unrelatedExactOption.events, []);
+  assert.deepEqual(exactOption.events.map((event) => event.type), ["click"]);
+});
+
+test("a legacy hidden Ant input replays through its visible select surface", async () => {
+  const wrapper = fakeElement({
+    attrs: { class: "ant-select ant-select-single", id: "sheet-wrapper" },
+    tag: "div",
+    text: "Approval round 4",
+  });
+  const surface = fakeElement({
+    attrs: { class: "ant-select-selector" },
+    parent: wrapper,
+    tag: "div",
+    text: "Approval round 4",
+  });
+  const hiddenInput = fakeElement({
+    attrs: {
+      "aria-controls": "sheet-list",
+      "aria-expanded": "false",
+      name: "sheetName",
+      role: "combobox",
+      type: "search",
+    },
+    parent: surface,
+    tag: "input",
+    visible: false,
+  });
+  const option = fakeElement({
+    attrs: { role: "option" },
+    tag: "div",
+    text: "BOQ",
+  });
+  const elements = [wrapper, surface, hiddenInput];
+  wrapper.querySelectorAll = (selector) => {
+    if (selector.includes(".ant-select-selector")) return [surface];
+    if (selector.includes('[role="combobox"]')) return [hiddenInput];
+    return [];
+  };
+  hiddenInput.closest = (selector) => (selector.includes(".ant-select") ? wrapper : null);
+  surface.closest = (selector) => (selector.includes(".ant-select") ? wrapper : null);
+  surface.click = () => {
+    surface.events.push({ type: "click" });
+    hiddenInput.setAttribute("aria-expanded", "true");
+    if (!elements.includes(option)) elements.push(option);
+  };
+  option.click = () => {
+    option.events.push({ type: "click" });
+    wrapper.innerText = "BOQ";
+    wrapper.textContent = "BOQ";
+  };
+  const documentObject = fakeDocument(elements);
+  option.ownerDocument = documentObject;
+
+  const result = await executeRecordedFlowStep({
+    action: "select_option",
+    optionText: "BOQ",
+    optionTexts: ["BOQ"],
+    target: {
+      inputName: "sheetName",
+      role: "combobox",
+      selector: 'input[type="search"]',
+      tag: "input",
+    },
+    value: "BOQ",
+  }, {
+    documentObject,
+    timeoutMs: 1000,
+    windowObject: fakeWindow(),
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(surface.events.map((event) => event.type), ["click"]);
+  assert.deepEqual(hiddenInput.events, []);
+  assert.deepEqual(option.events.map((event) => event.type), ["click"]);
+});
+
+test("direct replay does not report success when a custom select rejects the option", async () => {
+  const option = fakeElement({
+    attrs: { id: "sheet-boq", role: "option" },
+    tag: "div",
+    text: "BOQ",
+  });
+  const elements = [];
+  const trigger = fakeElement({
+    attrs: { id: "sheet-combobox", role: "combobox" },
+    tag: "div",
+    text: "Đợt duyệt 4",
+  });
+  trigger.click = () => {
+    trigger.events.push({ type: "click" });
+    if (!elements.includes(option)) elements.push(option);
+  };
+  elements.push(trigger);
+  const documentObject = fakeDocument(elements);
+  option.ownerDocument = documentObject;
+
+  await assert.rejects(executeRecordedFlowStep({
+    action: "select_option",
+    optionTarget: {
+      elementId: "sheet-boq",
+      name: "BOQ",
+      role: "option",
+      tag: "div",
+    },
+    optionText: "BOQ",
+    target: {
+      elementId: "sheet-combobox",
+      role: "combobox",
+      tag: "div",
+    },
+    value: "BOQ",
+  }, {
+    documentObject,
+    timeoutMs: 1000,
+    windowObject: fakeWindow(),
+  }), /did not become selected/);
+});
+
+test("direct replay sets an ARIA switch to the recorded state", async () => {
+  const toggle = fakeElement({
+    attrs: { "aria-checked": "false", id: "email-alerts", role: "switch" },
+    tag: "button",
+    text: "Email alerts",
+  });
+  toggle.click = () => {
+    toggle.events.push({ type: "click" });
+    toggle.setAttribute("aria-checked", "true");
+  };
+  const documentObject = fakeDocument([toggle]);
+
+  const result = await executeRecordedFlowStep({
+    action: "set_checked",
+    target: {
+      elementId: "email-alerts",
+      name: "Email alerts",
+      role: "switch",
+      tag: "button",
+    },
+    value: true,
+  }, {
+    documentObject,
+    windowObject: fakeWindow(),
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
+  assert.deepEqual(toggle.events.map((event) => event.type), ["click"]);
 });

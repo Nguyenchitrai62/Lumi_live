@@ -20,6 +20,74 @@ const SEMANTIC_CONTROL_SELECTOR = [
   "[data-route]",
   "[data-href]",
 ].join(",");
+const SEMANTIC_FIELD_CONTROL_SELECTOR = [
+  "input",
+  "textarea",
+  "select",
+  "[contenteditable]:not([contenteditable='false'])",
+  "[role='checkbox']",
+  "[role='combobox']",
+  "[role='listbox']",
+  "[role='radio']",
+  "[role='searchbox']",
+  "[role='slider']",
+  "[role='spinbutton']",
+  "[role='switch']",
+  "[role='textbox']",
+  "[aria-haspopup='listbox']",
+].join(",");
+const CUSTOM_SELECT_ROOT_SELECTOR = [
+  ".ant-select",
+  ".ng-select",
+  ".p-dropdown",
+  ".p-select",
+  ".mat-mdc-select",
+  ".mat-select",
+  ".select2-container",
+  ".el-select",
+  ".v-select",
+].join(",");
+const CUSTOM_SELECT_TRIGGER_SELECTOR = [
+  "[role=\"combobox\"]",
+  "[aria-haspopup=\"listbox\"]",
+].join(",");
+const CUSTOM_SELECT_INTERACTION_SELECTOR = [
+  ".ant-select-selector",
+  ".ng-select-container",
+  ".p-dropdown-trigger",
+  ".p-select-dropdown",
+  ".mat-mdc-select-trigger",
+  ".mat-select-trigger",
+  ".select2-selection",
+  ".el-select__wrapper",
+  ".vs__dropdown-toggle",
+].join(",");
+const CUSTOM_SELECT_OPTION_SELECTOR = [
+  "[role=\"option\"]",
+  "[role=\"menuitemradio\"]",
+  "[data-value]",
+  ".ant-select-item-option",
+  ".ng-option",
+  ".p-dropdown-item",
+  ".p-select-option",
+  ".mat-mdc-option",
+  ".mat-option",
+  ".select2-results__option",
+  ".el-select-dropdown__item",
+  ".vs__dropdown-option",
+].join(",");
+const CUSTOM_SELECT_POPUP_SELECTOR = [
+  "[role=\"listbox\"]",
+  "[role=\"menu\"]",
+  ".ant-select-dropdown",
+  ".ng-dropdown-panel",
+  ".p-dropdown-panel",
+  ".p-select-overlay",
+  ".mat-mdc-select-panel",
+  ".select2-results",
+  ".el-select-dropdown",
+  ".vs__dropdown-menu",
+].join(",");
 
 function compactText(value, limit = 1000) {
   return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
@@ -36,7 +104,7 @@ function attributeSelectorValue(value) {
 function isLikelyDynamicElementId(value) {
   const id = String(value || "");
   return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(id)
-    || /^(?:react-select|headlessui|radix|mui|ember|mat-input|generated)[-_:]/i.test(id)
+    || /^(?:react-select|rc[_-]select|headlessui|radix|mui|ember|mat-input|generated)[-_:]/i.test(id)
     || /[-_:]\d{5,}$/.test(id);
 }
 
@@ -62,15 +130,57 @@ function collectQueryRoots(documentObject) {
   return roots;
 }
 
-function associatedLabel(element) {
+function looksLikeFieldWidget(element) {
+  if (element?.matches?.(SEMANTIC_FIELD_CONTROL_SELECTOR)) return true;
+  if (element?.querySelector?.(SEMANTIC_FIELD_CONTROL_SELECTOR)) return true;
+  const identity = [
+    element?.getAttribute?.("class"),
+    element?.getAttribute?.("role"),
+    element?.getAttribute?.("aria-haspopup"),
+  ].filter(Boolean).join(" ");
+  return /(?:^|[-_\s])(combobox|control|dropdown|field|picker|select)(?:$|[-_\s])/i.test(identity);
+}
+
+function contextualControlLabel(element, { force = false } = {}) {
+  if (!force && !looksLikeFieldWidget(element)) return "";
+  const controlText = compactText(element.innerText || element.textContent, 240);
+  let depth = 0;
+  for (let current = element.parentElement; current && depth < 4; current = current.parentElement) {
+    depth += 1;
+    const contextText = compactText(current.innerText || current.textContent, 240);
+    if (!contextText || contextText.length > 160) continue;
+    let label = contextText;
+    if (controlText) {
+      const index = label.toLocaleLowerCase().indexOf(controlText.toLocaleLowerCase());
+      if (index < 0) continue;
+      label = compactText(`${label.slice(0, index)} ${label.slice(index + controlText.length)}`, 240);
+    }
+    if (label && label !== controlText) return label;
+  }
+  return "";
+}
+
+function associatedLabel(element, { allowContextual = false } = {}) {
   const labels = Array.from(element?.labels || []);
   if (labels.length) return compactText(labels.map((label) => label.innerText || label.textContent).join(" "));
   const wrappingLabel = element?.closest?.("label");
   if (wrappingLabel) return compactText(wrappingLabel.innerText || wrappingLabel.textContent);
+  const labelledBy = compactText(element?.getAttribute?.("aria-labelledby"));
+  if (labelledBy) {
+    const labelledText = compactText(labelledBy.split(/\s+/).map((id) => (
+      element.ownerDocument?.getElementById?.(id)?.innerText
+      || element.ownerDocument?.getElementById?.(id)?.textContent
+      || ""
+    )).join(" "));
+    if (labelledText) return labelledText;
+  }
   const id = element?.getAttribute?.("id") || element?.id;
-  if (!id) return "";
-  const selector = `label[for="${attributeSelectorValue(id)}"]`;
-  return compactText(element.ownerDocument?.querySelector?.(selector)?.textContent);
+  if (id) {
+    const selector = `label[for="${attributeSelectorValue(id)}"]`;
+    const explicitLabel = compactText(element.ownerDocument?.querySelector?.(selector)?.textContent);
+    if (explicitLabel) return explicitLabel;
+  }
+  return contextualControlLabel(element, { force: allowContextual });
 }
 
 function accessibleName(element) {
@@ -165,6 +275,81 @@ function scoreAttributeIdentity(target, descriptor) {
   return score;
 }
 
+function elementPosition(element) {
+  const siblings = Array.from(element?.parentElement?.children || []);
+  const sameTagSiblings = siblings.filter((candidate) => candidate.tagName === element?.tagName);
+  return {
+    childIndex: siblings.indexOf(element),
+    sameTagIndex: sameTagSiblings.indexOf(element),
+  };
+}
+
+function scoreDomPathSegment(expected, element, depth = 0) {
+  if (!expected || !element) return -40;
+  const descriptor = elementDescriptor(element);
+  let score = 0;
+  if (expected.tag) score += descriptor.tag === expected.tag ? 24 : -50;
+  if (expected.type) score += descriptor.type === expected.type ? 18 : -30;
+  if (expected.role) score += descriptor.role === expected.role ? 22 : -20;
+  if (expected.testId) score += descriptor.testId === expected.testId ? 120 : -45;
+  if (expected.elementId) score += descriptor.elementId === expected.elementId ? 110 : -45;
+  if (expected.inputName) score += descriptor.inputName === expected.inputName ? 65 : -25;
+  score += Math.min(30, scoreAttributeIdentity(expected, descriptor));
+  score += Math.min(45, scoreSemanticIdentity(expected, descriptor));
+  const position = elementPosition(element);
+  if (Number.isInteger(expected.sameTagIndex) && expected.sameTagIndex >= 0) {
+    score += position.sameTagIndex === expected.sameTagIndex ? 12 : -4;
+  }
+  if (Number.isInteger(expected.childIndex) && expected.childIndex >= 0) {
+    score += position.childIndex === expected.childIndex ? 8 : -3;
+  }
+  return Math.round(score * Math.max(0.35, 1 - depth * 0.08));
+}
+
+function scoreDomFingerprint(target, element) {
+  const fingerprint = target?.domFingerprint;
+  const expectedPath = Array.isArray(fingerprint?.path) ? fingerprint.path : [];
+  if (!expectedPath.length || !element) return 0;
+  const actualPath = [];
+  for (let current = element; current && actualPath.length < 14; current = current.parentElement) {
+    actualPath.push(current);
+  }
+  let score = scoreDomPathSegment(expectedPath[0], actualPath[0], 0);
+  let minimumActualIndex = 1;
+  for (let expectedIndex = 1; expectedIndex < expectedPath.length; expectedIndex += 1) {
+    let bestScore = -40;
+    let bestIndex = -1;
+    for (
+      let actualIndex = minimumActualIndex;
+      actualIndex < Math.min(actualPath.length, minimumActualIndex + 4);
+      actualIndex += 1
+    ) {
+      const candidateScore = scoreDomPathSegment(
+        expectedPath[expectedIndex],
+        actualPath[actualIndex],
+        expectedIndex,
+      ) - Math.max(0, actualIndex - minimumActualIndex) * 5;
+      if (candidateScore > bestScore) {
+        bestScore = candidateScore;
+        bestIndex = actualIndex;
+      }
+    }
+    if (bestIndex >= 0 && bestScore > 0) {
+      score += bestScore;
+      minimumActualIndex = bestIndex + 1;
+    }
+  }
+  const siblingPairs = [
+    [fingerprint.previousSibling, element.previousElementSibling],
+    [fingerprint.nextSibling, element.nextElementSibling],
+  ];
+  for (const [expectedSibling, actualSibling] of siblingPairs) {
+    if (!expectedSibling) continue;
+    score += Math.max(0, Math.min(45, scoreDomPathSegment(expectedSibling, actualSibling, 2)));
+  }
+  return Math.max(0, score);
+}
+
 function scoreTargetContext(expected, element) {
   if (!expected || !element) return 0;
   const descriptor = elementDescriptor(element);
@@ -238,6 +423,7 @@ export function scoreRecordedTargetCandidate(target, element) {
     element?.form || element?.closest?.("form"),
   )) : 0;
   score += scoreRecordedOrdinal(target, element, descriptor);
+  score += Math.min(260, scoreDomFingerprint(target, element));
   return score;
 }
 
@@ -267,6 +453,10 @@ function candidateIsCompatible(target, element, strategy) {
     return !isLikelyDynamicElementId(target.elementId)
       || !hasSemanticIdentity(target)
       || semanticScore >= 35;
+  }
+  if (strategy === "domFingerprint") {
+    if (scoreDomFingerprint(target, element) < 55) return false;
+    return !hasSemanticIdentity(target) || semanticScore >= 25;
   }
   if (strategy === "selector" && hasSemanticIdentity(target)) return semanticScore >= 35;
   if (!hasSemanticIdentity(target)) return true;
@@ -393,6 +583,39 @@ function rankRecordedTargetCandidates(rawTarget, {
       target,
     );
   }
+  const recordedDomTarget = target.domFingerprint?.path?.[0];
+  if (recordedDomTarget) {
+    const tag = /^[a-z][a-z0-9-]*$/i.test(recordedDomTarget.tag || "")
+      ? recordedDomTarget.tag
+      : "*";
+    const selectors = [];
+    if (recordedDomTarget.testId) {
+      selectors.push(`[data-testid="${attributeSelectorValue(recordedDomTarget.testId)}"]`);
+    }
+    if (recordedDomTarget.elementId) {
+      selectors.push(`[id="${attributeSelectorValue(recordedDomTarget.elementId)}"]`);
+    }
+    if (recordedDomTarget.inputName) {
+      selectors.push(`${tag}[name="${attributeSelectorValue(recordedDomTarget.inputName)}"]`);
+    }
+    const fingerprintClasses = Array.isArray(recordedDomTarget.classNames)
+      ? recordedDomTarget.classNames.slice(0, 3)
+      : [];
+    if (fingerprintClasses.length) {
+      selectors.push(`${tag}.${fingerprintClasses.map((name) => (
+        globalThis.CSS?.escape?.(name)
+        || String(name).replace(/[^a-zA-Z0-9_-]/g, "\\$&")
+      )).join(".")}`);
+    }
+    if (!selectors.length) selectors.push(tag);
+    addCandidates(
+      candidates,
+      [...new Set(selectors)].flatMap(queryRoots),
+      "domFingerprint",
+      300,
+      target,
+    );
+  }
   if (includeSemantic) {
     addCandidates(
       candidates,
@@ -411,7 +634,9 @@ function rankRecordedTargetCandidates(rawTarget, {
 
 export function findRecordedTarget(rawTarget, { documentObject = document } = {}) {
   const ranked = rankRecordedTargetCandidates(rawTarget, { documentObject });
-  const match = ranked[0];
+  const match = ranked.find((candidate) => (
+    candidateMatchesRecordedIdentity(rawTarget, candidate)
+  ));
   if (!match || match.priority === 0 && match.score < 35) return null;
   return {
     candidateCount: ranked.length,
@@ -479,6 +704,12 @@ function nextFrame(windowObject) {
   });
 }
 
+function assertReplayActive(signal) {
+  if (signal?.aborted) {
+    throw new DOMException("The recorded flow was cancelled by the user.", "AbortError");
+  }
+}
+
 async function waitUntilStable(element, windowObject) {
   const before = rectSignature(element);
   await nextFrame(windowObject);
@@ -489,11 +720,90 @@ function eligibleRecordedTargetCandidates(ranked) {
   return ranked.filter((candidate) => candidate.priority > 0 || candidate.score >= 35);
 }
 
-function firstUsableRecordedTargetCandidate(candidates, windowObject) {
+function customSelectSemanticTrigger(element) {
+  if (matchesSelector(element, CUSTOM_SELECT_TRIGGER_SELECTOR)) return element;
+  const componentRoot = element?.closest?.(CUSTOM_SELECT_ROOT_SELECTOR) || element;
+  return queryAll(componentRoot, CUSTOM_SELECT_TRIGGER_SELECTOR)[0] || null;
+}
+
+function customSelectInteractionSurface(element, windowObject) {
+  const tag = String(element?.tagName || "").toLowerCase();
+  const role = comparableText(element?.getAttribute?.("role"));
+  if (tag === "select" || ["listbox", "menu"].includes(role)) return element;
+  const componentRoot = element?.closest?.(CUSTOM_SELECT_ROOT_SELECTOR) || null;
+  const candidates = [];
+  const add = (candidate) => {
+    if (candidate && !candidates.includes(candidate)) candidates.push(candidate);
+  };
+  if (componentRoot) {
+    for (const candidate of queryAll(componentRoot, CUSTOM_SELECT_INTERACTION_SELECTOR)) add(candidate);
+    add(componentRoot);
+  }
+  add(element);
   return candidates.find((candidate) => (
-    isElementVisible(candidate.element, windowObject)
-    && isElementEnabled(candidate.element, windowObject)
+    isElementVisible(candidate, windowObject)
+    && isElementEnabled(candidate, windowObject)
   )) || null;
+}
+
+function firstUsableRecordedTargetCandidate(candidates, windowObject, action = "") {
+  for (const candidate of candidates) {
+    const interactionElement = action === "select_option"
+      ? customSelectInteractionSurface(candidate.element, windowObject)
+      : candidate.element;
+    if (
+      interactionElement
+      && isElementVisible(interactionElement, windowObject)
+      && isElementEnabled(interactionElement, windowObject)
+    ) return { ...candidate, interactionElement };
+  }
+  return null;
+}
+
+function candidateHasStrongRecordedLocator(target, candidate) {
+  if (["testId", "inputName", "origin"].includes(candidate.strategy)) return true;
+  if (candidate.strategy?.startsWith("data:")) return true;
+  if (candidate.strategy === "domFingerprint") {
+    return scoreDomFingerprint(target, candidate.element) >= 110;
+  }
+  return candidate.strategy === "elementId"
+    && target.elementId
+    && !isLikelyDynamicElementId(target.elementId);
+}
+
+function semanticIdentityMatches(target, candidate) {
+  const descriptor = elementDescriptor(candidate.element);
+  const fields = ["name", "label", "text", "placeholder", "title", "controlValue"];
+  let compared = false;
+  for (const field of fields) {
+    if (!target?.[field] || !descriptor[field]) continue;
+    compared = true;
+    if (scoreText(descriptor[field], target[field], 1, 1) > 0) return true;
+  }
+  return !compared;
+}
+
+function candidateMatchesRecordedIdentity(target, candidate, action = "") {
+  if (candidateHasStrongRecordedLocator(target, candidate)) return true;
+  const fieldAction = ["fill", "select_option", "set_checked"].includes(action);
+  const fieldLike = ["input", "select", "textarea"].includes(target.tag)
+    || [
+      "checkbox",
+      "combobox",
+      "listbox",
+      "radio",
+      "searchbox",
+      "slider",
+      "spinbutton",
+      "switch",
+      "textbox",
+    ].includes(target.role);
+  if ((fieldAction || fieldLike) && target?.label) {
+    const actualLabel = associatedLabel(candidate.element, { allowContextual: fieldAction });
+    if (scoreText(actualLabel, target.label, 1, 1) > 0) return true;
+    return semanticIdentityMatches(target, candidate);
+  }
+  return semanticIdentityMatches(target, candidate);
 }
 
 function dispatchRecordedHover(element, windowObject) {
@@ -524,7 +834,9 @@ export function revealRecordedTarget(rawTarget, {
 }
 
 export async function waitForRecordedTarget(rawTarget, {
+  action = "",
   documentObject = document,
+  signal,
   windowObject = window,
   timeoutMs = DEFAULT_TARGET_TIMEOUT_MS,
 } = {}) {
@@ -534,11 +846,13 @@ export async function waitForRecordedTarget(rawTarget, {
   let lastFallbackAt = -Infinity;
   let lastRevealAt = -Infinity;
   while (Date.now() - startedAt <= maximumWait) {
+    assertReplayActive(signal);
     const elapsedMs = Date.now() - startedAt;
     if (rawTarget?.hoverTarget && elapsedMs - lastRevealAt >= 250) {
       lastRevealAt = elapsedMs;
       if (revealRecordedTarget(rawTarget, { documentObject, windowObject })) {
         await nextFrame(windowObject);
+        assertReplayActive(signal);
       }
     }
     const fastCandidates = eligibleRecordedTargetCandidates(rankRecordedTargetCandidates(
@@ -549,9 +863,11 @@ export async function waitForRecordedTarget(rawTarget, {
         includeShadowRoots: false,
       },
     ));
-    let eligible = fastCandidates;
-    let match = firstUsableRecordedTargetCandidate(fastCandidates, windowObject);
-    const exactLocatorMatched = fastCandidates.some((candidate) => candidate.priority > 0);
+    let eligible = fastCandidates.filter((candidate) => (
+      candidateMatchesRecordedIdentity(rawTarget, candidate, action)
+    ));
+    let match = firstUsableRecordedTargetCandidate(eligible, windowObject, action);
+    const exactLocatorMatched = eligible.some((candidate) => candidate.priority > 0);
     // Exact locators in the light DOM cover the common recorded-flow path without
     // walking every element. Shadow-root and semantic recovery stay available, but
     // are throttled because both require a full DOM scan. Once an exact compatible
@@ -562,15 +878,16 @@ export async function waitForRecordedTarget(rawTarget, {
       eligible = eligibleRecordedTargetCandidates(rankRecordedTargetCandidates(
         rawTarget,
         { documentObject },
-      ));
-      match = firstUsableRecordedTargetCandidate(eligible, windowObject);
+      )).filter((candidate) => candidateMatchesRecordedIdentity(rawTarget, candidate, action));
+      match = firstUsableRecordedTargetCandidate(eligible, windowObject, action);
     }
     if (match) {
       lastMatch = match;
+      const interactionElement = match.interactionElement || match.element;
       if (
-        await waitUntilStable(match.element, windowObject)
-        && isElementVisible(match.element, windowObject)
-        && isElementEnabled(match.element, windowObject)
+        await waitUntilStable(interactionElement, windowObject)
+        && isElementVisible(interactionElement, windowObject)
+        && isElementEnabled(interactionElement, windowObject)
       ) {
         return { ...match, waitedMs: Date.now() - startedAt };
       }
@@ -592,6 +909,7 @@ export async function waitForRecordedTarget(rawTarget, {
     }
     await new Promise((resolve) => windowObject.setTimeout(resolve, 50));
   }
+  assertReplayActive(signal);
   const detail = lastMatch
     ? "The recorded target was found but did not become visible, enabled, and stable."
     : "No matching element appeared.";
@@ -634,42 +952,287 @@ function fillElement(element, value, windowObject) {
   }
 }
 
-function selectOption(element, step, windowObject) {
-  if (String(element.tagName || "").toLowerCase() !== "select") {
-    throw new Error("The recorded target is no longer a select control.");
-  }
-  const requestedValue = String(step.value ?? "");
-  const requestedText = comparableText(step.optionText);
-  const option = Array.from(element.options || []).find((candidate) => (
-    String(candidate.value) === requestedValue
-    || requestedText && comparableText(candidate.textContent) === requestedText
-  ));
-  if (!option) throw new Error("The recorded option is no longer available.");
-  setNativeProperty(element, "value", option.value);
-  dispatchValueEvents(element, windowObject);
-  if (String(element.value) !== String(option.value)) {
-    throw new Error("The recorded select control rejected the saved option.");
+function matchesSelector(element, selector) {
+  try {
+    return element?.matches?.(selector) === true;
+  } catch {
+    return false;
   }
 }
 
-function setChecked(element, desired, windowObject) {
-  if (!("checked" in element)) {
-    throw new Error("The recorded target is no longer a checkbox or radio control.");
+function customSelectLiveTrigger(element) {
+  return customSelectSemanticTrigger(element) || element;
+}
+
+function customSelectPopupRoots(trigger, documentObject, windowObject) {
+  const roots = [];
+  const add = (element) => {
+    if (element && !roots.includes(element)) roots.push(element);
+  };
+  for (const attribute of ["aria-controls", "aria-owns"]) {
+    const ids = compactText(trigger?.getAttribute?.(attribute), 1000).split(/\s+/).filter(Boolean);
+    for (const id of ids) {
+      const linked = documentObject?.getElementById?.(id);
+      add(linked);
+      add(linked?.closest?.(CUSTOM_SELECT_POPUP_SELECTOR));
+      add(linked?.parentElement?.closest?.(CUSTOM_SELECT_POPUP_SELECTOR));
+    }
   }
-  if (Boolean(element.checked) === desired) return;
+  // Prefer the popup explicitly owned by this combobox. Looking through every
+  // open popup first can select an identical option from another field.
+  if (!roots.length) {
+    for (const popup of queryAll(documentObject, CUSTOM_SELECT_POPUP_SELECTOR)) {
+      if (isElementVisible(popup, windowObject)) add(popup);
+    }
+  }
+  return roots;
+}
+
+function customSelectIsOpen(trigger, documentObject, windowObject) {
+  if (trigger?.getAttribute?.("aria-expanded") === "true") return true;
+  return customSelectPopupRoots(trigger, documentObject, windowObject)
+    .some((root) => isElementVisible(root, windowObject));
+}
+
+async function openCustomSelect(
+  interactionElement,
+  semanticTrigger,
+  documentObject,
+  windowObject,
+) {
+  if (customSelectIsOpen(semanticTrigger, documentObject, windowObject)) return;
+  interactionElement.focus?.({ preventScroll: true });
+  clickElement(interactionElement, windowObject);
+  await nextFrame(windowObject);
+  await nextFrame(windowObject);
+  if (customSelectIsOpen(semanticTrigger, documentObject, windowObject)) return;
+
+  // Keyboard opening is the semantic fallback used by accessible comboboxes.
+  // It stays entirely inside deterministic replay and never invokes the agent.
+  const KeyboardEventClass = windowObject.KeyboardEvent;
+  if (typeof KeyboardEventClass !== "function") return;
+  semanticTrigger.focus?.({ preventScroll: true });
+  const options = {
+    bubbles: true,
+    cancelable: true,
+    code: "ArrowDown",
+    key: "ArrowDown",
+    keyCode: 40,
+    which: 40,
+  };
+  semanticTrigger.dispatchEvent?.(new KeyboardEventClass("keydown", options));
+  semanticTrigger.dispatchEvent?.(new KeyboardEventClass("keyup", options));
+  await nextFrame(windowObject);
+  await nextFrame(windowObject);
+}
+
+function customSelectOptionIdentities(element) {
+  return [
+    element?.getAttribute?.("data-value"),
+    element?.getAttribute?.("value"),
+    element?.getAttribute?.("aria-label"),
+    element?.getAttribute?.("title"),
+    element?.innerText,
+    element?.textContent,
+  ].map(comparableText).filter(Boolean);
+}
+
+function recordedSelectIdentities(step) {
+  const texts = (step.optionTexts?.length ? step.optionTexts : [step.optionText])
+    .map(comparableText)
+    .filter(Boolean);
+  const values = (step.values?.length ? step.values : [step.value])
+    .map(comparableText)
+    .filter(Boolean);
+  return {
+    all: new Set([...texts, ...values]),
+    texts: new Set(texts),
+    values: new Set(values),
+  };
+}
+
+function optionMatchesRecordedSelection(element, identities) {
+  return customSelectOptionIdentities(element).some((identity) => identities.all.has(identity));
+}
+
+function scoreRecordedSelectOption(element, optionTarget, linkedRoot) {
+  const descriptor = elementDescriptor(element);
+  let score = linkedRoot ? 100 : 0;
+  if (descriptor.role === "option") score += 30;
+  if (element.hasAttribute?.("data-value")) score += 35;
+  if (optionTarget?.testId && descriptor.testId === optionTarget.testId) score += 120;
+  if (
+    optionTarget?.elementId
+    && descriptor.elementId === optionTarget.elementId
+    && !isLikelyDynamicElementId(optionTarget.elementId)
+  ) score += 110;
+  if (optionTarget?.tag && descriptor.tag === optionTarget.tag) score += 10;
+  score += Math.min(35, scoreAttributeIdentity(optionTarget || {}, descriptor));
+  return score;
+}
+
+async function waitForRecordedSelectOption(step, trigger, {
+  documentObject,
+  signal,
+  timeoutMs,
+  windowObject,
+}) {
+  const maximumWait = Math.min(30000, Math.max(500, Number(timeoutMs) || DEFAULT_TARGET_TIMEOUT_MS));
+  const startedAt = Date.now();
+  const identities = recordedSelectIdentities(step);
+  const optionTarget = step.optionTarget || {};
+  while (Date.now() - startedAt <= maximumWait) {
+    assertReplayActive(signal);
+    const linkedRoots = customSelectPopupRoots(trigger, documentObject, windowObject);
+    const candidates = new Map();
+    const collect = (root, linkedRoot) => {
+      const elements = [
+        ...(matchesSelector(root, CUSTOM_SELECT_OPTION_SELECTOR) ? [root] : []),
+        ...queryAll(root, CUSTOM_SELECT_OPTION_SELECTOR),
+      ];
+      for (const element of elements) {
+        if (!optionMatchesRecordedSelection(element, identities)) continue;
+        const score = scoreRecordedSelectOption(element, optionTarget, linkedRoot);
+        if (score > (candidates.get(element) ?? -Infinity)) candidates.set(element, score);
+      }
+    };
+    for (const root of linkedRoots) collect(root, true);
+    collect(documentObject, false);
+    const matches = [...candidates.entries()]
+      .map(([element, score]) => ({ element, score }))
+      .filter(({ element }) => (
+        isElementVisible(element, windowObject)
+        && isElementEnabled(element, windowObject)
+        && element.getAttribute?.("aria-disabled") !== "true"
+      ))
+      .sort((left, right) => right.score - left.score);
+    if (matches[0]) {
+      if (await waitUntilStable(matches[0].element, windowObject)) return matches[0].element;
+    }
+    await new Promise((resolve) => windowObject.setTimeout(resolve, 40));
+  }
+  const description = [...identities.texts][0] || [...identities.values][0] || "saved option";
+  throw new Error(`The recorded option “${description}” is not available in the current combobox.`);
+}
+
+function customSelectCurrentValues(element, trigger) {
+  const selectionSurface = trigger.closest?.(CUSTOM_SELECT_ROOT_SELECTOR)
+    || element.closest?.(CUSTOM_SELECT_ROOT_SELECTOR)
+    || element;
+  return [
+    trigger.value,
+    trigger.getAttribute?.("aria-valuetext"),
+    selectionSurface.value,
+    selectionSurface.getAttribute?.("aria-valuetext"),
+    ...queryAll(selectionSurface, [
+      "[aria-selected='true']",
+      ".ant-select-selection-item",
+      ".ng-value-label",
+      ".p-dropdown-label",
+      ".p-select-label",
+      ".select2-selection__rendered",
+      ".el-select__selected-item",
+      ".vs__selected",
+    ].join(",")).map((candidate) => candidate.innerText || candidate.textContent),
+    ...String(selectionSurface.innerText || selectionSurface.textContent || "").split(/\r?\n/),
+  ].map(comparableText).filter(Boolean);
+}
+
+async function selectOption(
+  element,
+  step,
+  windowObject,
+  documentObject,
+  timeoutMs,
+  signal,
+  recordedInteractionElement = null,
+) {
+  assertReplayActive(signal);
+  if (String(element.tagName || "").toLowerCase() === "select") {
+    const requestedValues = new Set(
+      (step.values?.length ? step.values : [step.value])
+        .map((value) => String(value ?? "")),
+    );
+    const requestedTexts = new Set(
+      (step.optionTexts?.length ? step.optionTexts : [step.optionText])
+        .map(comparableText)
+        .filter(Boolean),
+    );
+    const options = Array.from(element.options || []);
+    const matchingOptions = options.filter((candidate) => (
+      requestedValues.has(String(candidate.value))
+      || requestedTexts.has(comparableText(candidate.textContent))
+    ));
+    if (!matchingOptions.length) throw new Error("The recorded option is no longer available.");
+    if (element.multiple) {
+      const matching = new Set(matchingOptions);
+      for (const option of options) setNativeProperty(option, "selected", matching.has(option));
+    } else {
+      setNativeProperty(element, "value", matchingOptions[0].value);
+    }
+    dispatchValueEvents(element, windowObject);
+    const actualValues = new Set(Array.from(element.selectedOptions || [], (option) => String(option.value)));
+    if (!matchingOptions.every((option) => actualValues.has(String(option.value)))) {
+      throw new Error("The recorded select control rejected the saved option.");
+    }
+    return;
+  }
+
+  const trigger = customSelectLiveTrigger(element);
+  const interactionElement = recordedInteractionElement
+    || customSelectInteractionSurface(element, windowObject)
+    || element;
+  const triggerRole = comparableText(element.getAttribute?.("role"));
+  if (!["listbox", "menu"].includes(triggerRole)) {
+    await openCustomSelect(interactionElement, trigger, documentObject, windowObject);
+  }
+  const optionText = step.optionTexts?.[0] || step.optionText || step.values?.[0] || step.value || "";
+  const option = await waitForRecordedSelectOption(step, trigger, {
+    documentObject,
+    signal,
+    timeoutMs,
+    windowObject,
+  });
+  clickElement(option, windowObject);
+  const expected = recordedSelectIdentities(step).all;
+  if (!expected.size) return;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    assertReplayActive(signal);
+    if (customSelectCurrentValues(element, trigger).some((value) => expected.has(value))) return;
+    await new Promise((resolve) => windowObject.setTimeout(resolve, 50));
+  }
+  assertReplayActive(signal);
+  throw new Error(`The recorded option “${optionText}” was clicked but did not become selected.`);
+}
+
+async function setChecked(element, desired, windowObject) {
+  const stateAttribute = element.hasAttribute?.("aria-checked")
+    ? "aria-checked"
+    : element.hasAttribute?.("aria-pressed") ? "aria-pressed" : "";
+  const currentState = stateAttribute
+    ? element.getAttribute(stateAttribute) === "true"
+    : "checked" in element ? Boolean(element.checked) : null;
+  if (currentState === null) {
+    throw new Error("The recorded target is no longer a checkbox, radio, switch, or toggle control.");
+  }
+  if (currentState === desired) return;
   const inputType = String(element.type || element.getAttribute?.("type") || "").toLowerCase();
-  if ((inputType === "checkbox" || desired) && typeof element.click === "function") {
-    element.click();
+  if (stateAttribute || (inputType === "checkbox" || desired) && typeof element.click === "function") {
+    clickElement(element, windowObject);
+    if (stateAttribute) await nextFrame(windowObject);
   } else {
     setNativeProperty(element, "checked", desired);
     dispatchValueEvents(element, windowObject);
   }
-  if (Boolean(element.checked) !== desired) {
+  const resultingState = stateAttribute
+    ? element.getAttribute(stateAttribute) === "true"
+    : Boolean(element.checked);
+  if (resultingState !== desired) {
     throw new Error(`The recorded control could not be ${desired ? "checked" : "unchecked"}.`);
   }
 }
 
-function clickElement(element, windowObject) {
+function clickElement(element, windowObject, modifiers = {}) {
   const rect = element.getBoundingClientRect?.() || {
     height: 0,
     left: 0,
@@ -683,6 +1246,10 @@ function clickElement(element, windowObject) {
     clientX: (rect.left ?? rect.x ?? 0) + rect.width / 2,
     clientY: (rect.top ?? rect.y ?? 0) + rect.height / 2,
     pointerType: "mouse",
+    altKey: modifiers.alt === true,
+    ctrlKey: modifiers.ctrl === true,
+    metaKey: modifiers.meta === true,
+    shiftKey: modifiers.shift === true,
   };
   const PointerEventClass = windowObject.PointerEvent || windowObject.MouseEvent;
   if (PointerEventClass) {
@@ -699,15 +1266,55 @@ function clickElement(element, windowObject) {
   if (windowObject.MouseEvent) {
     element.dispatchEvent(new windowObject.MouseEvent("mouseup", eventOptions));
   }
-  element.click();
+  const hasModifiers = Object.values(modifiers).some(Boolean);
+  if (hasModifiers && windowObject.MouseEvent) {
+    element.dispatchEvent(new windowObject.MouseEvent("click", eventOptions));
+  } else {
+    element.click();
+  }
+}
+
+function contextClickElement(element, windowObject, modifiers = {}) {
+  const rect = element.getBoundingClientRect?.() || { height: 0, left: 0, top: 0, width: 0 };
+  element.dispatchEvent(new windowObject.MouseEvent("contextmenu", {
+    altKey: modifiers.alt === true,
+    bubbles: true,
+    button: 2,
+    buttons: 2,
+    cancelable: true,
+    clientX: (rect.left ?? rect.x ?? 0) + rect.width / 2,
+    clientY: (rect.top ?? rect.y ?? 0) + rect.height / 2,
+    ctrlKey: modifiers.ctrl === true,
+    metaKey: modifiers.meta === true,
+    shiftKey: modifiers.shift === true,
+  }));
+}
+
+function dragElement(source, destination, windowObject) {
+  const dataTransfer = typeof windowObject.DataTransfer === "function"
+    ? new windowObject.DataTransfer()
+    : undefined;
+  const DragEventClass = windowObject.DragEvent || windowObject.Event;
+  const dispatch = (element, type) => element.dispatchEvent(new DragEventClass(type, {
+    bubbles: true,
+    cancelable: true,
+    dataTransfer,
+  }));
+  dispatch(source, "dragstart");
+  dispatch(destination, "dragenter");
+  dispatch(destination, "dragover");
+  dispatch(destination, "drop");
+  dispatch(source, "dragend");
 }
 
 export async function executeRecordedFlowStep(rawStep, {
   confirmed = false,
   documentObject = document,
+  signal,
   windowObject = window,
   timeoutMs = DEFAULT_TARGET_TIMEOUT_MS,
 } = {}) {
+  assertReplayActive(signal);
   const step = normalizeRecordedStep(rawStep);
   if (!step || step.action === "agent_group") {
     throw new Error("Direct replay received an invalid recorded action.");
@@ -721,24 +1328,56 @@ export async function executeRecordedFlowStep(rawStep, {
   }
 
   const match = await waitForRecordedTarget(step.target, {
+    action: step.action,
     documentObject,
+    signal,
     timeoutMs,
     windowObject,
   });
   const { element } = match;
-  if (step.action === "click") {
+  assertReplayActive(signal);
+  if (["click", "context_click", "double_click"].includes(step.action)) {
     if (!isElementEnabled(element, windowObject)) {
       throw new Error("The recorded click target became disabled before the action could run.");
     }
     assertConfirmedPageAgentClick(element, confirmed);
     element.focus?.({ preventScroll: true });
-    clickElement(element, windowObject);
+    if (step.action === "context_click") {
+      contextClickElement(element, windowObject, step.modifiers);
+    } else if (step.action === "double_click") {
+      clickElement(element, windowObject, step.modifiers);
+      clickElement(element, windowObject, step.modifiers);
+      element.dispatchEvent(new windowObject.MouseEvent("dblclick", {
+        bubbles: true,
+        button: 0,
+        cancelable: true,
+        detail: 2,
+      }));
+    } else {
+      clickElement(element, windowObject, step.modifiers);
+    }
   } else if (step.action === "fill") {
     fillElement(element, step.value, windowObject);
   } else if (step.action === "select_option") {
-    selectOption(element, step, windowObject);
+    await selectOption(
+      element,
+      step,
+      windowObject,
+      documentObject,
+      timeoutMs,
+      signal,
+      match.interactionElement,
+    );
   } else if (step.action === "set_checked") {
-    setChecked(element, Boolean(step.value), windowObject);
+    await setChecked(element, Boolean(step.value), windowObject);
+  } else if (step.action === "drag_drop") {
+    const destination = await waitForRecordedTarget(step.destinationTarget, {
+      documentObject,
+      signal,
+      timeoutMs,
+      windowObject,
+    });
+    dragElement(element, destination.element, windowObject);
   } else if (step.action === "submit") {
     const form = String(element.tagName || "").toLowerCase() === "form"
       ? element
@@ -746,6 +1385,8 @@ export async function executeRecordedFlowStep(rawStep, {
     if (!form) throw new Error("The recorded submit target is no longer inside a form.");
     form.requestSubmit?.();
     if (typeof form.requestSubmit !== "function") form.submit?.();
+  } else if (step.action === "upload_file") {
+    throw new Error("Recorded file uploads must be replayed by the extension background service.");
   } else {
     throw new Error(`Direct replay does not support the recorded ${step.action} action.`);
   }

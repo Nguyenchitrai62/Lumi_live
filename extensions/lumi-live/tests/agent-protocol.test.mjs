@@ -69,6 +69,8 @@ test("builds a compact action catalog and strict completion contract", () => {
   assert.match(instruction, /newest observation are authoritative/i);
   assert.match(instruction, /complete current tool result/i);
   assert.match(instruction, /never discard controls, verification evidence, identifiers, or goal items/i);
+  assert.match(instruction, /\[Lumi silent internal step:\]/);
+  assert.match(instruction, /emit no prose, audio, or user-facing response after done/i);
 });
 
 test("parses one structured action and validates JSON arguments", () => {

@@ -239,6 +239,21 @@ body.petals-off .petal-field { opacity: 0; }
 .flow-step-prompt[hidden] { display: none; }
 .flow-step-prompt textarea { min-height: 68px; max-height: 150px; resize: vertical; padding: 9px 10px; font-size: 11.5px; line-height: 1.45; }
 .flow-step-prompt textarea:focus { border-color: var(--lavender); outline: 3px solid rgba(108,83,188,.14); }
+.flow-step-upload { display: grid; gap: 8px; margin-top: 10px; border: 1px solid rgba(194,137,34,.42); border-radius: 11px; padding: 9px; background: rgba(255,193,70,.09); }
+.flow-step-upload[data-state="invalid"] { border-color: rgba(190,60,82,.7); background: rgba(190,60,82,.07); }
+.flow-step-upload[data-state="valid"] { border-color: var(--line-strong); background: var(--surface-strong); }
+.flow-step-upload-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.flow-step-upload-heading strong { color: var(--ink); font-size: 10px; font-weight: 950; letter-spacing: .035em; text-transform: uppercase; }
+.flow-step-upload-heading span { color: var(--muted); font-size: 9px; font-weight: 750; }
+.flow-step-upload-field { display: grid; gap: 5px; }
+.flow-step-upload-field > span { overflow-wrap: anywhere; color: var(--muted); font-size: 10px; font-weight: 750; }
+.flow-step-upload-field input { width: 100%; min-height: 36px; border: 1px solid rgba(194,137,34,.64); border-radius: 9px; padding: 7px 9px; color: var(--ink); background: var(--surface-strong); font: 500 11px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; }
+.flow-step-upload-field input[data-state="invalid"] { border-color: var(--danger); background: rgba(190,60,82,.055); }
+.flow-step-upload-field input[data-state="valid"] { border-color: var(--line-strong); background: var(--surface-strong); }
+.flow-step-upload-field input:focus { border-color: var(--lavender); outline: 3px solid rgba(108,83,188,.14); }
+.flow-step-upload-feedback { color: #9b6816; font-size: 9.5px; font-weight: 700; line-height: 1.4; }
+.flow-step-upload[data-state="invalid"] .flow-step-upload-feedback { color: var(--danger); }
+.flow-step-upload[data-state="valid"] .flow-step-upload-feedback { color: var(--muted); }
 .flow-empty { margin: 12px 4px; color: var(--muted); font-size: 11px; line-height: 1.5; text-align: center; }
 .flow-empty[hidden] { display: none; }
 .flow-draft-actions { display: grid; grid-template-columns: 1fr; gap: 7px; margin: 10px 0 16px; }
@@ -354,6 +369,9 @@ body.petals-off .petal-field { opacity: 0; }
 .flow-run-step[data-state="failed"] { border-color: rgba(185,48,62,.5); background: rgba(255,239,241,.9); }
 .flow-run-step[data-state="failed"] .flow-run-step-number { color: #fff; background: #b9303e; }
 .flow-run-step[data-state="failed"] .flow-run-step-badge { color: #a12635; background: rgba(185,48,62,.12); }
+.flow-run-step[data-state="cancelled"] { border-color: rgba(119,112,134,.34); background: rgba(245,243,248,.9); }
+.flow-run-step[data-state="cancelled"] .flow-run-step-number { color: #fff; background: #756d80; }
+.flow-run-step[data-state="cancelled"] .flow-run-step-badge { color: #625a70; background: rgba(119,112,134,.12); }
 .message-flow-run :is(.flow-run-count,.flow-run-mode) { display: block; margin: 0; color: var(--muted); font-size: 9px; font-weight: 800; }
 .flow-run-warning { border-left: 3px solid #d28a30; padding-left: 8px; color: #815016; font-size: 10px !important; line-height: 1.45 !important; }
 .message-flow-run[data-state="recovering"] { border-color: rgba(210,138,48,.48); background: rgba(255,249,238,.98); }
@@ -364,6 +382,8 @@ body.petals-off .petal-field { opacity: 0; }
 .message-flow-run[data-state="error"] { border-color: rgba(185,48,62,.5); background: rgba(255,239,241,.98); }
 .message-flow-run[data-state="error"] .flow-run-state { color: #a12635; background: rgba(185,48,62,.12); }
 .message-flow-run[data-state="error"] .flow-run-progress > i { background: #b9303e; }
+.message-flow-run[data-state="cancelled"] { border-color: rgba(119,112,134,.4); background: rgba(247,245,249,.98); }
+.message-flow-run[data-state="cancelled"] .flow-run-state { color: #625a70; background: rgba(119,112,134,.12); }
 @keyframes flow-run-scan { 0% { transform: translateX(-120%); } 68%,100% { transform: translateX(360%); } }
 .message-user { margin-left: auto; border-color: transparent; border-bottom-right-radius: 5px; color: #fff; background: linear-gradient(135deg, #6d54bb, #543c9b); }
 .message-user span { color: rgba(255,255,255,.84); }
@@ -758,12 +778,14 @@ html.is-flow-import-dragging .image-drop-hint { display: none; }
   .message-flow-run[data-state="recovering"] { border-color: rgba(231,168,83,.5); background: rgba(75,55,34,.97); }
   .message-flow-run[data-state="success"] { border-color: rgba(85,190,153,.5); background: rgba(31,65,53,.97); }
   .message-flow-run[data-state="error"] { border-color: rgba(240,112,139,.62); background: rgba(83,35,49,.97); }
+  .message-flow-run[data-state="cancelled"] { border-color: rgba(176,166,194,.42); background: rgba(48,43,57,.97); }
   .flow-run-step { border-color: rgba(173,151,255,.2); background: rgba(31,26,42,.38); }
   .flow-run-step[data-state="running"] { border-color: rgba(173,151,255,.52); background: rgba(91,73,164,.2); }
   .flow-run-step[data-state="completed"],
   .flow-run-step[data-state="recovered"] { border-color: rgba(85,190,153,.38); background: rgba(31,65,53,.6); }
   .flow-run-step[data-state="recovering"] { border-color: rgba(231,168,83,.5); background: rgba(75,55,34,.68); }
   .flow-run-step[data-state="failed"] { border-color: rgba(240,112,139,.62); background: rgba(83,35,49,.68); }
+  .flow-run-step[data-state="cancelled"] { border-color: rgba(176,166,194,.36); background: rgba(56,50,66,.72); }
   .flow-run-warning { color: #f1c27d; }
   .flow-import-review-item.is-ready .flow-import-rename { border-color: rgba(85,190,153,.62); background: rgba(31,65,53,.96); }
   .message-form button:disabled { color: #aaa0b7; background: #3a3346; }

@@ -4343,6 +4343,24 @@ ${clippedAnchor.content}`);
   var MAX_TEXT_CHARACTERS = 240;
   var MAX_RECORDED_SELECTOR_CANDIDATES = 12;
   var MAX_RECORDED_ANCESTORS = 6;
+  var MAX_RECORDED_DOM_PATH_SEGMENTS = 10;
+  var MAX_RECORDED_HOVER_ANCESTOR_INDEX = 2;
+  var SEMANTIC_FIELD_CONTROL_SELECTOR = [
+    "input",
+    "textarea",
+    "select",
+    "[contenteditable]:not([contenteditable='false'])",
+    "[role='checkbox']",
+    "[role='combobox']",
+    "[role='listbox']",
+    "[role='radio']",
+    "[role='searchbox']",
+    "[role='slider']",
+    "[role='spinbutton']",
+    "[role='switch']",
+    "[role='textbox']",
+    "[aria-haspopup='listbox']"
+  ].join(",");
   var STABLE_DATA_ATTRIBUTE_NAMES = [
     "data-testid",
     "data-test",
@@ -4354,23 +4372,123 @@ ${clippedAnchor.content}`);
     "data-key",
     "data-id",
     "data-control",
-    "data-name"
+    "data-name",
+    "data-value"
   ];
+  var CUSTOM_SELECT_ROOT_SELECTOR = [
+    ".ant-select",
+    ".ng-select",
+    ".p-dropdown",
+    ".p-select",
+    ".mat-mdc-select",
+    ".mat-select",
+    ".select2-container",
+    ".el-select",
+    ".v-select"
+  ].join(",");
+  var CUSTOM_SELECT_TRIGGER_SELECTOR = [
+    "[role='combobox']",
+    "[aria-haspopup='listbox']",
+    CUSTOM_SELECT_ROOT_SELECTOR,
+    ".ant-select-selector",
+    ".ng-select-container",
+    ".select2-selection"
+  ].join(",");
+  var CUSTOM_SELECT_OPTION_SELECTOR = [
+    "[role='option']",
+    "[role='menuitemradio']",
+    ".ant-select-item-option",
+    ".ng-option",
+    ".p-dropdown-item",
+    ".p-select-option",
+    ".mat-mdc-option",
+    ".mat-option",
+    ".select2-results__option",
+    ".el-select-dropdown__item",
+    ".vs__dropdown-option"
+  ].join(",");
+  var CUSTOM_SELECT_POPUP_SELECTOR = [
+    "[role='listbox']",
+    "[role='menu']",
+    ".ant-select-dropdown",
+    ".ng-dropdown-panel",
+    ".p-dropdown-panel",
+    ".p-select-overlay",
+    ".mat-mdc-select-panel",
+    ".select2-results",
+    ".el-select-dropdown",
+    ".vs__dropdown-menu"
+  ].join(",");
+  var FILE_DROP_TARGET_SELECTOR = [
+    "[data-dropzone]",
+    "[data-upload]",
+    ".ant-upload-drag",
+    ".ant-upload-btn",
+    ".ant-upload",
+    "[class*='dropzone']",
+    "[class*='file-upload']",
+    "[class*='upload-area']",
+    "[role='button']",
+    "label"
+  ].join(",");
+  var FILE_UPLOAD_TRIGGER_PATTERN = /\b(upload|attach|browse|choose|import|file)\b|tải\s*lên|đính\s*kèm|chọn\s*(?:tệp|file)/i;
   function compactText(value, limit = MAX_TEXT_CHARACTERS) {
     return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
   }
   function elementFromEvent(event) {
     return (event.composedPath?.() || [event.target]).find((candidate) => candidate?.nodeType === Node.ELEMENT_NODE) || null;
   }
-  function associatedLabel(element) {
+  function looksLikeFieldWidget(element) {
+    if (element?.matches?.(SEMANTIC_FIELD_CONTROL_SELECTOR)) return true;
+    if (element?.querySelector?.(SEMANTIC_FIELD_CONTROL_SELECTOR)) return true;
+    const identity = [
+      element?.getAttribute?.("class"),
+      element?.getAttribute?.("role"),
+      element?.getAttribute?.("aria-haspopup")
+    ].filter(Boolean).join(" ");
+    return /(?:^|[-_\s])(combobox|control|dropdown|field|picker|select)(?:$|[-_\s])/i.test(identity);
+  }
+  function contextualControlLabel(element, { force = false } = {}) {
+    const isFieldControl = force || looksLikeFieldWidget(element);
+    if (!isFieldControl) return "";
+    const componentRoot = element.closest?.(CUSTOM_SELECT_ROOT_SELECTOR);
+    const controlText = compactText(
+      element.innerText || element.textContent || element.value || element.getAttribute?.("aria-valuetext") || componentRoot?.innerText || componentRoot?.textContent
+    );
+    let depth = 0;
+    for (let current = element.parentElement; current && depth < 4; current = current.parentElement) {
+      depth += 1;
+      const contextText = compactText(current.innerText || current.textContent);
+      if (!contextText || contextText.length > 160) continue;
+      let label = contextText;
+      if (controlText) {
+        const index = label.toLocaleLowerCase().indexOf(controlText.toLocaleLowerCase());
+        if (index < 0) continue;
+        label = compactText(`${label.slice(0, index)} ${label.slice(index + controlText.length)}`);
+      }
+      if (label && label !== controlText) return label;
+    }
+    return "";
+  }
+  function associatedLabel(element, { allowContextual = false } = {}) {
     const labels = Array.from(element?.labels || []);
     if (labels.length) return compactText(labels.map((label) => label.innerText).join(" "));
     const wrappingLabel = element?.closest?.("label");
     if (wrappingLabel) return compactText(wrappingLabel.innerText);
+    const labelledBy = compactText(element?.getAttribute?.("aria-labelledby"));
+    if (labelledBy) {
+      const labelledText = compactText(labelledBy.split(/\s+/).map((id) => element.ownerDocument?.getElementById?.(id)?.innerText || element.ownerDocument?.getElementById?.(id)?.textContent || "").join(" "));
+      if (labelledText) return labelledText;
+    }
     const elementId = element?.id;
-    if (!elementId) return "";
-    const escapedId = cssIdentifier(elementId);
-    return compactText(element.ownerDocument.querySelector(`label[for="${escapedId}"]`)?.innerText);
+    if (elementId) {
+      const escapedId = cssIdentifier(elementId);
+      const explicitLabel = compactText(
+        element.ownerDocument.querySelector(`label[for="${escapedId}"]`)?.innerText
+      );
+      if (explicitLabel) return explicitLabel;
+    }
+    return contextualControlLabel(element, { force: allowContextual });
   }
   function accessibleName(element) {
     return compactText(
@@ -4386,7 +4504,10 @@ ${clippedAnchor.content}`);
   }
   function isLikelyDynamicElementId(value) {
     const id = String(value || "");
-    return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(id) || /^(?:react-select|headlessui|radix|mui|ember|mat-input|generated)[-_:]/i.test(id) || /[-_:]\d{5,}$/.test(id);
+    return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(id) || /^(?:react-select|rc[_-]select|headlessui|radix|mui|ember|mat-input|generated)[-_:]/i.test(id) || /[-_:]\d{5,}$/.test(id);
+  }
+  function stableElementId(element) {
+    return element?.id && !isLikelyDynamicElementId(element.id) ? compactText(element.id) : "";
   }
   function stableDataAttributes(element) {
     const attributes = {};
@@ -4399,7 +4520,7 @@ ${clippedAnchor.content}`);
     return attributes;
   }
   function stableClassNames(element) {
-    return String(element?.getAttribute?.("class") || "").split(/\s+/).map((value) => compactText(value, 100)).filter((value) => value && !/^(?:active|focus|focused|hover|selected|disabled|open|closed)$/i.test(value) && !/^(?:css|jsx)-[a-z0-9]{5,}$/i.test(value)).slice(0, 12);
+    return String(element?.getAttribute?.("class") || "").split(/\s+/).map((value) => compactText(value, 100)).filter((value) => value && !/(?:^|[-_])(?:active|checked|closed|disabled|expanded|focus|focused|hover|loading|open|selected)(?:$|[-_])/i.test(value) && !/^(?:css|jsx)-[a-z0-9]{5,}$/i.test(value)).slice(0, 12);
   }
   function selectorMatchesOnlyElement(element, selector) {
     try {
@@ -4444,7 +4565,9 @@ ${clippedAnchor.content}`);
     for (const [name2, value] of Object.entries(stableDataAttributes(element))) {
       add(`[${name2}="${attributeSelectorValue(value)}"]`);
     }
-    if (element.id) add(`#${cssIdentifier(element.id)}`);
+    if (element.id && !isLikelyDynamicElementId(element.id)) {
+      add(`#${cssIdentifier(element.id)}`);
+    }
     const name = compactText(element.getAttribute("name"));
     if (name) add(`${tag}[name="${attributeSelectorValue(name)}"]`);
     const ariaLabel = compactText(element.getAttribute("aria-label"));
@@ -4470,10 +4593,41 @@ ${clippedAnchor.content}`);
       text: compactText(element.innerText || element.textContent),
       title: compactText(element.getAttribute?.("title")),
       testId: compactText(element.getAttribute?.("data-testid")),
-      elementId: compactText(element.id),
+      elementId: stableElementId(element),
       classNames: stableClassNames(element),
       dataAttributes: stableDataAttributes(element),
       selector: stableSelector(element)
+    };
+  }
+  function elementPosition(element) {
+    const siblings = Array.from(element?.parentElement?.children || []);
+    const sameTagSiblings = siblings.filter((candidate) => candidate.tagName === element?.tagName);
+    const childIndex = siblings.indexOf(element);
+    const sameTagIndex = sameTagSiblings.indexOf(element);
+    return {
+      childIndex: childIndex >= 0 ? childIndex : null,
+      sameTagIndex: sameTagIndex >= 0 ? sameTagIndex : null
+    };
+  }
+  function domPathSegment(element) {
+    if (!element) return null;
+    return {
+      ...contextDescriptor(element),
+      type: compactText(element.getAttribute?.("type"), 60).toLowerCase(),
+      inputName: compactText(element.getAttribute?.("name")),
+      ...elementPosition(element)
+    };
+  }
+  function domFingerprint(element) {
+    const path = [];
+    for (let current = element; current && current !== element.ownerDocument?.documentElement && path.length < MAX_RECORDED_DOM_PATH_SEGMENTS; current = current.parentElement) {
+      const segment = domPathSegment(current);
+      if (segment) path.push(segment);
+    }
+    return {
+      path,
+      previousSibling: domPathSegment(element?.previousElementSibling),
+      nextSibling: domPathSegment(element?.nextElementSibling)
     };
   }
   function ancestorDescriptors(element) {
@@ -4492,12 +4646,12 @@ ${clippedAnchor.content}`);
     }
     const hoveredSet = new Set(hovered);
     const ancestorElements = [];
-    for (let current = element?.parentElement; current; current = current.parentElement) {
+    for (let current = element?.parentElement; current && current !== element.ownerDocument?.body; current = current.parentElement) {
       ancestorElements.push(current);
     }
     const hoveredAncestorIndex = ancestorElements.findIndex((candidate) => hoveredSet.has(candidate));
-    if (hoveredAncestorIndex < 0) return null;
-    return ancestors[hoveredAncestorIndex] || contextDescriptor(ancestorElements[hoveredAncestorIndex]);
+    if (hoveredAncestorIndex < 0 || hoveredAncestorIndex > MAX_RECORDED_HOVER_ANCESTOR_INDEX || !ancestors[hoveredAncestorIndex]) return null;
+    return ancestors[hoveredAncestorIndex];
   }
   function semanticOrdinal(element, name) {
     const tag = String(element.tagName || "").toLowerCase();
@@ -4513,7 +4667,7 @@ ${clippedAnchor.content}`);
     const index = candidates.indexOf(element);
     return index >= 0 ? index : null;
   }
-  function targetDescriptor(element, { origin = element } = {}) {
+  function targetDescriptor(element, { action = "", origin = element } = {}) {
     const text = ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName) ? "" : compactText(element.innerText || element.textContent);
     const tag = element.tagName.toLowerCase();
     const href = tag === "a" ? compactText(element.href || element.getAttribute("href"), 1e3) : "";
@@ -4526,13 +4680,15 @@ ${clippedAnchor.content}`);
       type: compactText(element.getAttribute("type"), 60).toLowerCase(),
       role: compactText(element.getAttribute("role"), 80).toLowerCase(),
       name,
-      label: associatedLabel(element),
+      label: associatedLabel(element, {
+        allowContextual: ["fill", "select_option", "set_checked"].includes(action)
+      }),
       text,
       title: compactText(element.getAttribute("title")),
       value: ["button", "submit", "reset"].includes(String(element.type || "").toLowerCase()) ? compactText(element.value) : "",
       placeholder: compactText(element.getAttribute("placeholder")),
       testId: compactText(element.getAttribute("data-testid")),
-      elementId: compactText(element.id),
+      elementId: stableElementId(element),
       inputName: compactText(element.getAttribute("name")),
       classNames: stableClassNames(element),
       dataAttributes: stableDataAttributes(element),
@@ -4540,6 +4696,7 @@ ${clippedAnchor.content}`);
       selector: selectors[0] || "",
       selectors,
       semanticOrdinal: semanticOrdinal(element, name),
+      domFingerprint: domFingerprint(element),
       ancestors,
       hoverTarget: recordedHoverTarget(element, ancestors),
       form: form ? contextDescriptor(form) : null,
@@ -4558,6 +4715,12 @@ ${clippedAnchor.content}`);
     ].filter(Boolean).join(" ");
     return /(?:password|passcode|one.?time|otp|token|secret|api.?key|private.?key|credit.?card|card.?number|cvv|cvc)/i.test(identity);
   }
+  function editableControlFrom(element) {
+    if (!element?.closest) return element;
+    return element.closest(
+      "input,textarea,[contenteditable]:not([contenteditable='false'])"
+    ) || element;
+  }
   function isTextControl(element) {
     if (element?.isContentEditable) return true;
     if (element instanceof HTMLTextAreaElement) return true;
@@ -4565,12 +4728,10 @@ ${clippedAnchor.content}`);
     return ![
       "button",
       "checkbox",
-      "color",
       "file",
       "hidden",
       "image",
       "radio",
-      "range",
       "reset",
       "submit"
     ].includes(String(element.type || "text").toLowerCase());
@@ -4580,7 +4741,7 @@ ${clippedAnchor.content}`);
   }
   function clickTarget(element) {
     const candidate = element.closest?.(
-      "button,a[href],summary,[role='button'],[role='link'],[role='menuitem'],[role='tab'],input[type='button'],input[type='submit'],input[type='reset'],[onclick],[tabindex]"
+      "button,a[href],summary,[role='button'],[role='checkbox'],[role='link'],[role='menuitem'],[role='menuitemcheckbox'],[role='menuitemradio'],[role='radio'],[role='switch'],[role='tab'],[role='treeitem'],[aria-pressed],input[type='button'],input[type='submit'],input[type='reset'],[onclick],[tabindex]"
     );
     if (candidate) {
       if (candidate.matches("label") || candidate.closest("label")?.control) return null;
@@ -4591,6 +4752,141 @@ ${clippedAnchor.content}`);
     );
     return delegatedTarget || null;
   }
+  function isFileInput(element) {
+    return element instanceof HTMLInputElement && String(element.type || "").toLowerCase() === "file";
+  }
+  function fileInputFrom(element) {
+    const direct = element?.closest?.("input[type='file']");
+    if (direct) return direct;
+    const label = element?.closest?.("label");
+    if (!label) return null;
+    const labelled = label.htmlFor ? label.ownerDocument?.getElementById?.(label.htmlFor) : label.querySelector?.("input[type='file']");
+    return isFileInput(labelled) ? labelled : null;
+  }
+  function fileMetadata(fileList) {
+    return Array.from(fileList || []).map((file) => ({
+      lastModified: Number(file.lastModified) || 0,
+      name: compactText(file.name, 500),
+      size: Number(file.size) || 0,
+      type: compactText(file.type, 200).toLowerCase()
+    })).filter((file) => file.name);
+  }
+  function fileUploadSignature(files) {
+    return files.map((file) => `${file.name}\0${file.size}\0${file.lastModified}\0${file.type}`).join("");
+  }
+  function fileDropSurface(element) {
+    return element?.closest?.(FILE_DROP_TARGET_SELECTOR) || element;
+  }
+  function relatedFileInput(element) {
+    const direct = fileInputFrom(element);
+    if (direct) return direct;
+    for (let current = element, depth = 0; current && depth < 7; current = current.parentElement, depth += 1) {
+      const nested = current.querySelector?.("input[type='file']");
+      if (isFileInput(nested)) return nested;
+    }
+    return null;
+  }
+  function customSelectTrigger(element, { allowNestedTrigger = true } = {}) {
+    const direct = element?.closest?.(CUSTOM_SELECT_TRIGGER_SELECTOR);
+    if (direct) return direct.closest?.(CUSTOM_SELECT_ROOT_SELECTOR) || direct;
+    if (!allowNestedTrigger || element?.matches?.("input,textarea,select,[contenteditable]")) return null;
+    for (let current = element?.parentElement, depth = 0; current && depth < 5; current = current.parentElement, depth += 1) {
+      const nested = current.querySelector?.(CUSTOM_SELECT_TRIGGER_SELECTOR);
+      if (nested) return current.closest?.(CUSTOM_SELECT_ROOT_SELECTOR) || current;
+    }
+    return null;
+  }
+  function customSelectSurface(element) {
+    const hasVisibleBox = (candidate) => {
+      const rect = candidate?.getBoundingClientRect?.();
+      if (!rect) return true;
+      return rect.width > 0 && rect.height > 0;
+    };
+    const componentRoot = element?.closest?.(CUSTOM_SELECT_ROOT_SELECTOR);
+    if (componentRoot && hasVisibleBox(componentRoot)) return componentRoot;
+    if (hasVisibleBox(element)) return element;
+    for (let current = element?.parentElement, depth = 0; current && depth < 5; current = current.parentElement, depth += 1) {
+      if (hasVisibleBox(current)) return current;
+    }
+    return element;
+  }
+  function customSelectReplayTrigger(element) {
+    if (!element) return null;
+    return customSelectSurface(element);
+  }
+  function customSelectOption(element) {
+    const semanticOption = element?.closest?.(CUSTOM_SELECT_OPTION_SELECTOR);
+    if (semanticOption) return semanticOption;
+    const dataOption = element?.closest?.("[data-value]");
+    return dataOption?.closest?.(CUSTOM_SELECT_POPUP_SELECTOR) ? dataOption : null;
+  }
+  function customSelectOptionValue(option) {
+    return compactText(
+      option?.getAttribute?.("data-value") || option?.getAttribute?.("value") || option?.getAttribute?.("aria-label") || option?.innerText || option?.textContent,
+      2e3
+    );
+  }
+  function customSelectOptionDescriptor(option, { origin = option } = {}) {
+    const descriptor = targetDescriptor(option, { origin });
+    const text = compactText(option?.innerText || option?.textContent);
+    const value = customSelectOptionValue(option);
+    return {
+      ...descriptor,
+      role: descriptor.role || "option",
+      name: text || value,
+      label: "",
+      text: text || value,
+      value
+    };
+  }
+  function relatedCustomSelectTrigger(option, recentTrigger) {
+    const listbox = option?.closest?.(CUSTOM_SELECT_POPUP_SELECTOR);
+    const listboxId = compactText(listbox?.id, 240);
+    if (listboxId) {
+      const escapedId = attributeSelectorValue(listboxId);
+      const controlled = option.ownerDocument?.querySelector?.(
+        `[aria-controls="${escapedId}"],[aria-owns="${escapedId}"]`
+      );
+      if (controlled) return controlled;
+    }
+    const activeElement = option?.ownerDocument?.activeElement;
+    const activeTrigger = customSelectTrigger(activeElement);
+    if (activeTrigger) return activeTrigger;
+    const expandedTrigger = option?.ownerDocument?.querySelector?.(
+      "[role='combobox'][aria-expanded='true'],[aria-haspopup='listbox'][aria-expanded='true'],.ant-select-open,.ng-select-opened,.p-dropdown-open,.p-select-open"
+    );
+    if (expandedTrigger) return expandedTrigger;
+    return recentTrigger?.isConnected ? recentTrigger : null;
+  }
+  function customToggleTarget(element) {
+    return element?.closest?.(
+      "[role='checkbox'],[role='radio'],[role='switch'],[aria-pressed]"
+    ) || null;
+  }
+  function customToggleValue(element) {
+    const value = element?.getAttribute?.("aria-checked") ?? element?.getAttribute?.("aria-pressed");
+    if (value === null) return null;
+    return String(value).toLowerCase() === "true";
+  }
+  function eventModifiers(event) {
+    return {
+      alt: event.altKey === true,
+      ctrl: event.ctrlKey === true,
+      meta: event.metaKey === true,
+      shift: event.shiftKey === true
+    };
+  }
+  function looksLikeFileUploadTrigger(element) {
+    const descriptor = [
+      element?.innerText,
+      element?.textContent,
+      element?.getAttribute?.("aria-label"),
+      element?.getAttribute?.("title"),
+      element?.getAttribute?.("name"),
+      element?.id
+    ].filter(Boolean).join(" ");
+    return FILE_UPLOAD_TRIGGER_PATTERN.test(descriptor);
+  }
   function createFlowRecorder({
     emit,
     documentObject = document,
@@ -4598,6 +4894,11 @@ ${clippedAnchor.content}`);
   }) {
     let active = false;
     let sessionId = "";
+    let dragSource = null;
+    let recentCustomSelectTrigger = null;
+    let recentFileTrigger = null;
+    let recentRecordedUpload = null;
+    let uploadVariableSequence = 0;
     const pendingInputs = /* @__PURE__ */ new Map();
     function emitStep(step) {
       if (!active || !sessionId) return Promise.resolve();
@@ -4638,25 +4939,79 @@ ${clippedAnchor.content}`);
     }
     function onInput(event) {
       if (!active || !event.isTrusted) return;
-      const element = elementFromEvent(event);
+      const element = editableControlFrom(elementFromEvent(event));
       if (!isTextControl(element)) return;
       queueInput(element);
     }
+    function recordFileUpload({ files: rawFiles, input = null, trigger = null }) {
+      const files = fileMetadata(rawFiles);
+      if (!files.length) return;
+      const signature = fileUploadSignature(files);
+      const now = Date.now();
+      if (recentRecordedUpload?.signature === signature && now - recentRecordedUpload.at < 1500) return;
+      const target = input || trigger;
+      if (!target) return;
+      recentRecordedUpload = { at: now, signature };
+      const fileVariables = files.map(() => `UPLOAD_FILE_${++uploadVariableSequence}`);
+      emitStep({
+        accept: compactText(input?.getAttribute?.("accept"), 1e3),
+        action: "upload_file",
+        files,
+        fileVariables,
+        localFilePaths: [],
+        multiple: input ? Boolean(input.multiple) : files.length > 1,
+        target: targetDescriptor(target),
+        triggerTarget: trigger && trigger !== target ? targetDescriptor(trigger) : null
+      });
+    }
     function onChange(event) {
       if (!active || !event.isTrusted) return;
-      const element = elementFromEvent(event);
+      const eventElement = elementFromEvent(event);
+      const element = editableControlFrom(eventElement);
       if (!element) return;
-      if (isTextControl(element)) {
-        flushInput(element);
+      if (isFileInput(element)) {
+        const trigger = recentFileTrigger?.element?.isConnected && Date.now() - recentFileTrigger.at < 3e4 ? recentFileTrigger.element : null;
+        recentFileTrigger = null;
+        recordFileUpload({ files: element.files, input: element, trigger });
         return;
       }
       if (element instanceof HTMLSelectElement) {
+        const selectedOptions = Array.from(element.selectedOptions || []);
         emitStep({
           action: "select_option",
           target: targetDescriptor(element),
           value: element.value,
-          optionText: compactText(element.selectedOptions?.[0]?.textContent)
+          values: selectedOptions.map((option) => String(option.value)),
+          optionText: compactText(selectedOptions[0]?.textContent),
+          optionTexts: selectedOptions.map((option) => compactText(option.textContent))
         });
+        return;
+      }
+      const customTrigger = customSelectTrigger(element, { allowNestedTrigger: false });
+      if (customTrigger) {
+        const activeOptionId = compactText(customTrigger.getAttribute("aria-activedescendant"), 240);
+        const selectedOption = activeOptionId ? customTrigger.ownerDocument?.getElementById?.(activeOptionId) : customTrigger.ownerDocument?.querySelector?.("[role='option'][aria-selected='true']");
+        const selectedText = customSelectOptionValue(selectedOption) || compactText(element.value || element.getAttribute?.("aria-valuetext"));
+        if (selectedText) {
+          const pending = pendingInputs.get(element);
+          if (pending?.timerId) windowObject.clearTimeout(pending.timerId);
+          pendingInputs.delete(element);
+          emitStep({
+            action: "select_option",
+            optionTarget: selectedOption ? customSelectOptionDescriptor(selectedOption) : null,
+            optionText: selectedText,
+            target: targetDescriptor(customSelectReplayTrigger(customTrigger), {
+              action: "select_option"
+            }),
+            value: selectedText,
+            values: [selectedText],
+            optionTexts: [selectedText]
+          });
+        }
+        return;
+      }
+      if (isTextControl(element)) {
+        flushInput(element);
         return;
       }
       if (element instanceof HTMLInputElement && ["checkbox", "radio"].includes(String(element.type).toLowerCase())) {
@@ -4669,21 +5024,134 @@ ${clippedAnchor.content}`);
     }
     function onBlur(event) {
       if (!active) return;
-      const element = elementFromEvent(event);
+      const element = editableControlFrom(elementFromEvent(event));
       if (pendingInputs.has(element)) flushInput(element);
     }
     function onClick(event) {
       if (!active || !event.isTrusted || event.button !== 0) return;
       const origin = elementFromEvent(event);
       if (!origin) return;
+      const fileInput = fileInputFrom(origin);
+      if (fileInput) {
+        recentFileTrigger = {
+          at: Date.now(),
+          element: origin.closest?.("label,button,[role='button']") || fileInput
+        };
+        return;
+      }
       if (origin instanceof HTMLInputElement && ["checkbox", "radio"].includes(String(origin.type).toLowerCase())) return;
-      if (isTextControl(origin) || origin instanceof HTMLSelectElement || origin.closest?.("input,textarea,select,[contenteditable='true'],label")) return;
+      const option = customSelectOption(origin);
+      if (option) {
+        const trigger = customSelectReplayTrigger(
+          relatedCustomSelectTrigger(option, recentCustomSelectTrigger)
+        );
+        recentCustomSelectTrigger = null;
+        if (trigger) {
+          const optionText = compactText(option.innerText || option.textContent);
+          emitStep({
+            action: "select_option",
+            optionTarget: customSelectOptionDescriptor(option, { origin }),
+            optionText,
+            target: targetDescriptor(trigger, { action: "select_option" }),
+            value: customSelectOptionValue(option),
+            values: [customSelectOptionValue(option)],
+            optionTexts: [optionText]
+          });
+          return;
+        }
+      }
+      const selectTrigger = customSelectTrigger(origin);
+      if (selectTrigger) {
+        recentCustomSelectTrigger = customSelectReplayTrigger(selectTrigger);
+        return;
+      }
+      const toggle = customToggleTarget(origin);
+      if (toggle && !(toggle instanceof HTMLInputElement)) {
+        windowObject.setTimeout(() => {
+          if (!active || !toggle.isConnected) return;
+          const value = customToggleValue(toggle);
+          if (value === null) {
+            emitStep({
+              action: "click",
+              modifiers: eventModifiers(event),
+              target: targetDescriptor(toggle, { origin })
+            });
+            return;
+          }
+          emitStep({
+            action: "set_checked",
+            target: targetDescriptor(toggle, { origin }),
+            value
+          });
+        }, 0);
+        return;
+      }
+      if (isTextControl(editableControlFrom(origin)) || origin instanceof HTMLSelectElement || origin.closest?.("input,textarea,select,[contenteditable='true'],label")) return;
       const element = clickTarget(origin);
       if (!element) return;
+      if (looksLikeFileUploadTrigger(element)) {
+        recentFileTrigger = { at: Date.now(), element };
+      }
       emitStep({
         action: "click",
+        modifiers: eventModifiers(event),
         target: targetDescriptor(element, { origin })
       });
+    }
+    function onDoubleClick(event) {
+      if (!active || !event.isTrusted || event.button !== 0) return;
+      const origin = elementFromEvent(event);
+      const element = origin && clickTarget(origin);
+      if (!element) return;
+      emitStep({
+        action: "double_click",
+        modifiers: eventModifiers(event),
+        target: targetDescriptor(element, { origin })
+      });
+    }
+    function onContextMenu(event) {
+      if (!active || !event.isTrusted) return;
+      const origin = elementFromEvent(event);
+      const element = origin && (clickTarget(origin) || origin);
+      if (!element) return;
+      emitStep({
+        action: "context_click",
+        modifiers: eventModifiers(event),
+        target: targetDescriptor(element, { origin })
+      });
+    }
+    function onDragStart(event) {
+      if (!active || !event.isTrusted) return;
+      const origin = elementFromEvent(event);
+      const source = origin?.closest?.("[draggable='true']") || origin;
+      dragSource = source ? targetDescriptor(source, { origin }) : null;
+    }
+    function onDrop(event) {
+      if (!active || !event.isTrusted) return;
+      const origin = elementFromEvent(event);
+      if (!origin) return;
+      const droppedFiles = event.dataTransfer?.files;
+      if (droppedFiles?.length) {
+        const trigger = fileDropSurface(origin);
+        recordFileUpload({
+          files: droppedFiles,
+          input: relatedFileInput(trigger),
+          trigger
+        });
+        dragSource = null;
+        recentFileTrigger = null;
+        return;
+      }
+      if (!dragSource) return;
+      emitStep({
+        action: "drag_drop",
+        destinationTarget: targetDescriptor(origin),
+        target: dragSource
+      });
+      dragSource = null;
+    }
+    function onDragEnd() {
+      dragSource = null;
     }
     function onSubmit(event) {
       if (!active || !event.isTrusted) return;
@@ -4696,6 +5164,11 @@ ${clippedAnchor.content}`);
     }
     function addListeners() {
       documentObject.addEventListener("click", onClick, true);
+      documentObject.addEventListener("contextmenu", onContextMenu, true);
+      documentObject.addEventListener("dblclick", onDoubleClick, true);
+      documentObject.addEventListener("dragend", onDragEnd, true);
+      documentObject.addEventListener("dragstart", onDragStart, true);
+      documentObject.addEventListener("drop", onDrop, true);
       documentObject.addEventListener("input", onInput, true);
       documentObject.addEventListener("change", onChange, true);
       documentObject.addEventListener("blur", onBlur, true);
@@ -4703,6 +5176,11 @@ ${clippedAnchor.content}`);
     }
     function removeListeners() {
       documentObject.removeEventListener("click", onClick, true);
+      documentObject.removeEventListener("contextmenu", onContextMenu, true);
+      documentObject.removeEventListener("dblclick", onDoubleClick, true);
+      documentObject.removeEventListener("dragend", onDragEnd, true);
+      documentObject.removeEventListener("dragstart", onDragStart, true);
+      documentObject.removeEventListener("drop", onDrop, true);
       documentObject.removeEventListener("input", onInput, true);
       documentObject.removeEventListener("change", onChange, true);
       documentObject.removeEventListener("blur", onBlur, true);
@@ -4714,6 +5192,11 @@ ${clippedAnchor.content}`);
       if (!active) addListeners();
       active = true;
       sessionId = normalizedSessionId;
+      dragSource = null;
+      recentCustomSelectTrigger = null;
+      recentFileTrigger = null;
+      recentRecordedUpload = null;
+      uploadVariableSequence = 0;
       return { success: true, recording: true, sessionId };
     }
     async function stop() {
@@ -4722,6 +5205,10 @@ ${clippedAnchor.content}`);
       const stoppedSessionId = sessionId;
       active = false;
       sessionId = "";
+      dragSource = null;
+      recentCustomSelectTrigger = null;
+      recentFileTrigger = null;
+      recentRecordedUpload = null;
       return { success: true, recording: false, sessionId: stoppedSessionId };
     }
     return {
@@ -4738,6 +5225,9 @@ ${clippedAnchor.content}`);
   var RECORDED_FORM_BATCH_TYPE = "form_batch";
   var MAX_TARGET_TEXT_CHARACTERS = 240;
   var MAX_VALUE_CHARACTERS = 2e3;
+  var MAX_LOCAL_FILE_PATH_CHARACTERS = 4096;
+  var MAX_RECORDED_UPLOAD_FILES = 20;
+  var RECORDED_FORM_ACTIONS = /* @__PURE__ */ new Set(["fill", "select_option", "set_checked"]);
   function isObject(value) {
     return Boolean(value) && typeof value === "object" && !Array.isArray(value);
   }
@@ -4746,6 +5236,52 @@ ${clippedAnchor.content}`);
   }
   function normalizeStringList(value, { limit = 12, textLimit = 1e3 } = {}) {
     return [...new Set((Array.isArray(value) ? value : []).map((item) => clipText(item, textLimit)).filter(Boolean))].slice(0, limit);
+  }
+  function normalizeRecordedFilePath(value) {
+    const path = String(value ?? "").trim();
+    const quotePairs = /* @__PURE__ */ new Map([
+      ['"', '"'],
+      ["'", "'"],
+      ["\u201C", "\u201D"],
+      ["\u2018", "\u2019"]
+    ]);
+    const closingQuote = quotePairs.get(path[0]);
+    const unquoted = closingQuote && path.at(-1) === closingQuote ? path.slice(1, -1).trim() : path;
+    return unquoted.slice(0, MAX_LOCAL_FILE_PATH_CHARACTERS);
+  }
+  function normalizeLocalFilePaths(value) {
+    return (Array.isArray(value) ? value : []).map(normalizeRecordedFilePath).slice(0, MAX_RECORDED_UPLOAD_FILES);
+  }
+  function normalizeRecordedFiles(value) {
+    return (Array.isArray(value) ? value : []).filter(isObject).map((file) => ({
+      name: clipText(file.name, 500),
+      type: clipText(file.type, 200).toLowerCase(),
+      size: Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.round(Number(file.size) || 0))),
+      lastModified: Math.max(0, Math.round(Number(file.lastModified) || 0))
+    })).filter((file) => file.name).slice(0, MAX_RECORDED_UPLOAD_FILES);
+  }
+  function normalizeFileVariables(value, count = 0) {
+    const variables = normalizeStringList(value, {
+      limit: MAX_RECORDED_UPLOAD_FILES,
+      textLimit: 80
+    }).map((name) => name.replace(/^\$\{(.+)\}$/, "$1")).filter((name) => /^[A-Z][A-Z0-9_]{0,79}$/.test(name));
+    const expectedCount = Math.min(
+      MAX_RECORDED_UPLOAD_FILES,
+      Math.max(1, Number(count) || variables.length || 1)
+    );
+    for (let index = variables.length; index < expectedCount; index += 1) {
+      variables.push(`UPLOAD_FILE_${index + 1}`);
+    }
+    return variables.slice(0, expectedCount);
+  }
+  function normalizeModifiers(value) {
+    const source = isObject(value) ? value : {};
+    return {
+      alt: source.alt === true,
+      ctrl: source.ctrl === true,
+      meta: source.meta === true,
+      shift: source.shift === true
+    };
   }
   function normalizeRecordedDataAttributes(value) {
     if (!isObject(value)) return {};
@@ -4769,6 +5305,64 @@ ${clippedAnchor.content}`);
       selector: clipText(value.selector, 1e3)
     };
   }
+  function normalizeRecordedDomPathSegment(value) {
+    const context = normalizeRecordedTargetContext(value);
+    if (!context) return null;
+    return {
+      ...context,
+      type: clipText(value.type, 60).toLowerCase(),
+      inputName: clipText(value.inputName, MAX_TARGET_TEXT_CHARACTERS),
+      childIndex: Number.isInteger(value.childIndex) && value.childIndex >= 0 ? Math.min(value.childIndex, 1e4) : null,
+      sameTagIndex: Number.isInteger(value.sameTagIndex) && value.sameTagIndex >= 0 ? Math.min(value.sameTagIndex, 1e4) : null
+    };
+  }
+  function normalizeRecordedDomFingerprint(value) {
+    if (!isObject(value)) return null;
+    const path = (Array.isArray(value.path) ? value.path : []).map(normalizeRecordedDomPathSegment).filter(Boolean).slice(0, 10);
+    if (!path.length) return null;
+    return {
+      path,
+      previousSibling: normalizeRecordedDomPathSegment(value.previousSibling),
+      nextSibling: normalizeRecordedDomPathSegment(value.nextSibling)
+    };
+  }
+  function inferredRecordedControlLabel(target, action = "") {
+    const fieldAction = RECORDED_FORM_ACTIONS.has(action);
+    const fieldLike = ["input", "select", "textarea"].includes(target.tag) || [
+      "checkbox",
+      "combobox",
+      "listbox",
+      "radio",
+      "searchbox",
+      "slider",
+      "spinbutton",
+      "switch",
+      "textbox"
+    ].includes(target.role) || target.classNames.some((name) => /(?:^|[-_])(combobox|control|dropdown|field|picker|select)(?:$|[-_])/i.test(name));
+    if (!fieldAction && !fieldLike) return "";
+    const identity = target.text || target.name || target.controlValue;
+    if (!identity) return "";
+    const normalizedIdentity = identity.toLocaleLowerCase();
+    for (const ancestor of target.ancestors.slice(0, 3)) {
+      const contextText = clipText(ancestor.text, MAX_TARGET_TEXT_CHARACTERS);
+      if (!contextText || contextText.length > 160) continue;
+      const index = contextText.toLocaleLowerCase().indexOf(normalizedIdentity);
+      if (index < 0) continue;
+      const label = clipText(
+        `${contextText.slice(0, index)} ${contextText.slice(index + identity.length)}`.replace(/\s+/g, " ").trim(),
+        MAX_TARGET_TEXT_CHARACTERS
+      );
+      if (label) return label;
+    }
+    return "";
+  }
+  function normalizeRecordedHoverTarget(value) {
+    const target = normalizeRecordedTargetContext(value);
+    if (!target) return null;
+    if (["html", "body", "main"].includes(target.tag)) return null;
+    if (/^(?:html\s*>\s*body|body|main)(?:\.|\[|\s|$)/i.test(target.selector)) return null;
+    return target;
+  }
   function newId(prefix) {
     const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     return `${prefix}-${suffix}`;
@@ -4777,7 +5371,7 @@ ${clippedAnchor.content}`);
     const timestamp = Number(value);
     return Number.isFinite(timestamp) && timestamp > 0 ? Math.round(timestamp) : fallback;
   }
-  function normalizeRecordedTarget(value) {
+  function normalizeRecordedTarget(value, { action = "" } = {}) {
     const source = isObject(value) ? value : {};
     const target = {
       tag: clipText(source.tag, 40).toLowerCase(),
@@ -4798,29 +5392,63 @@ ${clippedAnchor.content}`);
       selector: clipText(source.selector, 1e3),
       selectors: normalizeStringList(source.selectors, { textLimit: 1e3 }),
       semanticOrdinal: Number.isInteger(source.semanticOrdinal) && source.semanticOrdinal >= 0 ? Math.min(source.semanticOrdinal, 1e3) : null,
+      domFingerprint: normalizeRecordedDomFingerprint(source.domFingerprint),
       ancestors: (Array.isArray(source.ancestors) ? source.ancestors : []).map(normalizeRecordedTargetContext).filter(Boolean).slice(0, 6),
-      hoverTarget: normalizeRecordedTargetContext(source.hoverTarget),
+      hoverTarget: normalizeRecordedHoverTarget(source.hoverTarget),
       form: normalizeRecordedTargetContext(source.form),
       origin: normalizeRecordedTargetContext(source.origin)
     };
+    if (!target.label) target.label = inferredRecordedControlLabel(target, action);
     if (!target.selectors.length && target.selector) target.selectors = [target.selector];
     return target;
+  }
+  function recordedSelectIdentity(step) {
+    const values = (step.values?.length ? step.values : [step.value]).map((value) => clipText(value, MAX_VALUE_CHARACTERS)).filter(Boolean);
+    const texts = (step.optionTexts?.length ? step.optionTexts : [step.optionText]).map((value) => clipText(value, MAX_TARGET_TEXT_CHARACTERS)).filter(Boolean);
+    return `${values.join("")}\0${texts.join("")}`;
+  }
+  function recordedTargetLooksLikeSelect(target) {
+    if (target?.tag === "select") return true;
+    if (["combobox", "listbox"].includes(target?.role)) return true;
+    const identity = [
+      ...target?.classNames || [],
+      target?.selector,
+      ...target?.selectors || []
+    ].filter(Boolean).join(" ").toLowerCase();
+    return /(?:^|[^a-z0-9])(select|combobox|dropdown)(?:$|[^a-z0-9])/.test(identity);
+  }
+  function removeRecorderGhostSelections(children) {
+    const recentCredibleSelections = /* @__PURE__ */ new Map();
+    return children.filter((child) => {
+      if (child.action !== "select_option") return true;
+      const identity = recordedSelectIdentity(child);
+      if (!identity.replace("\0", "")) return true;
+      const credibleTarget = recordedTargetLooksLikeSelect(child.target);
+      const previousRecordedAt = recentCredibleSelections.get(identity);
+      if (!credibleTarget && Number.isFinite(previousRecordedAt) && child.recordedAt - previousRecordedAt >= 0 && child.recordedAt - previousRecordedAt < 1e4) return false;
+      if (credibleTarget) recentCredibleSelections.set(identity, child.recordedAt);
+      return true;
+    });
   }
   function normalizeStep(value, index = 0, depth = 0) {
     if (!isObject(value)) return null;
     const allowedActions = /* @__PURE__ */ new Set([
       RECORDED_STEP_GROUP_ACTION,
       "click",
+      "context_click",
+      "double_click",
+      "drag_drop",
       "fill",
       "navigate",
       "select_option",
       "set_checked",
-      "submit"
+      "submit",
+      "upload_file"
     ]);
     const action = allowedActions.has(value.action) ? value.action : "";
     if (!action) return null;
     if (action === RECORDED_STEP_GROUP_ACTION && depth > 3) return null;
-    const target = normalizeRecordedTarget(value.target);
+    const target = normalizeRecordedTarget(value.target, { action });
     const recordedAt = normalizeTimestamp(value.recordedAt);
     const step = {
       id: clipText(value.id, 180) || newId(`step-${index + 1}`),
@@ -4835,11 +5463,14 @@ ${clippedAnchor.content}`);
       recordedAt
     };
     if (action === RECORDED_STEP_GROUP_ACTION) {
-      const children = (Array.isArray(value.children) ? value.children : []).flatMap((child, childIndex) => {
+      let children = (Array.isArray(value.children) ? value.children : []).flatMap((child, childIndex) => {
         const normalized = normalizeStep(child, childIndex, depth + 1);
         if (!normalized) return [];
         return normalized.action === RECORDED_STEP_GROUP_ACTION ? normalized.children || [] : [normalized];
       }).slice(0, MAX_RECORDED_FLOW_STEPS);
+      if (value.groupType === RECORDED_FORM_BATCH_TYPE) {
+        children = removeRecorderGhostSelections(children);
+      }
       if (!children.length) return null;
       step.children = children;
       if (value.groupType === RECORDED_FORM_BATCH_TYPE) {
@@ -4853,6 +5484,31 @@ ${clippedAnchor.content}`);
     else if (value.value !== void 0) step.value = String(value.value).slice(0, MAX_VALUE_CHARACTERS);
     if (value.optionText !== void 0) {
       step.optionText = clipText(value.optionText, MAX_TARGET_TEXT_CHARACTERS);
+    }
+    if (action === "select_option") {
+      step.values = normalizeStringList(value.values, {
+        limit: 200,
+        textLimit: MAX_VALUE_CHARACTERS
+      });
+      step.optionTexts = normalizeStringList(value.optionTexts, {
+        limit: 200,
+        textLimit: MAX_TARGET_TEXT_CHARACTERS
+      });
+      step.optionTarget = isObject(value.optionTarget) ? normalizeRecordedTarget(value.optionTarget) : null;
+    }
+    if (["click", "context_click", "double_click"].includes(action)) {
+      step.modifiers = normalizeModifiers(value.modifiers);
+    }
+    if (action === "drag_drop") {
+      step.destinationTarget = normalizeRecordedTarget(value.destinationTarget);
+    }
+    if (action === "upload_file") {
+      step.files = normalizeRecordedFiles(value.files);
+      step.fileVariables = normalizeFileVariables(value.fileVariables, step.files.length);
+      step.localFilePaths = normalizeLocalFilePaths(value.localFilePaths);
+      step.accept = clipText(value.accept, 1e3);
+      step.multiple = value.multiple === true || step.fileVariables.length > 1;
+      step.triggerTarget = isObject(value.triggerTarget) ? normalizeRecordedTarget(value.triggerTarget) : null;
     }
     if (value.resultUrl !== void 0) step.resultUrl = clipText(value.resultUrl, 3e3);
     return step;
@@ -4878,6 +5534,74 @@ ${clippedAnchor.content}`);
     "[data-route]",
     "[data-href]"
   ].join(",");
+  var SEMANTIC_FIELD_CONTROL_SELECTOR2 = [
+    "input",
+    "textarea",
+    "select",
+    "[contenteditable]:not([contenteditable='false'])",
+    "[role='checkbox']",
+    "[role='combobox']",
+    "[role='listbox']",
+    "[role='radio']",
+    "[role='searchbox']",
+    "[role='slider']",
+    "[role='spinbutton']",
+    "[role='switch']",
+    "[role='textbox']",
+    "[aria-haspopup='listbox']"
+  ].join(",");
+  var CUSTOM_SELECT_ROOT_SELECTOR2 = [
+    ".ant-select",
+    ".ng-select",
+    ".p-dropdown",
+    ".p-select",
+    ".mat-mdc-select",
+    ".mat-select",
+    ".select2-container",
+    ".el-select",
+    ".v-select"
+  ].join(",");
+  var CUSTOM_SELECT_TRIGGER_SELECTOR2 = [
+    '[role="combobox"]',
+    '[aria-haspopup="listbox"]'
+  ].join(",");
+  var CUSTOM_SELECT_INTERACTION_SELECTOR = [
+    ".ant-select-selector",
+    ".ng-select-container",
+    ".p-dropdown-trigger",
+    ".p-select-dropdown",
+    ".mat-mdc-select-trigger",
+    ".mat-select-trigger",
+    ".select2-selection",
+    ".el-select__wrapper",
+    ".vs__dropdown-toggle"
+  ].join(",");
+  var CUSTOM_SELECT_OPTION_SELECTOR2 = [
+    '[role="option"]',
+    '[role="menuitemradio"]',
+    "[data-value]",
+    ".ant-select-item-option",
+    ".ng-option",
+    ".p-dropdown-item",
+    ".p-select-option",
+    ".mat-mdc-option",
+    ".mat-option",
+    ".select2-results__option",
+    ".el-select-dropdown__item",
+    ".vs__dropdown-option"
+  ].join(",");
+  var CUSTOM_SELECT_POPUP_SELECTOR2 = [
+    '[role="listbox"]',
+    '[role="menu"]',
+    ".ant-select-dropdown",
+    ".ng-dropdown-panel",
+    ".p-dropdown-panel",
+    ".p-select-overlay",
+    ".mat-mdc-select-panel",
+    ".select2-results",
+    ".el-select-dropdown",
+    ".vs__dropdown-menu"
+  ].join(",");
   function compactText2(value, limit = 1e3) {
     return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
   }
@@ -4889,7 +5613,7 @@ ${clippedAnchor.content}`);
   }
   function isLikelyDynamicElementId2(value) {
     const id = String(value || "");
-    return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(id) || /^(?:react-select|headlessui|radix|mui|ember|mat-input|generated)[-_:]/i.test(id) || /[-_:]\d{5,}$/.test(id);
+    return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(id) || /^(?:react-select|rc[_-]select|headlessui|radix|mui|ember|mat-input|generated)[-_:]/i.test(id) || /[-_:]\d{5,}$/.test(id);
   }
   function queryAll(root, selector) {
     try {
@@ -4911,15 +5635,51 @@ ${clippedAnchor.content}`);
     }
     return roots;
   }
-  function associatedLabel2(element) {
+  function looksLikeFieldWidget2(element) {
+    if (element?.matches?.(SEMANTIC_FIELD_CONTROL_SELECTOR2)) return true;
+    if (element?.querySelector?.(SEMANTIC_FIELD_CONTROL_SELECTOR2)) return true;
+    const identity = [
+      element?.getAttribute?.("class"),
+      element?.getAttribute?.("role"),
+      element?.getAttribute?.("aria-haspopup")
+    ].filter(Boolean).join(" ");
+    return /(?:^|[-_\s])(combobox|control|dropdown|field|picker|select)(?:$|[-_\s])/i.test(identity);
+  }
+  function contextualControlLabel2(element, { force = false } = {}) {
+    if (!force && !looksLikeFieldWidget2(element)) return "";
+    const controlText = compactText2(element.innerText || element.textContent, 240);
+    let depth = 0;
+    for (let current = element.parentElement; current && depth < 4; current = current.parentElement) {
+      depth += 1;
+      const contextText = compactText2(current.innerText || current.textContent, 240);
+      if (!contextText || contextText.length > 160) continue;
+      let label = contextText;
+      if (controlText) {
+        const index = label.toLocaleLowerCase().indexOf(controlText.toLocaleLowerCase());
+        if (index < 0) continue;
+        label = compactText2(`${label.slice(0, index)} ${label.slice(index + controlText.length)}`, 240);
+      }
+      if (label && label !== controlText) return label;
+    }
+    return "";
+  }
+  function associatedLabel2(element, { allowContextual = false } = {}) {
     const labels = Array.from(element?.labels || []);
     if (labels.length) return compactText2(labels.map((label) => label.innerText || label.textContent).join(" "));
     const wrappingLabel = element?.closest?.("label");
     if (wrappingLabel) return compactText2(wrappingLabel.innerText || wrappingLabel.textContent);
+    const labelledBy = compactText2(element?.getAttribute?.("aria-labelledby"));
+    if (labelledBy) {
+      const labelledText = compactText2(labelledBy.split(/\s+/).map((id2) => element.ownerDocument?.getElementById?.(id2)?.innerText || element.ownerDocument?.getElementById?.(id2)?.textContent || "").join(" "));
+      if (labelledText) return labelledText;
+    }
     const id = element?.getAttribute?.("id") || element?.id;
-    if (!id) return "";
-    const selector = `label[for="${attributeSelectorValue2(id)}"]`;
-    return compactText2(element.ownerDocument?.querySelector?.(selector)?.textContent);
+    if (id) {
+      const selector = `label[for="${attributeSelectorValue2(id)}"]`;
+      const explicitLabel = compactText2(element.ownerDocument?.querySelector?.(selector)?.textContent);
+      if (explicitLabel) return explicitLabel;
+    }
+    return contextualControlLabel2(element, { force: allowContextual });
   }
   function accessibleName2(element) {
     const labelledBy = compactText2(element?.getAttribute?.("aria-labelledby"));
@@ -4985,6 +5745,74 @@ ${clippedAnchor.content}`);
     }
     return score;
   }
+  function elementPosition2(element) {
+    const siblings = Array.from(element?.parentElement?.children || []);
+    const sameTagSiblings = siblings.filter((candidate) => candidate.tagName === element?.tagName);
+    return {
+      childIndex: siblings.indexOf(element),
+      sameTagIndex: sameTagSiblings.indexOf(element)
+    };
+  }
+  function scoreDomPathSegment(expected, element, depth = 0) {
+    if (!expected || !element) return -40;
+    const descriptor = elementDescriptor2(element);
+    let score = 0;
+    if (expected.tag) score += descriptor.tag === expected.tag ? 24 : -50;
+    if (expected.type) score += descriptor.type === expected.type ? 18 : -30;
+    if (expected.role) score += descriptor.role === expected.role ? 22 : -20;
+    if (expected.testId) score += descriptor.testId === expected.testId ? 120 : -45;
+    if (expected.elementId) score += descriptor.elementId === expected.elementId ? 110 : -45;
+    if (expected.inputName) score += descriptor.inputName === expected.inputName ? 65 : -25;
+    score += Math.min(30, scoreAttributeIdentity(expected, descriptor));
+    score += Math.min(45, scoreSemanticIdentity(expected, descriptor));
+    const position = elementPosition2(element);
+    if (Number.isInteger(expected.sameTagIndex) && expected.sameTagIndex >= 0) {
+      score += position.sameTagIndex === expected.sameTagIndex ? 12 : -4;
+    }
+    if (Number.isInteger(expected.childIndex) && expected.childIndex >= 0) {
+      score += position.childIndex === expected.childIndex ? 8 : -3;
+    }
+    return Math.round(score * Math.max(0.35, 1 - depth * 0.08));
+  }
+  function scoreDomFingerprint(target, element) {
+    const fingerprint = target?.domFingerprint;
+    const expectedPath = Array.isArray(fingerprint?.path) ? fingerprint.path : [];
+    if (!expectedPath.length || !element) return 0;
+    const actualPath = [];
+    for (let current = element; current && actualPath.length < 14; current = current.parentElement) {
+      actualPath.push(current);
+    }
+    let score = scoreDomPathSegment(expectedPath[0], actualPath[0], 0);
+    let minimumActualIndex = 1;
+    for (let expectedIndex = 1; expectedIndex < expectedPath.length; expectedIndex += 1) {
+      let bestScore = -40;
+      let bestIndex = -1;
+      for (let actualIndex = minimumActualIndex; actualIndex < Math.min(actualPath.length, minimumActualIndex + 4); actualIndex += 1) {
+        const candidateScore = scoreDomPathSegment(
+          expectedPath[expectedIndex],
+          actualPath[actualIndex],
+          expectedIndex
+        ) - Math.max(0, actualIndex - minimumActualIndex) * 5;
+        if (candidateScore > bestScore) {
+          bestScore = candidateScore;
+          bestIndex = actualIndex;
+        }
+      }
+      if (bestIndex >= 0 && bestScore > 0) {
+        score += bestScore;
+        minimumActualIndex = bestIndex + 1;
+      }
+    }
+    const siblingPairs = [
+      [fingerprint.previousSibling, element.previousElementSibling],
+      [fingerprint.nextSibling, element.nextElementSibling]
+    ];
+    for (const [expectedSibling, actualSibling] of siblingPairs) {
+      if (!expectedSibling) continue;
+      score += Math.max(0, Math.min(45, scoreDomPathSegment(expectedSibling, actualSibling, 2)));
+    }
+    return Math.max(0, score);
+  }
   function scoreTargetContext(expected, element) {
     if (!expected || !element) return 0;
     const descriptor = elementDescriptor2(element);
@@ -5043,6 +5871,7 @@ ${clippedAnchor.content}`);
       element?.form || element?.closest?.("form")
     )) : 0;
     score += scoreRecordedOrdinal(target, element, descriptor);
+    score += Math.min(260, scoreDomFingerprint(target, element));
     return score;
   }
   function hasSemanticIdentity(target) {
@@ -5058,6 +5887,10 @@ ${clippedAnchor.content}`);
     if (["testId", "inputName", "origin"].includes(strategy) || strategy.startsWith("data:")) return true;
     if (strategy === "elementId") {
       return !isLikelyDynamicElementId2(target.elementId) || !hasSemanticIdentity(target) || semanticScore >= 35;
+    }
+    if (strategy === "domFingerprint") {
+      if (scoreDomFingerprint(target, element) < 55) return false;
+      return !hasSemanticIdentity(target) || semanticScore >= 25;
     }
     if (strategy === "selector" && hasSemanticIdentity(target)) return semanticScore >= 35;
     if (!hasSemanticIdentity(target)) return true;
@@ -5173,6 +6006,32 @@ ${clippedAnchor.content}`);
         target
       );
     }
+    const recordedDomTarget = target.domFingerprint?.path?.[0];
+    if (recordedDomTarget) {
+      const tag = /^[a-z][a-z0-9-]*$/i.test(recordedDomTarget.tag || "") ? recordedDomTarget.tag : "*";
+      const selectors2 = [];
+      if (recordedDomTarget.testId) {
+        selectors2.push(`[data-testid="${attributeSelectorValue2(recordedDomTarget.testId)}"]`);
+      }
+      if (recordedDomTarget.elementId) {
+        selectors2.push(`[id="${attributeSelectorValue2(recordedDomTarget.elementId)}"]`);
+      }
+      if (recordedDomTarget.inputName) {
+        selectors2.push(`${tag}[name="${attributeSelectorValue2(recordedDomTarget.inputName)}"]`);
+      }
+      const fingerprintClasses = Array.isArray(recordedDomTarget.classNames) ? recordedDomTarget.classNames.slice(0, 3) : [];
+      if (fingerprintClasses.length) {
+        selectors2.push(`${tag}.${fingerprintClasses.map((name) => globalThis.CSS?.escape?.(name) || String(name).replace(/[^a-zA-Z0-9_-]/g, "\\$&")).join(".")}`);
+      }
+      if (!selectors2.length) selectors2.push(tag);
+      addCandidates(
+        candidates,
+        [...new Set(selectors2)].flatMap(queryRoots),
+        "domFingerprint",
+        300,
+        target
+      );
+    }
     if (includeSemantic) {
       addCandidates(
         candidates,
@@ -5186,7 +6045,7 @@ ${clippedAnchor.content}`);
   }
   function findRecordedTarget(rawTarget, { documentObject = document } = {}) {
     const ranked = rankRecordedTargetCandidates(rawTarget, { documentObject });
-    const match = ranked[0];
+    const match = ranked.find((candidate) => candidateMatchesRecordedIdentity(rawTarget, candidate));
     if (!match || match.priority === 0 && match.score < 35) return null;
     return {
       candidateCount: ranked.length,
@@ -5229,6 +6088,11 @@ ${clippedAnchor.content}`);
       }
     });
   }
+  function assertReplayActive(signal2) {
+    if (signal2?.aborted) {
+      throw new DOMException("The recorded flow was cancelled by the user.", "AbortError");
+    }
+  }
   async function waitUntilStable(element, windowObject) {
     const before = rectSignature(element);
     await nextFrame(windowObject);
@@ -5237,8 +6101,73 @@ ${clippedAnchor.content}`);
   function eligibleRecordedTargetCandidates(ranked) {
     return ranked.filter((candidate) => candidate.priority > 0 || candidate.score >= 35);
   }
-  function firstUsableRecordedTargetCandidate(candidates, windowObject) {
-    return candidates.find((candidate) => isElementVisible(candidate.element, windowObject) && isElementEnabled(candidate.element, windowObject)) || null;
+  function customSelectSemanticTrigger(element) {
+    if (matchesSelector(element, CUSTOM_SELECT_TRIGGER_SELECTOR2)) return element;
+    const componentRoot = element?.closest?.(CUSTOM_SELECT_ROOT_SELECTOR2) || element;
+    return queryAll(componentRoot, CUSTOM_SELECT_TRIGGER_SELECTOR2)[0] || null;
+  }
+  function customSelectInteractionSurface(element, windowObject) {
+    const tag = String(element?.tagName || "").toLowerCase();
+    const role = comparableText(element?.getAttribute?.("role"));
+    if (tag === "select" || ["listbox", "menu"].includes(role)) return element;
+    const componentRoot = element?.closest?.(CUSTOM_SELECT_ROOT_SELECTOR2) || null;
+    const candidates = [];
+    const add = (candidate) => {
+      if (candidate && !candidates.includes(candidate)) candidates.push(candidate);
+    };
+    if (componentRoot) {
+      for (const candidate of queryAll(componentRoot, CUSTOM_SELECT_INTERACTION_SELECTOR)) add(candidate);
+      add(componentRoot);
+    }
+    add(element);
+    return candidates.find((candidate) => isElementVisible(candidate, windowObject) && isElementEnabled(candidate, windowObject)) || null;
+  }
+  function firstUsableRecordedTargetCandidate(candidates, windowObject, action = "") {
+    for (const candidate of candidates) {
+      const interactionElement = action === "select_option" ? customSelectInteractionSurface(candidate.element, windowObject) : candidate.element;
+      if (interactionElement && isElementVisible(interactionElement, windowObject) && isElementEnabled(interactionElement, windowObject)) return { ...candidate, interactionElement };
+    }
+    return null;
+  }
+  function candidateHasStrongRecordedLocator(target, candidate) {
+    if (["testId", "inputName", "origin"].includes(candidate.strategy)) return true;
+    if (candidate.strategy?.startsWith("data:")) return true;
+    if (candidate.strategy === "domFingerprint") {
+      return scoreDomFingerprint(target, candidate.element) >= 110;
+    }
+    return candidate.strategy === "elementId" && target.elementId && !isLikelyDynamicElementId2(target.elementId);
+  }
+  function semanticIdentityMatches(target, candidate) {
+    const descriptor = elementDescriptor2(candidate.element);
+    const fields = ["name", "label", "text", "placeholder", "title", "controlValue"];
+    let compared = false;
+    for (const field of fields) {
+      if (!target?.[field] || !descriptor[field]) continue;
+      compared = true;
+      if (scoreText(descriptor[field], target[field], 1, 1) > 0) return true;
+    }
+    return !compared;
+  }
+  function candidateMatchesRecordedIdentity(target, candidate, action = "") {
+    if (candidateHasStrongRecordedLocator(target, candidate)) return true;
+    const fieldAction = ["fill", "select_option", "set_checked"].includes(action);
+    const fieldLike = ["input", "select", "textarea"].includes(target.tag) || [
+      "checkbox",
+      "combobox",
+      "listbox",
+      "radio",
+      "searchbox",
+      "slider",
+      "spinbutton",
+      "switch",
+      "textbox"
+    ].includes(target.role);
+    if ((fieldAction || fieldLike) && target?.label) {
+      const actualLabel = associatedLabel2(candidate.element, { allowContextual: fieldAction });
+      if (scoreText(actualLabel, target.label, 1, 1) > 0) return true;
+      return semanticIdentityMatches(target, candidate);
+    }
+    return semanticIdentityMatches(target, candidate);
   }
   function dispatchRecordedHover(element, windowObject) {
     if (!element) return false;
@@ -5266,7 +6195,9 @@ ${clippedAnchor.content}`);
     return hoverMatch ? dispatchRecordedHover(hoverMatch.element, windowObject) : false;
   }
   async function waitForRecordedTarget(rawTarget, {
+    action = "",
     documentObject = document,
+    signal: signal2,
     windowObject = window,
     timeoutMs = DEFAULT_TARGET_TIMEOUT_MS
   } = {}) {
@@ -5276,11 +6207,13 @@ ${clippedAnchor.content}`);
     let lastFallbackAt = -Infinity;
     let lastRevealAt = -Infinity;
     while (Date.now() - startedAt <= maximumWait) {
+      assertReplayActive(signal2);
       const elapsedMs = Date.now() - startedAt;
       if (rawTarget?.hoverTarget && elapsedMs - lastRevealAt >= 250) {
         lastRevealAt = elapsedMs;
         if (revealRecordedTarget(rawTarget, { documentObject, windowObject })) {
           await nextFrame(windowObject);
+          assertReplayActive(signal2);
         }
       }
       const fastCandidates = eligibleRecordedTargetCandidates(rankRecordedTargetCandidates(
@@ -5291,20 +6224,21 @@ ${clippedAnchor.content}`);
           includeShadowRoots: false
         }
       ));
-      let eligible = fastCandidates;
-      let match = firstUsableRecordedTargetCandidate(fastCandidates, windowObject);
-      const exactLocatorMatched = fastCandidates.some((candidate) => candidate.priority > 0);
+      let eligible = fastCandidates.filter((candidate) => candidateMatchesRecordedIdentity(rawTarget, candidate, action));
+      let match = firstUsableRecordedTargetCandidate(eligible, windowObject, action);
+      const exactLocatorMatched = eligible.some((candidate) => candidate.priority > 0);
       if (!match && !exactLocatorMatched && elapsedMs - lastFallbackAt >= 250) {
         lastFallbackAt = elapsedMs;
         eligible = eligibleRecordedTargetCandidates(rankRecordedTargetCandidates(
           rawTarget,
           { documentObject }
-        ));
-        match = firstUsableRecordedTargetCandidate(eligible, windowObject);
+        )).filter((candidate) => candidateMatchesRecordedIdentity(rawTarget, candidate, action));
+        match = firstUsableRecordedTargetCandidate(eligible, windowObject, action);
       }
       if (match) {
         lastMatch = match;
-        if (await waitUntilStable(match.element, windowObject) && isElementVisible(match.element, windowObject) && isElementEnabled(match.element, windowObject)) {
+        const interactionElement = match.interactionElement || match.element;
+        if (await waitUntilStable(interactionElement, windowObject) && isElementVisible(interactionElement, windowObject) && isElementEnabled(interactionElement, windowObject)) {
           return { ...match, waitedMs: Date.now() - startedAt };
         }
       } else if (rawTarget?.hoverTarget && elapsedMs >= 500) {
@@ -5321,6 +6255,7 @@ ${clippedAnchor.content}`);
       }
       await new Promise((resolve) => windowObject.setTimeout(resolve, 50));
     }
+    assertReplayActive(signal2);
     const detail = lastMatch ? "The recorded target was found but did not become visible, enabled, and stable." : "No matching element appeared.";
     throw new Error(`${detail} Direct replay waited ${Math.round(maximumWait / 1e3)} seconds.`);
   }
@@ -5355,37 +6290,223 @@ ${clippedAnchor.content}`);
       throw new Error("The recorded field rejected the saved value.");
     }
   }
-  function selectOption(element, step, windowObject) {
-    if (String(element.tagName || "").toLowerCase() !== "select") {
-      throw new Error("The recorded target is no longer a select control.");
-    }
-    const requestedValue = String(step.value ?? "");
-    const requestedText = comparableText(step.optionText);
-    const option = Array.from(element.options || []).find((candidate) => String(candidate.value) === requestedValue || requestedText && comparableText(candidate.textContent) === requestedText);
-    if (!option) throw new Error("The recorded option is no longer available.");
-    setNativeProperty(element, "value", option.value);
-    dispatchValueEvents(element, windowObject);
-    if (String(element.value) !== String(option.value)) {
-      throw new Error("The recorded select control rejected the saved option.");
+  function matchesSelector(element, selector) {
+    try {
+      return element?.matches?.(selector) === true;
+    } catch {
+      return false;
     }
   }
-  function setChecked(element, desired, windowObject) {
-    if (!("checked" in element)) {
-      throw new Error("The recorded target is no longer a checkbox or radio control.");
+  function customSelectLiveTrigger(element) {
+    return customSelectSemanticTrigger(element) || element;
+  }
+  function customSelectPopupRoots(trigger, documentObject, windowObject) {
+    const roots = [];
+    const add = (element) => {
+      if (element && !roots.includes(element)) roots.push(element);
+    };
+    for (const attribute of ["aria-controls", "aria-owns"]) {
+      const ids = compactText2(trigger?.getAttribute?.(attribute), 1e3).split(/\s+/).filter(Boolean);
+      for (const id of ids) {
+        const linked = documentObject?.getElementById?.(id);
+        add(linked);
+        add(linked?.closest?.(CUSTOM_SELECT_POPUP_SELECTOR2));
+        add(linked?.parentElement?.closest?.(CUSTOM_SELECT_POPUP_SELECTOR2));
+      }
     }
-    if (Boolean(element.checked) === desired) return;
+    if (!roots.length) {
+      for (const popup of queryAll(documentObject, CUSTOM_SELECT_POPUP_SELECTOR2)) {
+        if (isElementVisible(popup, windowObject)) add(popup);
+      }
+    }
+    return roots;
+  }
+  function customSelectIsOpen(trigger, documentObject, windowObject) {
+    if (trigger?.getAttribute?.("aria-expanded") === "true") return true;
+    return customSelectPopupRoots(trigger, documentObject, windowObject).some((root) => isElementVisible(root, windowObject));
+  }
+  async function openCustomSelect(interactionElement, semanticTrigger, documentObject, windowObject) {
+    if (customSelectIsOpen(semanticTrigger, documentObject, windowObject)) return;
+    interactionElement.focus?.({ preventScroll: true });
+    clickElement2(interactionElement, windowObject);
+    await nextFrame(windowObject);
+    await nextFrame(windowObject);
+    if (customSelectIsOpen(semanticTrigger, documentObject, windowObject)) return;
+    const KeyboardEventClass = windowObject.KeyboardEvent;
+    if (typeof KeyboardEventClass !== "function") return;
+    semanticTrigger.focus?.({ preventScroll: true });
+    const options = {
+      bubbles: true,
+      cancelable: true,
+      code: "ArrowDown",
+      key: "ArrowDown",
+      keyCode: 40,
+      which: 40
+    };
+    semanticTrigger.dispatchEvent?.(new KeyboardEventClass("keydown", options));
+    semanticTrigger.dispatchEvent?.(new KeyboardEventClass("keyup", options));
+    await nextFrame(windowObject);
+    await nextFrame(windowObject);
+  }
+  function customSelectOptionIdentities(element) {
+    return [
+      element?.getAttribute?.("data-value"),
+      element?.getAttribute?.("value"),
+      element?.getAttribute?.("aria-label"),
+      element?.getAttribute?.("title"),
+      element?.innerText,
+      element?.textContent
+    ].map(comparableText).filter(Boolean);
+  }
+  function recordedSelectIdentities(step) {
+    const texts = (step.optionTexts?.length ? step.optionTexts : [step.optionText]).map(comparableText).filter(Boolean);
+    const values = (step.values?.length ? step.values : [step.value]).map(comparableText).filter(Boolean);
+    return {
+      all: /* @__PURE__ */ new Set([...texts, ...values]),
+      texts: new Set(texts),
+      values: new Set(values)
+    };
+  }
+  function optionMatchesRecordedSelection(element, identities) {
+    return customSelectOptionIdentities(element).some((identity) => identities.all.has(identity));
+  }
+  function scoreRecordedSelectOption(element, optionTarget, linkedRoot) {
+    const descriptor = elementDescriptor2(element);
+    let score = linkedRoot ? 100 : 0;
+    if (descriptor.role === "option") score += 30;
+    if (element.hasAttribute?.("data-value")) score += 35;
+    if (optionTarget?.testId && descriptor.testId === optionTarget.testId) score += 120;
+    if (optionTarget?.elementId && descriptor.elementId === optionTarget.elementId && !isLikelyDynamicElementId2(optionTarget.elementId)) score += 110;
+    if (optionTarget?.tag && descriptor.tag === optionTarget.tag) score += 10;
+    score += Math.min(35, scoreAttributeIdentity(optionTarget || {}, descriptor));
+    return score;
+  }
+  async function waitForRecordedSelectOption(step, trigger, {
+    documentObject,
+    signal: signal2,
+    timeoutMs,
+    windowObject
+  }) {
+    const maximumWait = Math.min(3e4, Math.max(500, Number(timeoutMs) || DEFAULT_TARGET_TIMEOUT_MS));
+    const startedAt = Date.now();
+    const identities = recordedSelectIdentities(step);
+    const optionTarget = step.optionTarget || {};
+    while (Date.now() - startedAt <= maximumWait) {
+      assertReplayActive(signal2);
+      const linkedRoots = customSelectPopupRoots(trigger, documentObject, windowObject);
+      const candidates = /* @__PURE__ */ new Map();
+      const collect = (root, linkedRoot) => {
+        const elements = [
+          ...matchesSelector(root, CUSTOM_SELECT_OPTION_SELECTOR2) ? [root] : [],
+          ...queryAll(root, CUSTOM_SELECT_OPTION_SELECTOR2)
+        ];
+        for (const element of elements) {
+          if (!optionMatchesRecordedSelection(element, identities)) continue;
+          const score = scoreRecordedSelectOption(element, optionTarget, linkedRoot);
+          if (score > (candidates.get(element) ?? -Infinity)) candidates.set(element, score);
+        }
+      };
+      for (const root of linkedRoots) collect(root, true);
+      collect(documentObject, false);
+      const matches = [...candidates.entries()].map(([element, score]) => ({ element, score })).filter(({ element }) => isElementVisible(element, windowObject) && isElementEnabled(element, windowObject) && element.getAttribute?.("aria-disabled") !== "true").sort((left, right) => right.score - left.score);
+      if (matches[0]) {
+        if (await waitUntilStable(matches[0].element, windowObject)) return matches[0].element;
+      }
+      await new Promise((resolve) => windowObject.setTimeout(resolve, 40));
+    }
+    const description = [...identities.texts][0] || [...identities.values][0] || "saved option";
+    throw new Error(`The recorded option \u201C${description}\u201D is not available in the current combobox.`);
+  }
+  function customSelectCurrentValues(element, trigger) {
+    const selectionSurface = trigger.closest?.(CUSTOM_SELECT_ROOT_SELECTOR2) || element.closest?.(CUSTOM_SELECT_ROOT_SELECTOR2) || element;
+    return [
+      trigger.value,
+      trigger.getAttribute?.("aria-valuetext"),
+      selectionSurface.value,
+      selectionSurface.getAttribute?.("aria-valuetext"),
+      ...queryAll(selectionSurface, [
+        "[aria-selected='true']",
+        ".ant-select-selection-item",
+        ".ng-value-label",
+        ".p-dropdown-label",
+        ".p-select-label",
+        ".select2-selection__rendered",
+        ".el-select__selected-item",
+        ".vs__selected"
+      ].join(",")).map((candidate) => candidate.innerText || candidate.textContent),
+      ...String(selectionSurface.innerText || selectionSurface.textContent || "").split(/\r?\n/)
+    ].map(comparableText).filter(Boolean);
+  }
+  async function selectOption(element, step, windowObject, documentObject, timeoutMs, signal2, recordedInteractionElement = null) {
+    assertReplayActive(signal2);
+    if (String(element.tagName || "").toLowerCase() === "select") {
+      const requestedValues = new Set(
+        (step.values?.length ? step.values : [step.value]).map((value) => String(value ?? ""))
+      );
+      const requestedTexts = new Set(
+        (step.optionTexts?.length ? step.optionTexts : [step.optionText]).map(comparableText).filter(Boolean)
+      );
+      const options = Array.from(element.options || []);
+      const matchingOptions = options.filter((candidate) => requestedValues.has(String(candidate.value)) || requestedTexts.has(comparableText(candidate.textContent)));
+      if (!matchingOptions.length) throw new Error("The recorded option is no longer available.");
+      if (element.multiple) {
+        const matching = new Set(matchingOptions);
+        for (const option2 of options) setNativeProperty(option2, "selected", matching.has(option2));
+      } else {
+        setNativeProperty(element, "value", matchingOptions[0].value);
+      }
+      dispatchValueEvents(element, windowObject);
+      const actualValues = new Set(Array.from(element.selectedOptions || [], (option2) => String(option2.value)));
+      if (!matchingOptions.every((option2) => actualValues.has(String(option2.value)))) {
+        throw new Error("The recorded select control rejected the saved option.");
+      }
+      return;
+    }
+    const trigger = customSelectLiveTrigger(element);
+    const interactionElement = recordedInteractionElement || customSelectInteractionSurface(element, windowObject) || element;
+    const triggerRole = comparableText(element.getAttribute?.("role"));
+    if (!["listbox", "menu"].includes(triggerRole)) {
+      await openCustomSelect(interactionElement, trigger, documentObject, windowObject);
+    }
+    const optionText = step.optionTexts?.[0] || step.optionText || step.values?.[0] || step.value || "";
+    const option = await waitForRecordedSelectOption(step, trigger, {
+      documentObject,
+      signal: signal2,
+      timeoutMs,
+      windowObject
+    });
+    clickElement2(option, windowObject);
+    const expected = recordedSelectIdentities(step).all;
+    if (!expected.size) return;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      assertReplayActive(signal2);
+      if (customSelectCurrentValues(element, trigger).some((value) => expected.has(value))) return;
+      await new Promise((resolve) => windowObject.setTimeout(resolve, 50));
+    }
+    assertReplayActive(signal2);
+    throw new Error(`The recorded option \u201C${optionText}\u201D was clicked but did not become selected.`);
+  }
+  async function setChecked(element, desired, windowObject) {
+    const stateAttribute = element.hasAttribute?.("aria-checked") ? "aria-checked" : element.hasAttribute?.("aria-pressed") ? "aria-pressed" : "";
+    const currentState = stateAttribute ? element.getAttribute(stateAttribute) === "true" : "checked" in element ? Boolean(element.checked) : null;
+    if (currentState === null) {
+      throw new Error("The recorded target is no longer a checkbox, radio, switch, or toggle control.");
+    }
+    if (currentState === desired) return;
     const inputType = String(element.type || element.getAttribute?.("type") || "").toLowerCase();
-    if ((inputType === "checkbox" || desired) && typeof element.click === "function") {
-      element.click();
+    if (stateAttribute || (inputType === "checkbox" || desired) && typeof element.click === "function") {
+      clickElement2(element, windowObject);
+      if (stateAttribute) await nextFrame(windowObject);
     } else {
       setNativeProperty(element, "checked", desired);
       dispatchValueEvents(element, windowObject);
     }
-    if (Boolean(element.checked) !== desired) {
+    const resultingState = stateAttribute ? element.getAttribute(stateAttribute) === "true" : Boolean(element.checked);
+    if (resultingState !== desired) {
       throw new Error(`The recorded control could not be ${desired ? "checked" : "unchecked"}.`);
     }
   }
-  function clickElement2(element, windowObject) {
+  function clickElement2(element, windowObject, modifiers = {}) {
     const rect = element.getBoundingClientRect?.() || {
       height: 0,
       left: 0,
@@ -5398,7 +6519,11 @@ ${clippedAnchor.content}`);
       cancelable: true,
       clientX: (rect.left ?? rect.x ?? 0) + rect.width / 2,
       clientY: (rect.top ?? rect.y ?? 0) + rect.height / 2,
-      pointerType: "mouse"
+      pointerType: "mouse",
+      altKey: modifiers.alt === true,
+      ctrlKey: modifiers.ctrl === true,
+      metaKey: modifiers.meta === true,
+      shiftKey: modifiers.shift === true
     };
     const PointerEventClass = windowObject.PointerEvent || windowObject.MouseEvent;
     if (PointerEventClass) {
@@ -5415,14 +6540,50 @@ ${clippedAnchor.content}`);
     if (windowObject.MouseEvent) {
       element.dispatchEvent(new windowObject.MouseEvent("mouseup", eventOptions));
     }
-    element.click();
+    const hasModifiers = Object.values(modifiers).some(Boolean);
+    if (hasModifiers && windowObject.MouseEvent) {
+      element.dispatchEvent(new windowObject.MouseEvent("click", eventOptions));
+    } else {
+      element.click();
+    }
+  }
+  function contextClickElement(element, windowObject, modifiers = {}) {
+    const rect = element.getBoundingClientRect?.() || { height: 0, left: 0, top: 0, width: 0 };
+    element.dispatchEvent(new windowObject.MouseEvent("contextmenu", {
+      altKey: modifiers.alt === true,
+      bubbles: true,
+      button: 2,
+      buttons: 2,
+      cancelable: true,
+      clientX: (rect.left ?? rect.x ?? 0) + rect.width / 2,
+      clientY: (rect.top ?? rect.y ?? 0) + rect.height / 2,
+      ctrlKey: modifiers.ctrl === true,
+      metaKey: modifiers.meta === true,
+      shiftKey: modifiers.shift === true
+    }));
+  }
+  function dragElement(source, destination, windowObject) {
+    const dataTransfer = typeof windowObject.DataTransfer === "function" ? new windowObject.DataTransfer() : void 0;
+    const DragEventClass = windowObject.DragEvent || windowObject.Event;
+    const dispatch = (element, type) => element.dispatchEvent(new DragEventClass(type, {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer
+    }));
+    dispatch(source, "dragstart");
+    dispatch(destination, "dragenter");
+    dispatch(destination, "dragover");
+    dispatch(destination, "drop");
+    dispatch(source, "dragend");
   }
   async function executeRecordedFlowStep(rawStep, {
     confirmed = false,
     documentObject = document,
+    signal: signal2,
     windowObject = window,
     timeoutMs = DEFAULT_TARGET_TIMEOUT_MS
   } = {}) {
+    assertReplayActive(signal2);
     const step = normalizeRecordedStep(rawStep);
     if (!step || step.action === "agent_group") {
       throw new Error("Direct replay received an invalid recorded action.");
@@ -5435,29 +6596,63 @@ ${clippedAnchor.content}`);
       return { action: step.action, navigated: true, success: true, url };
     }
     const match = await waitForRecordedTarget(step.target, {
+      action: step.action,
       documentObject,
+      signal: signal2,
       timeoutMs,
       windowObject
     });
     const { element } = match;
-    if (step.action === "click") {
+    assertReplayActive(signal2);
+    if (["click", "context_click", "double_click"].includes(step.action)) {
       if (!isElementEnabled(element, windowObject)) {
         throw new Error("The recorded click target became disabled before the action could run.");
       }
       assertConfirmedPageAgentClick(element, confirmed);
       element.focus?.({ preventScroll: true });
-      clickElement2(element, windowObject);
+      if (step.action === "context_click") {
+        contextClickElement(element, windowObject, step.modifiers);
+      } else if (step.action === "double_click") {
+        clickElement2(element, windowObject, step.modifiers);
+        clickElement2(element, windowObject, step.modifiers);
+        element.dispatchEvent(new windowObject.MouseEvent("dblclick", {
+          bubbles: true,
+          button: 0,
+          cancelable: true,
+          detail: 2
+        }));
+      } else {
+        clickElement2(element, windowObject, step.modifiers);
+      }
     } else if (step.action === "fill") {
       fillElement(element, step.value, windowObject);
     } else if (step.action === "select_option") {
-      selectOption(element, step, windowObject);
+      await selectOption(
+        element,
+        step,
+        windowObject,
+        documentObject,
+        timeoutMs,
+        signal2,
+        match.interactionElement
+      );
     } else if (step.action === "set_checked") {
-      setChecked(element, Boolean(step.value), windowObject);
+      await setChecked(element, Boolean(step.value), windowObject);
+    } else if (step.action === "drag_drop") {
+      const destination = await waitForRecordedTarget(step.destinationTarget, {
+        documentObject,
+        signal: signal2,
+        timeoutMs,
+        windowObject
+      });
+      dragElement(element, destination.element, windowObject);
     } else if (step.action === "submit") {
       const form = String(element.tagName || "").toLowerCase() === "form" ? element : element.form || element.closest?.("form");
       if (!form) throw new Error("The recorded submit target is no longer inside a form.");
       form.requestSubmit?.();
       if (typeof form.requestSubmit !== "function") form.submit?.();
+    } else if (step.action === "upload_file") {
+      throw new Error("Recorded file uploads must be replayed by the extension background service.");
     } else {
       throw new Error(`Direct replay does not support the recorded ${step.action} action.`);
     }
@@ -5483,7 +6678,7 @@ ${clippedAnchor.content}`);
     translationState: "lumi_live_translation_state",
     videoAnalysisProgress: "lumi_live_video_analysis_progress"
   });
-  var PAGE_CONTROLLER_PROTOCOL_VERSION = 4;
+  var PAGE_CONTROLLER_PROTOCOL_VERSION = 7;
   var STORAGE_KEYS = Object.freeze({
     apiKey: "lumiGeminiApiKey",
     groqApiKey: "lumiGroqApiKey",
@@ -5516,6 +6711,21 @@ ${clippedAnchor.content}`);
   var FAST_PAGE_STATE_MAX_CHARACTERS = 16e4;
   var FAST_SEMANTIC_CONTEXT_MAX_CHARACTERS = 8e4;
   var STANDARD_SEMANTIC_CONTEXT_MAX_CHARACTERS = 24e3;
+  async function publishRecordedFlowReplayProgress(value) {
+    const runId = String(value?.runId || "").trim();
+    const stepIndex = Number(value?.stepIndex);
+    const completedSteps = Number(value?.completedSteps);
+    if (!runId || !Number.isInteger(stepIndex) || !Number.isInteger(completedSteps)) return;
+    await chrome.runtime.sendMessage({
+      type: EXTENSION_EVENTS.flowReplayProgress,
+      action: String(value?.action || ""),
+      completedSteps: Math.max(0, completedSteps),
+      message: String(value?.message || ""),
+      runId,
+      stepIndex: Math.max(0, stepIndex),
+      totalSteps: Math.max(1, Number(value?.totalSteps) || completedSteps)
+    }).catch(() => null);
+  }
   var MAX_FAST_BATCH_ACTIONS = 200;
   var MAX_FAST_SELECTION_INDICES = 300;
   if (!globalThis[GLOBAL_KEY]) {
@@ -5715,14 +6925,14 @@ ${clippedAnchor.content}`);
         }
       }
       return inputs;
-    }, isFileInput = function(element) {
+    }, isFileInput2 = function(element) {
       return String(element?.type || element?.getAttribute?.("type") || "").toLowerCase() === "file";
     }, isFileUploadTrigger = function(element) {
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
-      if (isFileInput(element) || element.querySelector?.('input[type="file"]')) return true;
+      if (isFileInput2(element) || element.querySelector?.('input[type="file"]')) return true;
       const label = element.closest?.("label");
       const labelledControl = label?.htmlFor ? element.ownerDocument?.getElementById?.(label.htmlFor) : null;
-      if (label?.querySelector?.('input[type="file"]') || isFileInput(labelledControl)) return true;
+      if (label?.querySelector?.('input[type="file"]') || isFileInput2(labelledControl)) return true;
       const interactive = element.closest?.('button, [role="button"], a, label') || element;
       const descriptor = [
         interactive.textContent,
@@ -5732,7 +6942,7 @@ ${clippedAnchor.content}`);
         interactive.getAttribute?.("id"),
         interactive.getAttribute?.("class")
       ].filter(Boolean).join(" ");
-      return FILE_UPLOAD_TRIGGER_PATTERN.test(descriptor);
+      return FILE_UPLOAD_TRIGGER_PATTERN2.test(descriptor);
     }, clearPreparedFileUploadTarget = function(token = "") {
       const target = runtime.fileUploadTarget;
       if (!target) return;
@@ -5756,11 +6966,12 @@ ${clippedAnchor.content}`);
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
       assertConfirmedPageAgentClick(element, confirmed);
     };
-    getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, instantClickElement2 = instantClickElement, instantSelectOption2 = instantSelectOption, selectedControlState2 = selectedControlState, prepareFastBatchActions2 = prepareFastBatchActions, batchActionMatchesExpectedState2 = batchActionMatchesExpectedState, collectFileInputs2 = collectFileInputs, isFileInput2 = isFileInput, isFileUploadTrigger2 = isFileUploadTrigger, clearPreparedFileUploadTarget2 = clearPreparedFileUploadTarget, getDeclarativeNewTabIntent2 = getDeclarativeNewTabIntent, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
+    getController2 = getController, applyVisualPreferences2 = applyVisualPreferences, requireIndex2 = requireIndex, indexedElement2 = indexedElement, instantClickElement2 = instantClickElement, instantSelectOption2 = instantSelectOption, selectedControlState2 = selectedControlState, prepareFastBatchActions2 = prepareFastBatchActions, batchActionMatchesExpectedState2 = batchActionMatchesExpectedState, collectFileInputs2 = collectFileInputs, isFileInput3 = isFileInput2, isFileUploadTrigger2 = isFileUploadTrigger, clearPreparedFileUploadTarget2 = clearPreparedFileUploadTarget, getDeclarativeNewTabIntent2 = getDeclarativeNewTabIntent, assertSafeInput2 = assertSafeInput, assertConfirmedHighImpactClick2 = assertConfirmedHighImpactClick;
     const runtime = {
       controller: null,
       stateIndexed: false,
       visualPreferences: { ...DEFAULT_VISUAL_PREFERENCES },
+      activeRecordedFlowReplayController: null,
       activeVisualActionController: null,
       fileUploadTarget: null
     };
@@ -5860,7 +7071,7 @@ ${clippedAnchor.content}`);
         message: failedAt === null ? `Completed and locally verified ${executedActionCount} Fast mode action(s); skipped ${skippedActionCount} already-satisfied action(s).` : finalVerificationFailure ? `Fast mode executed the batch, but final verification failed at action ${failedAt}.` : `Fast mode stopped at action ${failedAt} after ${executedActionCount} verified action(s).`
       };
     }
-    const FILE_UPLOAD_TRIGGER_PATTERN = /\b(upload|attach|browse|choose|import|file)\b|tải\s*lên|tai\s*len|đính\s*kèm|dinh\s*kem|chọn\s*(?:tệp|file)|chon\s*(?:tep|file)/i;
+    const FILE_UPLOAD_TRIGGER_PATTERN2 = /\b(upload|attach|browse|choose|import|file)\b|tải\s*lên|tai\s*len|đính\s*kèm|dinh\s*kem|chọn\s*(?:tệp|file)|chon\s*(?:tep|file)/i;
     async function readPageState(query = "") {
       applyVisualPreferences();
       const pageController = getController();
@@ -6023,12 +7234,17 @@ ${clippedAnchor.content}`);
           protocolVersion: PAGE_CONTROLLER_PROTOCOL_VERSION,
           selector: String(replayTarget.selector || "").slice(0, 240)
         };
+        runtime.activeRecordedFlowReplayController?.abort();
+        const replayController = new AbortController();
+        runtime.activeRecordedFlowReplayController = replayController;
         console.debug("[LumiFlowReplay] start", JSON.stringify(replayLog));
         try {
           const result2 = await executeRecordedFlowStep(replayStep, {
             confirmed: args.confirmed === true,
+            signal: replayController.signal,
             timeoutMs: args.timeoutMs
           });
+          await publishRecordedFlowReplayProgress(args.replayProgress);
           console.debug("[LumiFlowReplay] success", JSON.stringify(replayLog));
           return {
             ...result2,
@@ -6041,6 +7257,10 @@ ${clippedAnchor.content}`);
             error: error instanceof Error ? error.message : "Direct replay failed."
           }));
           throw error;
+        } finally {
+          if (runtime.activeRecordedFlowReplayController === replayController) {
+            runtime.activeRecordedFlowReplayController = null;
+          }
         }
       }
       const pageController = getController();
@@ -6048,6 +7268,9 @@ ${clippedAnchor.content}`);
         const activeActionController = runtime.activeVisualActionController;
         runtime.activeVisualActionController = null;
         activeActionController?.abort();
+        const recordedFlowReplayController = runtime.activeRecordedFlowReplayController;
+        runtime.activeRecordedFlowReplayController = null;
+        recordedFlowReplayController?.abort();
         clearTabTransition();
         await pageController.hideMask().catch(() => {
         });
@@ -6057,17 +7280,22 @@ ${clippedAnchor.content}`);
         return { success: true, cancelled: true };
       }
       if (tool === "bridge_prepare_file_upload_target") {
-        const index = requireIndex(args);
         const token = String(args.token || "").trim();
         const fileNames = Array.isArray(args.fileNames) ? args.fileNames : [];
         if (!/^[a-z0-9-]{8,128}$/i.test(token)) {
           throw new Error("The file-upload target token is invalid.");
         }
         clearPreparedFileUploadTarget();
+        const hasIndex = Number.isInteger(Number(args.index)) && Number(args.index) >= 0;
+        const recordedMatch = hasIndex ? null : findRecordedTarget(args.recordedTarget, { documentObject: document }) || findRecordedTarget(args.recordedTriggerTarget, { documentObject: document });
+        const relatedElement = hasIndex ? indexedElement(requireIndex(args)) : recordedMatch?.element || null;
+        if (!relatedElement) {
+          throw new Error("The recorded file-upload target is no longer available.");
+        }
         const selection = chooseCompatibleFileInput(
           collectFileInputs(),
           fileNames,
-          indexedElement(index)
+          relatedElement
         );
         if (!selection.input) {
           return {
@@ -6089,14 +7317,21 @@ ${clippedAnchor.content}`);
         };
       }
       if (tool === "bridge_click_file_upload_target") {
-        const index = requireIndex(args);
-        const element = indexedElement(index);
+        const hasIndex = Number.isInteger(Number(args.index)) && Number(args.index) >= 0;
+        const recordedMatch = hasIndex ? null : findRecordedTarget(args.recordedTriggerTarget || args.recordedTarget, {
+          documentObject: document
+        });
+        const element = hasIndex ? indexedElement(requireIndex(args)) : recordedMatch?.element;
         if (!isFileUploadTrigger(element)) {
           throw new Error(
             "The indexed element is not identifiable as a file-upload control. Observe fresh page state or inspect the visible page, then use the exact final upload control."
           );
         }
-        return withVisualAction((activeController) => activeController.clickElement(index));
+        if (hasIndex) {
+          return withVisualAction((activeController) => activeController.clickElement(requireIndex(args)));
+        }
+        element.click();
+        return { success: true, strategy: "recorded_upload_trigger" };
       }
       if (tool === "bridge_finalize_file_upload_target") {
         const token = String(args.token || "").trim();
@@ -6303,7 +7538,7 @@ ${clippedAnchor.content}`);
   var prepareFastBatchActions2;
   var batchActionMatchesExpectedState2;
   var collectFileInputs2;
-  var isFileInput2;
+  var isFileInput3;
   var isFileUploadTrigger2;
   var clearPreparedFileUploadTarget2;
   var getDeclarativeNewTabIntent2;

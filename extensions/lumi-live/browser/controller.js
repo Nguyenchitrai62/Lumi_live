@@ -36,7 +36,10 @@ import {
   MAX_SEMANTIC_ANCHORS,
 } from "./semantic-anchor-context.js";
 import { createFlowRecorder } from "./flow-recorder.js";
-import { executeRecordedFlowStep } from "./recorded-flow-replay.js";
+import {
+  executeRecordedFlowStep,
+  findRecordedTarget,
+} from "./recorded-flow-replay.js";
 import {
   EXTENSION_EVENTS,
   PAGE_CONTROLLER_PROTOCOL_VERSION,
@@ -49,6 +52,22 @@ const CLICK_EFFECT_STYLE_ID = "lumi-page-agent-click-effect-preference";
 export const FAST_PAGE_STATE_MAX_CHARACTERS = 160000;
 export const FAST_SEMANTIC_CONTEXT_MAX_CHARACTERS = 80000;
 export const STANDARD_SEMANTIC_CONTEXT_MAX_CHARACTERS = 24000;
+
+async function publishRecordedFlowReplayProgress(value) {
+  const runId = String(value?.runId || "").trim();
+  const stepIndex = Number(value?.stepIndex);
+  const completedSteps = Number(value?.completedSteps);
+  if (!runId || !Number.isInteger(stepIndex) || !Number.isInteger(completedSteps)) return;
+  await chrome.runtime.sendMessage({
+    type: EXTENSION_EVENTS.flowReplayProgress,
+    action: String(value?.action || ""),
+    completedSteps: Math.max(0, completedSteps),
+    message: String(value?.message || ""),
+    runId,
+    stepIndex: Math.max(0, stepIndex),
+    totalSteps: Math.max(1, Number(value?.totalSteps) || completedSteps),
+  }).catch(() => null);
+}
 const MAX_FAST_BATCH_ACTIONS = 200;
 const MAX_FAST_SELECTION_INDICES = 300;
 if (!globalThis[GLOBAL_KEY]) {
@@ -56,6 +75,7 @@ if (!globalThis[GLOBAL_KEY]) {
     controller: null,
     stateIndexed: false,
     visualPreferences: { ...DEFAULT_VISUAL_PREFERENCES },
+    activeRecordedFlowReplayController: null,
     activeVisualActionController: null,
     fileUploadTarget: null,
   };
@@ -622,12 +642,20 @@ if (!globalThis[GLOBAL_KEY]) {
         protocolVersion: PAGE_CONTROLLER_PROTOCOL_VERSION,
         selector: String(replayTarget.selector || "").slice(0, 240),
       };
+      runtime.activeRecordedFlowReplayController?.abort();
+      const replayController = new AbortController();
+      runtime.activeRecordedFlowReplayController = replayController;
       console.debug("[LumiFlowReplay] start", JSON.stringify(replayLog));
       try {
         const result = await executeRecordedFlowStep(replayStep, {
           confirmed: args.confirmed === true,
+          signal: replayController.signal,
           timeoutMs: args.timeoutMs,
         });
+        // A click can navigate quickly enough to destroy this content-script
+        // response channel. Acknowledge the completed top-level step first so
+        // LUMI TASK is never left waiting for an action that already happened.
+        await publishRecordedFlowReplayProgress(args.replayProgress);
         console.debug("[LumiFlowReplay] success", JSON.stringify(replayLog));
         return {
           ...result,
@@ -640,6 +668,10 @@ if (!globalThis[GLOBAL_KEY]) {
           error: error instanceof Error ? error.message : "Direct replay failed.",
         }));
         throw error;
+      } finally {
+        if (runtime.activeRecordedFlowReplayController === replayController) {
+          runtime.activeRecordedFlowReplayController = null;
+        }
       }
     }
 
@@ -649,6 +681,9 @@ if (!globalThis[GLOBAL_KEY]) {
       const activeActionController = runtime.activeVisualActionController;
       runtime.activeVisualActionController = null;
       activeActionController?.abort();
+      const recordedFlowReplayController = runtime.activeRecordedFlowReplayController;
+      runtime.activeRecordedFlowReplayController = null;
+      recordedFlowReplayController?.abort();
       clearTabTransition();
       await pageController.hideMask().catch(() => {});
       await pageController.cleanUpHighlights().catch(() => {});
@@ -657,17 +692,27 @@ if (!globalThis[GLOBAL_KEY]) {
     }
 
     if (tool === "bridge_prepare_file_upload_target") {
-      const index = requireIndex(args);
       const token = String(args.token || "").trim();
       const fileNames = Array.isArray(args.fileNames) ? args.fileNames : [];
       if (!/^[a-z0-9-]{8,128}$/i.test(token)) {
         throw new Error("The file-upload target token is invalid.");
       }
       clearPreparedFileUploadTarget();
+      const hasIndex = Number.isInteger(Number(args.index)) && Number(args.index) >= 0;
+      const recordedMatch = hasIndex
+        ? null
+        : findRecordedTarget(args.recordedTarget, { documentObject: document })
+          || findRecordedTarget(args.recordedTriggerTarget, { documentObject: document });
+      const relatedElement = hasIndex
+        ? indexedElement(requireIndex(args))
+        : recordedMatch?.element || null;
+      if (!relatedElement) {
+        throw new Error("The recorded file-upload target is no longer available.");
+      }
       const selection = chooseCompatibleFileInput(
         collectFileInputs(),
         fileNames,
-        indexedElement(index),
+        relatedElement,
       );
       if (!selection.input) {
         return {
@@ -690,14 +735,23 @@ if (!globalThis[GLOBAL_KEY]) {
     }
 
     if (tool === "bridge_click_file_upload_target") {
-      const index = requireIndex(args);
-      const element = indexedElement(index);
+      const hasIndex = Number.isInteger(Number(args.index)) && Number(args.index) >= 0;
+      const recordedMatch = hasIndex
+        ? null
+        : findRecordedTarget(args.recordedTriggerTarget || args.recordedTarget, {
+          documentObject: document,
+        });
+      const element = hasIndex ? indexedElement(requireIndex(args)) : recordedMatch?.element;
       if (!isFileUploadTrigger(element)) {
         throw new Error(
           "The indexed element is not identifiable as a file-upload control. Observe fresh page state or inspect the visible page, then use the exact final upload control.",
         );
       }
-      return withVisualAction((activeController) => activeController.clickElement(index));
+      if (hasIndex) {
+        return withVisualAction((activeController) => activeController.clickElement(requireIndex(args)));
+      }
+      element.click();
+      return { success: true, strategy: "recorded_upload_trigger" };
     }
 
     if (tool === "bridge_finalize_file_upload_target") {

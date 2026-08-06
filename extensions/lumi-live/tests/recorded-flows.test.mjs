@@ -8,11 +8,15 @@ import {
   buildRecordedFlowAgentPrompt,
   buildRecordedFlowHybridReplayPlan,
   createRecordedFlowsExport,
+  isAbsoluteRecordedFilePath,
+  normalizeRecordedFilePath,
   normalizeRecordedFlow,
+  normalizeRecordedTarget,
   parseRecordedFlowsImport,
   RECORDED_FLOW_EXPORT_FORMAT,
   RECORDED_FLOW_EXPORT_VERSION,
   RECORDED_STEP_GROUP_ACTION,
+  recordedFlowUploadBindingIssues,
   recordedStepTitle,
 } from "../core/recorded-flows.js";
 import { createRecordedFlowService } from "../background/recorded-flow-service.js";
@@ -26,12 +30,43 @@ import {
   recordedFlowJsonFilesFromTransfer,
   recordedFlowReplayFailureNotice,
   recordedFlowsExportFilename,
+  recordedUploadPathState,
   resolveRecordedFlowAgentCompletion,
   selectRecordedFlowImportItem,
   validateRecordedFlowImportReview,
 } from "../side-panel/recorded-flow-panel.js";
 
 const extensionRoot = new URL("../", import.meta.url);
+
+test("legacy custom-select targets recover their field label and discard page-wide hover", () => {
+  const target = normalizeRecordedTarget({
+    ancestors: [{
+      classNames: ["ant-col", "ant-col-6"],
+      tag: "div",
+      text: "Sheet name Approval round 4",
+    }],
+    classNames: ["ant-select", "ant-select-single"],
+    hoverTarget: { selector: "html > body", tag: "body", text: "Entire application" },
+    selector: "div.ant-select",
+    tag: "div",
+    text: "Approval round 4",
+  }, { action: "select_option" });
+
+  assert.equal(target.label, "Sheet name");
+  assert.equal(target.hoverTarget, null);
+});
+
+test("legacy field context recovery is action-based rather than framework-based", () => {
+  const target = normalizeRecordedTarget({
+    ancestors: [{ tag: "section", text: "Data source Quarterly report" }],
+    classNames: ["acme-choice-widget"],
+    selector: "div.acme-choice-widget",
+    tag: "div",
+    text: "Quarterly report",
+  }, { action: "select_option" });
+
+  assert.equal(target.label, "Data source");
+});
 
 class MemoryStorageArea {
   constructor(initial = {}) {
@@ -193,6 +228,26 @@ test("flow normalization preserves rich button locators and hover context", () =
           "data-token": "must-not-survive",
         },
         semanticOrdinal: 1,
+        domFingerprint: {
+          path: [
+            {
+              tag: "button",
+              type: "submit",
+              classNames: ["ant-btn", "ant-btn-primary", "ant-btn"],
+              dataAttributes: { "data-action": "save-boq" },
+              childIndex: 2,
+              sameTagIndex: 1,
+            },
+            {
+              tag: "div",
+              elementId: "boq-form-actions",
+              childIndex: 3,
+              sameTagIndex: 2,
+            },
+          ],
+          previousSibling: { tag: "button", text: "Cancel" },
+          nextSibling: null,
+        },
         ancestors: [{ elementId: "boq-form-actions", tag: "div" }],
         hoverTarget: { elementId: "boq-row", selector: "#boq-row", tag: "div" },
         form: { elementId: "boq-form", selector: "#boq-form", tag: "form" },
@@ -210,10 +265,169 @@ test("flow normalization preserves rich button locators and hover context", () =
   assert.deepEqual(target.classNames, ["ant-btn", "ant-btn-primary"]);
   assert.deepEqual(target.dataAttributes, { "data-action": "save-boq" });
   assert.equal(target.semanticOrdinal, 1);
+  assert.equal(target.domFingerprint.path[0].type, "submit");
+  assert.deepEqual(target.domFingerprint.path[0].classNames, ["ant-btn", "ant-btn-primary"]);
+  assert.equal(target.domFingerprint.path[1].elementId, "boq-form-actions");
+  assert.equal(target.domFingerprint.previousSibling.text, "Cancel");
   assert.equal(target.ancestors[0].elementId, "boq-form-actions");
   assert.equal(target.hoverTarget.elementId, "boq-row");
   assert.equal(target.form.elementId, "boq-form");
   assert.equal(target.origin.elementId, "save-boq-icon");
+});
+
+test("upload steps retain local bindings for replay but exports remove absolute paths", () => {
+  const upload = recordedStep({
+    action: "upload_file",
+    accept: ".pdf",
+    fileVariables: ["UPLOAD_FILE_1"],
+    files: [{
+      lastModified: 1234,
+      name: "quote.pdf",
+      size: 2048,
+      type: "application/pdf",
+    }],
+    localFilePaths: ["C:\\QC\\quote.pdf"],
+    target: { elementId: "quote-file", tag: "input", type: "file" },
+    triggerTarget: { elementId: "upload-quote", name: "Upload quote", tag: "button" },
+    value: undefined,
+  });
+  const flow = normalizeRecordedFlow({
+    id: "upload-flow",
+    name: "Upload quote",
+    startUrl: "https://example.test/quotes",
+    steps: [upload],
+  });
+
+  assert.deepEqual(flow.steps[0].localFilePaths, ["C:\\QC\\quote.pdf"]);
+  assert.equal(flow.steps[0].files[0].name, "quote.pdf");
+  assert.equal(flow.steps[0].triggerTarget.elementId, "upload-quote");
+  assert.deepEqual(recordedFlowUploadBindingIssues(flow), []);
+  const exported = createRecordedFlowsExport([flow]);
+  assert.equal(Object.hasOwn(exported.flows[0].steps[0], "localFilePaths"), false);
+  assert.deepEqual(exported.flows[0].steps[0].fileVariables, ["UPLOAD_FILE_1"]);
+  exported.flows[0].steps[0].localFilePaths = ["C:\\Injected\\must-not-import.pdf"];
+  const imported = parseRecordedFlowsImport(exported);
+  assert.equal(Object.hasOwn(imported[0].steps[0], "localFilePaths"), false);
+});
+
+test("upload path validation distinguishes missing, relative, and absolute bindings", () => {
+  const uploadFlow = (localFilePaths) => ({
+    name: "Upload",
+    steps: [recordedStep({
+      action: "upload_file",
+      fileVariables: ["UPLOAD_FILE_1"],
+      files: [{ name: "quote.pdf" }],
+      localFilePaths,
+      target: { tag: "input", type: "file" },
+      value: undefined,
+    })],
+  });
+
+  assert.equal(isAbsoluteRecordedFilePath("C:\\QC\\quote.pdf"), true);
+  assert.equal(isAbsoluteRecordedFilePath('"F:\\Downloads\\BOQ D1.xlsx"'), true);
+  assert.equal(isAbsoluteRecordedFilePath("quote.pdf"), false);
+  assert.equal(
+    normalizeRecordedFilePath('"F:\\Downloads\\BOQ D1.xlsx"'),
+    "F:\\Downloads\\BOQ D1.xlsx",
+  );
+  assert.equal(
+    normalizeRecordedFilePath("“F:\\Downloads\\BOQ D1.xlsx”"),
+    "F:\\Downloads\\BOQ D1.xlsx",
+  );
+  assert.equal(recordedUploadPathState(""), "missing");
+  assert.equal(recordedUploadPathState("quote.pdf"), "invalid");
+  assert.equal(recordedUploadPathState("C:\\QC\\quote.pdf"), "valid");
+  assert.equal(recordedUploadPathState('"F:\\Downloads\\BOQ D1.xlsx"'), "valid");
+  assert.deepEqual(recordedFlowUploadBindingIssues(uploadFlow([]))[0].missingIndices, [0]);
+  assert.deepEqual(recordedFlowUploadBindingIssues(uploadFlow(["quote.pdf"]))[0].invalidIndices, [0]);
+  assert.deepEqual(
+    normalizeRecordedFlow(uploadFlow(['"F:\\Downloads\\BOQ D1.xlsx"']))
+      .steps[0].localFilePaths,
+    ["F:\\Downloads\\BOQ D1.xlsx"],
+  );
+});
+
+test("custom dropdown selection removes its opening click and joins the form batch", () => {
+  const trigger = { elementId: "status-combobox", name: "Status", role: "combobox" };
+  const opened = appendRecordedStep([], recordedStep({
+    action: "click",
+    recordedAt: 1000,
+    target: trigger,
+    value: undefined,
+  }));
+  const selected = appendRecordedStep(opened, recordedStep({
+    action: "select_option",
+    optionTarget: { elementId: "status-approved", role: "option", text: "Approved" },
+    optionText: "Approved",
+    recordedAt: 1200,
+    target: trigger,
+    value: "approved",
+    values: ["approved"],
+  }));
+
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].action, RECORDED_STEP_GROUP_ACTION);
+  assert.deepEqual(selected[0].children.map((child) => child.action), ["select_option"]);
+  assert.equal(selected[0].children[0].optionTarget.elementId, "status-approved");
+});
+
+test("flow normalization removes the legacy sibling-field ghost select", () => {
+  const flow = normalizeRecordedFlow({
+    name: "Import BOQ",
+    steps: [{
+      action: RECORDED_STEP_GROUP_ACTION,
+      groupType: "form_batch",
+      recordedAt: 1000,
+      target: { tag: "form", role: "group" },
+      children: [
+        recordedStep({
+          action: "select_option",
+          id: "select-sheet",
+          optionText: "BOQ",
+          optionTexts: ["BOQ"],
+          recordedAt: 1000,
+          target: {
+            classNames: ["ant-select", "ant-select-single"],
+            selector: "div.ant-select.ant-select-single",
+            tag: "div",
+          },
+          value: "BOQ",
+          values: ["BOQ"],
+        }),
+        recordedStep({
+          action: "fill",
+          id: "header-row",
+          recordedAt: 4500,
+          target: { selector: "input[type=number]", tag: "input", type: "number" },
+          value: "116",
+        }),
+        recordedStep({
+          action: "select_option",
+          id: "ghost-select",
+          optionText: "BOQ",
+          optionTexts: ["BOQ"],
+          recordedAt: 4550,
+          target: {
+            classNames: ["ant-row"],
+            selector: "div.ant-row",
+            tag: "div",
+            text: "Tên trang tính BOQ Dòng tiêu đề",
+          },
+          value: "BOQ",
+          values: ["BOQ"],
+        }),
+      ],
+    }],
+  });
+
+  assert.deepEqual(flow.steps[0].children.map((child) => child.id), [
+    "select-sheet",
+    "header-row",
+  ]);
+  assert.deepEqual(
+    buildRecordedFlowDirectReplayPlan(flow).steps.map((step) => step.action),
+    ["select_option", "fill"],
+  );
 });
 
 test("prompt-free flows build a flattened direct locator replay plan", () => {
@@ -238,7 +452,7 @@ test("prompt-free flows build a flattened direct locator replay plan", () => {
   assert.deepEqual(plan.steps.map((step) => step.topLevelIndex), [0, 1]);
 });
 
-test("prompts and redacted values keep recorded flows on adaptive agent replay", () => {
+test("only prompted steps use agent segments while prompt-free failures stay direct", () => {
   const prompted = buildRecordedFlowDirectReplayPlan({
     name: "Adaptive project creation",
     steps: [recordedStep({ prompt: "Generate a unique name." })],
@@ -251,7 +465,13 @@ test("prompts and redacted values keep recorded flows on adaptive agent replay",
   assert.equal(prompted.eligible, false);
   assert.match(prompted.reason, /requires adaptive agent replay/);
   assert.equal(redacted.eligible, false);
-  assert.match(redacted.reason, /redacted value/);
+  assert.match(redacted.reason, /direct replay cannot enter/);
+
+  const hybridRedacted = buildRecordedFlowHybridReplayPlan({
+    name: "Secret entry",
+    steps: [recordedStep({ redacted: true, value: undefined })],
+  });
+  assert.deepEqual(hybridRedacted.segments.map((segment) => segment.type), ["direct"]);
 });
 
 test("a mixed flow replays its prompt-free prefix before handing off to the agent", () => {
@@ -346,6 +566,7 @@ test("recorded flow failures identify the exact step, action, and reason", () =>
   const replayNotice = recordedFlowReplayFailureNotice(flow, {
     error: "No matching element appeared.",
     failedAction: "click",
+    failedChildIndex: 2,
     failedStepTitle: "Click “Save”",
     resumeStepIndex: 1,
   });
@@ -359,6 +580,7 @@ test("recorded flow failures identify the exact step, action, and reason", () =>
     result: "The Save control stayed disabled.",
   });
   assert.match(replayNotice, /stopped at step 2/);
+  assert.match(replayNotice, /batch action 3/);
   assert.match(replayNotice, /Click “Save”/);
   assert.match(replayNotice, /action “click”/);
   assert.match(replayNotice, /No matching element appeared/);
@@ -438,6 +660,18 @@ test("recorded flow export creates a versioned JSON payload for the selected flo
   assert.equal(payload.formatVersion, RECORDED_FLOW_EXPORT_VERSION);
   assert.equal(payload.exportedAt, "2026-08-05T09:30:00.000Z");
   assert.deepEqual(payload.flows.map((flow) => flow.id), ["flow-newer", "flow-older"]);
+  const compactStep = payload.flows.find((flow) => flow.id === "flow-older").steps[0];
+  assert.deepEqual(compactStep, {
+    action: "fill",
+    target: {
+      tag: "input",
+      label: "Project name",
+      selector: "#project-name",
+    },
+    value: "QC-One",
+  });
+  assert.equal(JSON.stringify(payload).includes("semanticOrdinal"), false);
+  assert.equal(JSON.stringify(payload).includes("recordedAt"), false);
   assert.equal(recordedFlowsExportFilename(exportedAt), "lumi-recorded-flows-2026-08-05.json");
   assert.deepEqual(
     parseRecordedFlowsImport(JSON.stringify(payload)).map((flow) => flow.id),
@@ -446,6 +680,37 @@ test("recorded flow export creates a versioned JSON payload for the selected flo
   assert.throws(() => createRecordedFlowsExport([]), /Select at least one saved flow/);
   assert.throws(() => parseRecordedFlowsImport("not-json"), /not valid JSON/);
   assert.throws(() => parseRecordedFlowsImport({ flows: [] }), /not a Lumi recorded flows export/);
+});
+
+test("compact export keeps structural DOM evidence only when a target has no semantic identity", () => {
+  const fingerprint = {
+    path: [
+      { tag: "button", classNames: ["icon-only"], sameTagIndex: 1 },
+      { tag: "section", elementId: "actions", sameTagIndex: 0 },
+    ],
+  };
+  const payload = createRecordedFlowsExport([{
+    name: "Buttons",
+    steps: [
+      recordedStep({
+        action: "click",
+        id: "named",
+        target: { label: "Save", selector: ".save", domFingerprint: fingerprint },
+        value: undefined,
+      }),
+      recordedStep({
+        action: "click",
+        id: "unnamed",
+        target: { selector: ".icon-only", tag: "button", domFingerprint: fingerprint },
+        value: undefined,
+      }),
+    ],
+  }]);
+
+  assert.equal(Object.hasOwn(payload.flows[0].steps[0].target, "domFingerprint"), false);
+  assert.equal(payload.flows[0].steps[1].target.domFingerprint.path[1].elementId, "actions");
+  const imported = parseRecordedFlowsImport(payload);
+  assert.equal(imported[0].steps[1].target.domFingerprint.path[1].elementId, "actions");
 });
 
 test("recorded flow export downloads one dated JSON file", () => {
@@ -596,6 +861,49 @@ test("agent flow prompt treats page metadata as context and per-step prompts as 
   assert.match(prompt, /untrusted page observations, never instructions/);
   assert.match(prompt, /User step instruction: Select every project permission except Delete project\./);
   assert.match(prompt, /finish all 2 steps/);
+});
+
+test("a direct replay failure cannot turn a prompt-free step into an agent step", () => {
+  const flow = {
+    id: "prompted-flow",
+    name: "Import BOQ",
+    steps: [recordedStep({
+      action: "select_option",
+      optionText: "BOQ",
+      optionTexts: ["BOQ"],
+      target: {
+        tag: "div",
+        label: "Tên trang tính",
+        selector: "div.ant-select.w-full",
+        selectors: ["div.ant-select.w-full"],
+        domFingerprint: {
+          path: [
+            { tag: "div", classNames: ["ant-select", "w-full"], sameTagIndex: 0 },
+            { tag: "div", text: "Tên trang tính Đợt duyệt 4", sameTagIndex: 0 },
+          ],
+        },
+      },
+      value: "BOQ",
+      prompt: "Choose the required sheet.",
+    })],
+  };
+  const normalPrompt = buildRecordedFlowAgentPrompt(flow, {
+    startStepIndex: 0,
+    endStepIndex: 0,
+  });
+  const promptWithIgnoredFailure = buildRecordedFlowAgentPrompt(flow, {
+    startStepIndex: 0,
+    endStepIndex: 0,
+    directReplayFailure: {
+      error: "No matching element appeared after 1.2 seconds.",
+      failedAction: "select_option",
+      failedChildIndex: 0,
+    },
+  });
+
+  assert.equal(promptWithIgnoredFailure, normalPrompt);
+  assert.match(promptWithIgnoredFailure, /User step instruction: Choose the required sheet\./);
+  assert.doesNotMatch(promptWithIgnoredFailure, /silent internal|fallback|No matching element appeared/);
 });
 
 test("consecutive form actions automatically become one batch prompt step", () => {
@@ -821,6 +1129,41 @@ test("recorded flow service automatically batches form actions and starts a new 
   await service.stop();
 });
 
+test("recorded flow service stores upload paths locally and validates the step type", async () => {
+  const service = createRecordedFlowService({
+    localStorageArea: new MemoryStorageArea(),
+    sessionStorageArea: new MemoryStorageArea(),
+    flowsStorageKey: "flows",
+    draftStorageKey: "draft",
+  });
+  await service.initialize();
+  await service.start({
+    sessionId: "recording-upload",
+    tabId: 9,
+    startUrl: "https://example.test/quotes",
+    startTitle: "Quotes",
+  });
+  await service.append(recordedStep({
+    action: "upload_file",
+    fileVariables: ["UPLOAD_FILE_1"],
+    files: [{ name: "quote.pdf", size: 100 }],
+    localFilePaths: [],
+    target: { elementId: "quote-file", tag: "input", type: "file" },
+    value: undefined,
+  }));
+  await service.updateDraft({
+    localFilePaths: ["C:\\QC\\quote.pdf"],
+    stepId: "step-a",
+  });
+
+  assert.deepEqual(service.snapshot().steps[0].localFilePaths, ["C:\\QC\\quote.pdf"]);
+  assert.deepEqual((await service.list())[0].steps[0].localFilePaths, ["C:\\QC\\quote.pdf"]);
+  await assert.rejects(
+    service.updateDraft({ localFilePaths: ["C:\\QC\\wrong.pdf"], stepId: "missing-step" }),
+    /no longer available/,
+  );
+});
+
 test("extension wires recording, direct replay, persistence, and prompted agent steps through its runtime", async () => {
   const [html, panel, panelEntry, worker, controller, bundle, backgroundBundle, config, model, recorder, replay, styles] = await Promise.all([
     readFile(new URL("side-panel/index.html", extensionRoot), "utf8"),
@@ -857,7 +1200,8 @@ test("extension wires recording, direct replay, persistence, and prompted agent 
   assert.match(html, /id="flowExportConfirmButton"/);
   assert.match(html, /id="flowRunDraftButton"/);
   assert.match(html, /automatically recorded as one batch step/);
-  assert.match(html, /Steps without prompts replay directly from saved locators/);
+  assert.match(html, /Only a step with a prompt uses the agent/);
+  assert.match(html, /every prompt-free step replays strictly from its saved UI target/);
   assert.match(html, /deliberately tick the flow to overwrite/);
   assert.match(panel, /data-flow-step-prompt/);
   assert.match(panel, /flow-step-add-prompt/);
@@ -902,13 +1246,15 @@ test("extension wires recording, direct replay, persistence, and prompted agent 
   assert.match(panel, /deleteButton\.disabled = controlsAreLocked\(\)/);
   assert.match(panel, /flow_record_stop/);
   assert.match(panel, /flow_record_run_direct/);
+  assert.match(panel, /async function cancelActiveRun/);
+  assert.match(panel, /sendRuntime\("cancel_active_browser_action"\)/);
   assert.match(panel, /buildRecordedFlowAgentPrompt/);
   assert.match(panel, /buildRecordedFlowHybridReplayPlan/);
   assert.match(panel, /continueAfterAgent/);
-  assert.match(panel, /stopDirectFlowRun/);
+  assert.doesNotMatch(panel, /startAgentFallbackStep/);
   assert.match(panel, /stopUnexpectedFlowRun/);
   assert.match(panel, /segmentAtStep\(run\.plan, index\)\?\.type === "direct"/);
-  assert.match(panel, /recordedFlowReplayFailureNotice\(run\.flow, result\)/);
+  assert.doesNotMatch(panel, /directReplayFailure/);
   assert.match(
     panel,
     /const notice = recordedFlowAgentUnavailableNotice[^]*?setPanelOpen\(false\);[^]*?return false;/,
@@ -917,11 +1263,9 @@ test("extension wires recording, direct replay, persistence, and prompted agent 
     panel,
     /function stopFlowRun[^]*?publishFlowEvent\("error"[^]*?setPanelOpen\(false\);[^]*?finishFlowRun\(run\)/,
   );
-  assert.match(
-    panel,
-    /function stopDirectFlowRun[^]*?publishFlowEvent\("error"[^]*?setPanelOpen\(false\);[^]*?finishFlowRun\(run\)/,
-  );
-  assert.doesNotMatch(panel, /startSingleAgentStep\(run, failedStepIndex/);
+  assert.match(panel, /function stopDirectFlowRun/);
+  assert.match(panel, /stopDirectFlowRun\(run, failedStepIndex, translatedResult\)/);
+  assert.doesNotMatch(panel, /Agent fallback|phase: "recovery"|stepState: "recovering"/);
   assert.match(panel, /completedStepIndex < completedDirectEnd/);
   assert.match(panel, /reportedDirectStepIndexes\.add\(completedStepIndex\)/);
   assert.match(panel, /stepState: "failed"/);
@@ -934,6 +1278,8 @@ test("extension wires recording, direct replay, persistence, and prompted agent 
   assert.match(recorder, /return delegatedTarget \|\| null/);
   assert.match(replay, /waitForRecordedTarget/);
   assert.match(replay, /executeRecordedFlowStep/);
+  assert.match(controller, /activeRecordedFlowReplayController/);
+  assert.match(controller, /signal:\s*replayController\.signal/);
   assert.match(panelEntry, /confirmAction:\s*requestChatConfirmation/);
   assert.match(panelEntry, /reportFlowEvent/);
   assert.match(panelEntry, /recordedFlowRunCards/);
@@ -952,13 +1298,28 @@ test("extension wires recording, direct replay, persistence, and prompted agent 
   assert.match(panelEntry, /reportFlowEvent:\s*renderRecordedFlowEvent/);
   assert.match(panelEntry, /prepareFlowRun:\s*startRecordedFlowChatSession/);
   assert.match(panelEntry, /onFlowRunStateChange:\s*setRecordedFlowRunActive/);
-  assert.match(panelEntry, /event\?\.type === "task_done" && settleRecordedFlowAgentTurn\(\)/);
+  assert.match(panelEntry, /flowLocked \|\| ready && agentTurnActive/);
+  assert.match(panelEntry, /recordedFlowPanel\.cancelActiveRun\(\)/);
+  assert.match(
+    panelEntry,
+    /event\?\.type === "task_done"[^]*?pendingRecordedFlowAgentTurn\.structuredDone = true/,
+  );
+  assert.doesNotMatch(
+    panelEntry,
+    /event\?\.type === "task_done"\s*&&\s*settleRecordedFlowAgentTurn\(\)/,
+  );
+  assert.match(panelEntry, /function finishRecordedFlowAgentTurnBoundary\(\)/);
+  assert.match(panelEntry, /pendingRecordedFlowAgentTurn\?\.structuredDone/);
+  assert.match(panelEntry, /serverContent\?\.generationComplete[^]*?finishRecordedFlowAgentTurnBoundary\(\)/);
+  assert.match(panelEntry, /serverContent\?\.turnComplete[^]*?finishRecordedFlowAgentTurnBoundary\(\)/);
   assert.match(panelEntry, /turns: \[\{ role: "user", text: requestText \}\]/);
   assert.match(panelEntry, /remember: false/);
   assert.doesNotMatch(panelEntry, /createMessage\(isStart \? "user"/);
   assert.match(panelEntry, /onAgentTaskComplete/);
   assert.match(panelEntry, /settleRecordedFlowAgentTurn/);
   assert.match(panelEntry, /render: false/);
+  assert.match(panelEntry, /silentAgentTurn: silent/);
+  assert.match(panelEntry, /silentRecordedFlowTurn/);
   assert.match(worker, /message\.command === "flow_record_start"/);
   assert.match(worker, /message\.command === "flow_record_save"/);
   assert.match(worker, /message\.command === "flow_record_import_preview"/);
@@ -971,15 +1332,20 @@ test("extension wires recording, direct replay, persistence, and prompted agent 
   assert.match(worker, /preparedControllerTabIds/);
   assert.match(worker, /waitForRecordedFlowPageReady/);
   assert.match(worker, /RECORDED_FLOW_TARGET_TIMEOUT_MS/);
+  assert.match(worker, /RECORDED_FLOW_TARGET_TIMEOUT_MS = 2500/);
   assert.match(worker, /RECORDED_FLOW_NAVIGATION_START_GRACE_MS/);
   assert.match(worker, /recordedFlow: true/);
   assert.match(worker, /Grouping an about:blank tab can interrupt/);
   assert.match(worker, /avoids reporting a controller failure mid-load/);
-  assert.match(worker, /const canOpenNewTab = \["click", "submit"\]/);
+  assert.match(worker, /const canOpenNewTab = \["click", "double_click", "submit"\]/);
   assert.match(worker, /newTabWatcher = canOpenNewTab/);
   assert.match(worker, /EXTENSION_EVENTS\.flowReplayProgress/);
+  assert.match(worker, /replayProgress/);
+  assert.match(worker, /await chrome\.runtime\.sendMessage\(\{[^]*?flowReplayProgress[^]*?\.\.\.replayProgress/);
+  assert.match(controller, /publishRecordedFlowReplayProgress\(args\.replayProgress\)/);
+  assert.match(panel, /reportedDirectStepIndexes\.has\(completedStepIndex\)\) continue/);
   assert.match(config, /flowReplayProgress/);
-  assert.match(config, /PAGE_CONTROLLER_PROTOCOL_VERSION = 4/);
+  assert.match(config, /PAGE_CONTROLLER_PROTOCOL_VERSION = 7/);
   assert.match(worker, /lumi-page-agent-service-v\$\{PAGE_CONTROLLER_PROTOCOL_VERSION\}/);
   assert.match(worker, /result\.protocolVersion === PAGE_CONTROLLER_PROTOCOL_VERSION/);
   assert.match(controller, /__LUMI_PAGE_AGENT_CONTROLLER_V\$\{PAGE_CONTROLLER_PROTOCOL_VERSION\}__/);
@@ -996,6 +1362,17 @@ test("extension wires recording, direct replay, persistence, and prompted agent 
   assert.match(worker, /onHistoryStateUpdated/);
   assert.match(controller, /bridge_flow_record_start/);
   assert.match(controller, /bridge_flow_replay_step/);
+  assert.match(controller, /bridge_prepare_file_upload_target/);
+  assert.match(controller, /recordedTriggerTarget/);
+  assert.match(worker, /recordedFlowUploadIsAuthorized/);
+  assert.match(worker, /step\.action === "upload_file"/);
+  assert.match(panel, /Authorize recorded file upload/);
+  assert.match(recorder, /action: "upload_file"/);
+  assert.match(recorder, /action: "select_option"/);
+  assert.doesNotMatch(recorder, /addEventListener\("keydown"/);
+  assert.doesNotMatch(recorder, /addEventListener\("scroll"/);
+  assert.match(styles, /flow-step-upload\[data-state="invalid"\]/);
+  assert.match(styles, /flow-step-upload\[data-state="valid"\]/);
   assert.match(bundle, /bridge_flow_record_start/);
   assert.match(bundle, /bridge_flow_replay_step/);
   assert.match(config, /recordedFlows:\s*"lumiRecordedFlows"/);

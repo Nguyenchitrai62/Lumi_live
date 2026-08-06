@@ -12,7 +12,7 @@ export const EXTENSION_EVENTS = Object.freeze({
 // Bump this whenever an already-open tab must reject an older injected
 // controller. The version is part of both the message source and global key,
 // so a stale controller cannot answer requests intended for the new bundle.
-export const PAGE_CONTROLLER_PROTOCOL_VERSION = 4;
+export const PAGE_CONTROLLER_PROTOCOL_VERSION = 7;
 
 export const STORAGE_KEYS = Object.freeze({
   apiKey: "lumiGeminiApiKey",

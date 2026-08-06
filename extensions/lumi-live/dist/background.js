@@ -11,7 +11,7 @@ var EXTENSION_EVENTS = Object.freeze({
   translationState: "lumi_live_translation_state",
   videoAnalysisProgress: "lumi_live_video_analysis_progress"
 });
-var PAGE_CONTROLLER_PROTOCOL_VERSION = 4;
+var PAGE_CONTROLLER_PROTOCOL_VERSION = 7;
 var STORAGE_KEYS = Object.freeze({
   apiKey: "lumiGeminiApiKey",
   groqApiKey: "lumiGroqApiKey",
@@ -1765,7 +1765,7 @@ function extractActiveContextIdentifiers(safeUrl) {
 }
 
 // extensions/lumi-live/core/recorded-flows.js
-var RECORDED_FLOW_SCHEMA_VERSION = 2;
+var RECORDED_FLOW_SCHEMA_VERSION = 3;
 var MAX_RECORDED_FLOWS = 120;
 var MAX_RECORDED_FLOW_STEPS = 100;
 var MAX_RECORDED_STEP_PROMPT_CHARACTERS = 1200;
@@ -1775,15 +1775,21 @@ var RECORDED_FLOW_EXPORT_FORMAT = "lumi-recorded-flows";
 var RECORDED_FLOW_EXPORT_VERSION = 1;
 var DIRECT_REPLAY_ACTIONS = /* @__PURE__ */ new Set([
   "click",
+  "context_click",
+  "double_click",
+  "drag_drop",
   "fill",
   "navigate",
   "select_option",
   "set_checked",
-  "submit"
+  "submit",
+  "upload_file"
 ]);
 var MAX_NAME_CHARACTERS = 120;
 var MAX_TARGET_TEXT_CHARACTERS = 240;
 var MAX_VALUE_CHARACTERS = 2e3;
+var MAX_LOCAL_FILE_PATH_CHARACTERS = 4096;
+var MAX_RECORDED_UPLOAD_FILES = 20;
 var RECORDED_FORM_ACTIONS = /* @__PURE__ */ new Set(["fill", "select_option", "set_checked"]);
 function isObject2(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -1793,6 +1799,52 @@ function clipText(value, limit) {
 }
 function normalizeStringList(value, { limit = 12, textLimit = 1e3 } = {}) {
   return [...new Set((Array.isArray(value) ? value : []).map((item) => clipText(item, textLimit)).filter(Boolean))].slice(0, limit);
+}
+function normalizeRecordedFilePath(value) {
+  const path = String(value ?? "").trim();
+  const quotePairs = /* @__PURE__ */ new Map([
+    ['"', '"'],
+    ["'", "'"],
+    ["\u201C", "\u201D"],
+    ["\u2018", "\u2019"]
+  ]);
+  const closingQuote = quotePairs.get(path[0]);
+  const unquoted = closingQuote && path.at(-1) === closingQuote ? path.slice(1, -1).trim() : path;
+  return unquoted.slice(0, MAX_LOCAL_FILE_PATH_CHARACTERS);
+}
+function normalizeLocalFilePaths(value) {
+  return (Array.isArray(value) ? value : []).map(normalizeRecordedFilePath).slice(0, MAX_RECORDED_UPLOAD_FILES);
+}
+function normalizeRecordedFiles(value) {
+  return (Array.isArray(value) ? value : []).filter(isObject2).map((file) => ({
+    name: clipText(file.name, 500),
+    type: clipText(file.type, 200).toLowerCase(),
+    size: Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.round(Number(file.size) || 0))),
+    lastModified: Math.max(0, Math.round(Number(file.lastModified) || 0))
+  })).filter((file) => file.name).slice(0, MAX_RECORDED_UPLOAD_FILES);
+}
+function normalizeFileVariables(value, count = 0) {
+  const variables = normalizeStringList(value, {
+    limit: MAX_RECORDED_UPLOAD_FILES,
+    textLimit: 80
+  }).map((name) => name.replace(/^\$\{(.+)\}$/, "$1")).filter((name) => /^[A-Z][A-Z0-9_]{0,79}$/.test(name));
+  const expectedCount = Math.min(
+    MAX_RECORDED_UPLOAD_FILES,
+    Math.max(1, Number(count) || variables.length || 1)
+  );
+  for (let index = variables.length; index < expectedCount; index += 1) {
+    variables.push(`UPLOAD_FILE_${index + 1}`);
+  }
+  return variables.slice(0, expectedCount);
+}
+function normalizeModifiers(value) {
+  const source = isObject2(value) ? value : {};
+  return {
+    alt: source.alt === true,
+    ctrl: source.ctrl === true,
+    meta: source.meta === true,
+    shift: source.shift === true
+  };
 }
 function normalizeRecordedDataAttributes(value) {
   if (!isObject2(value)) return {};
@@ -1816,6 +1868,64 @@ function normalizeRecordedTargetContext(value) {
     selector: clipText(value.selector, 1e3)
   };
 }
+function normalizeRecordedDomPathSegment(value) {
+  const context = normalizeRecordedTargetContext(value);
+  if (!context) return null;
+  return {
+    ...context,
+    type: clipText(value.type, 60).toLowerCase(),
+    inputName: clipText(value.inputName, MAX_TARGET_TEXT_CHARACTERS),
+    childIndex: Number.isInteger(value.childIndex) && value.childIndex >= 0 ? Math.min(value.childIndex, 1e4) : null,
+    sameTagIndex: Number.isInteger(value.sameTagIndex) && value.sameTagIndex >= 0 ? Math.min(value.sameTagIndex, 1e4) : null
+  };
+}
+function normalizeRecordedDomFingerprint(value) {
+  if (!isObject2(value)) return null;
+  const path = (Array.isArray(value.path) ? value.path : []).map(normalizeRecordedDomPathSegment).filter(Boolean).slice(0, 10);
+  if (!path.length) return null;
+  return {
+    path,
+    previousSibling: normalizeRecordedDomPathSegment(value.previousSibling),
+    nextSibling: normalizeRecordedDomPathSegment(value.nextSibling)
+  };
+}
+function inferredRecordedControlLabel(target, action = "") {
+  const fieldAction = RECORDED_FORM_ACTIONS.has(action);
+  const fieldLike = ["input", "select", "textarea"].includes(target.tag) || [
+    "checkbox",
+    "combobox",
+    "listbox",
+    "radio",
+    "searchbox",
+    "slider",
+    "spinbutton",
+    "switch",
+    "textbox"
+  ].includes(target.role) || target.classNames.some((name) => /(?:^|[-_])(combobox|control|dropdown|field|picker|select)(?:$|[-_])/i.test(name));
+  if (!fieldAction && !fieldLike) return "";
+  const identity = target.text || target.name || target.controlValue;
+  if (!identity) return "";
+  const normalizedIdentity = identity.toLocaleLowerCase();
+  for (const ancestor of target.ancestors.slice(0, 3)) {
+    const contextText = clipText(ancestor.text, MAX_TARGET_TEXT_CHARACTERS);
+    if (!contextText || contextText.length > 160) continue;
+    const index = contextText.toLocaleLowerCase().indexOf(normalizedIdentity);
+    if (index < 0) continue;
+    const label = clipText(
+      `${contextText.slice(0, index)} ${contextText.slice(index + identity.length)}`.replace(/\s+/g, " ").trim(),
+      MAX_TARGET_TEXT_CHARACTERS
+    );
+    if (label) return label;
+  }
+  return "";
+}
+function normalizeRecordedHoverTarget(value) {
+  const target = normalizeRecordedTargetContext(value);
+  if (!target) return null;
+  if (["html", "body", "main"].includes(target.tag)) return null;
+  if (/^(?:html\s*>\s*body|body|main)(?:\.|\[|\s|$)/i.test(target.selector)) return null;
+  return target;
+}
 function newId(prefix) {
   const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   return `${prefix}-${suffix}`;
@@ -1824,7 +1934,7 @@ function normalizeTimestamp(value, fallback = Date.now()) {
   const timestamp = Number(value);
   return Number.isFinite(timestamp) && timestamp > 0 ? Math.round(timestamp) : fallback;
 }
-function normalizeRecordedTarget(value) {
+function normalizeRecordedTarget(value, { action = "" } = {}) {
   const source = isObject2(value) ? value : {};
   const target = {
     tag: clipText(source.tag, 40).toLowerCase(),
@@ -1845,11 +1955,13 @@ function normalizeRecordedTarget(value) {
     selector: clipText(source.selector, 1e3),
     selectors: normalizeStringList(source.selectors, { textLimit: 1e3 }),
     semanticOrdinal: Number.isInteger(source.semanticOrdinal) && source.semanticOrdinal >= 0 ? Math.min(source.semanticOrdinal, 1e3) : null,
+    domFingerprint: normalizeRecordedDomFingerprint(source.domFingerprint),
     ancestors: (Array.isArray(source.ancestors) ? source.ancestors : []).map(normalizeRecordedTargetContext).filter(Boolean).slice(0, 6),
-    hoverTarget: normalizeRecordedTargetContext(source.hoverTarget),
+    hoverTarget: normalizeRecordedHoverTarget(source.hoverTarget),
     form: normalizeRecordedTargetContext(source.form),
     origin: normalizeRecordedTargetContext(source.origin)
   };
+  if (!target.label) target.label = inferredRecordedControlLabel(target, action);
   if (!target.selectors.length && target.selector) target.selectors = [target.selector];
   return target;
 }
@@ -1864,21 +1976,53 @@ function recordedTargetKey(target) {
     normalized.placeholder
   ].join("\0");
 }
+function recordedSelectIdentity(step) {
+  const values = (step.values?.length ? step.values : [step.value]).map((value) => clipText(value, MAX_VALUE_CHARACTERS)).filter(Boolean);
+  const texts = (step.optionTexts?.length ? step.optionTexts : [step.optionText]).map((value) => clipText(value, MAX_TARGET_TEXT_CHARACTERS)).filter(Boolean);
+  return `${values.join("")}\0${texts.join("")}`;
+}
+function recordedTargetLooksLikeSelect(target) {
+  if (target?.tag === "select") return true;
+  if (["combobox", "listbox"].includes(target?.role)) return true;
+  const identity = [
+    ...target?.classNames || [],
+    target?.selector,
+    ...target?.selectors || []
+  ].filter(Boolean).join(" ").toLowerCase();
+  return /(?:^|[^a-z0-9])(select|combobox|dropdown)(?:$|[^a-z0-9])/.test(identity);
+}
+function removeRecorderGhostSelections(children) {
+  const recentCredibleSelections = /* @__PURE__ */ new Map();
+  return children.filter((child) => {
+    if (child.action !== "select_option") return true;
+    const identity = recordedSelectIdentity(child);
+    if (!identity.replace("\0", "")) return true;
+    const credibleTarget = recordedTargetLooksLikeSelect(child.target);
+    const previousRecordedAt = recentCredibleSelections.get(identity);
+    if (!credibleTarget && Number.isFinite(previousRecordedAt) && child.recordedAt - previousRecordedAt >= 0 && child.recordedAt - previousRecordedAt < 1e4) return false;
+    if (credibleTarget) recentCredibleSelections.set(identity, child.recordedAt);
+    return true;
+  });
+}
 function normalizeStep(value, index = 0, depth = 0) {
   if (!isObject2(value)) return null;
   const allowedActions = /* @__PURE__ */ new Set([
     RECORDED_STEP_GROUP_ACTION,
     "click",
+    "context_click",
+    "double_click",
+    "drag_drop",
     "fill",
     "navigate",
     "select_option",
     "set_checked",
-    "submit"
+    "submit",
+    "upload_file"
   ]);
   const action = allowedActions.has(value.action) ? value.action : "";
   if (!action) return null;
   if (action === RECORDED_STEP_GROUP_ACTION && depth > 3) return null;
-  const target = normalizeRecordedTarget(value.target);
+  const target = normalizeRecordedTarget(value.target, { action });
   const recordedAt = normalizeTimestamp(value.recordedAt);
   const step = {
     id: clipText(value.id, 180) || newId(`step-${index + 1}`),
@@ -1893,11 +2037,14 @@ function normalizeStep(value, index = 0, depth = 0) {
     recordedAt
   };
   if (action === RECORDED_STEP_GROUP_ACTION) {
-    const children = (Array.isArray(value.children) ? value.children : []).flatMap((child, childIndex) => {
+    let children = (Array.isArray(value.children) ? value.children : []).flatMap((child, childIndex) => {
       const normalized = normalizeStep(child, childIndex, depth + 1);
       if (!normalized) return [];
       return normalized.action === RECORDED_STEP_GROUP_ACTION ? normalized.children || [] : [normalized];
     }).slice(0, MAX_RECORDED_FLOW_STEPS);
+    if (value.groupType === RECORDED_FORM_BATCH_TYPE) {
+      children = removeRecorderGhostSelections(children);
+    }
     if (!children.length) return null;
     step.children = children;
     if (value.groupType === RECORDED_FORM_BATCH_TYPE) {
@@ -1911,6 +2058,31 @@ function normalizeStep(value, index = 0, depth = 0) {
   else if (value.value !== void 0) step.value = String(value.value).slice(0, MAX_VALUE_CHARACTERS);
   if (value.optionText !== void 0) {
     step.optionText = clipText(value.optionText, MAX_TARGET_TEXT_CHARACTERS);
+  }
+  if (action === "select_option") {
+    step.values = normalizeStringList(value.values, {
+      limit: 200,
+      textLimit: MAX_VALUE_CHARACTERS
+    });
+    step.optionTexts = normalizeStringList(value.optionTexts, {
+      limit: 200,
+      textLimit: MAX_TARGET_TEXT_CHARACTERS
+    });
+    step.optionTarget = isObject2(value.optionTarget) ? normalizeRecordedTarget(value.optionTarget) : null;
+  }
+  if (["click", "context_click", "double_click"].includes(action)) {
+    step.modifiers = normalizeModifiers(value.modifiers);
+  }
+  if (action === "drag_drop") {
+    step.destinationTarget = normalizeRecordedTarget(value.destinationTarget);
+  }
+  if (action === "upload_file") {
+    step.files = normalizeRecordedFiles(value.files);
+    step.fileVariables = normalizeFileVariables(value.fileVariables, step.files.length);
+    step.localFilePaths = normalizeLocalFilePaths(value.localFilePaths);
+    step.accept = clipText(value.accept, 1e3);
+    step.multiple = value.multiple === true || step.fileVariables.length > 1;
+    step.triggerTarget = isObject2(value.triggerTarget) ? normalizeRecordedTarget(value.triggerTarget) : null;
   }
   if (value.resultUrl !== void 0) step.resultUrl = clipText(value.resultUrl, 3e3);
   return step;
@@ -1962,7 +2134,11 @@ function appendRecordedStep(currentSteps, rawStep) {
   const steps = (Array.isArray(currentSteps) ? currentSteps : []).map(normalizeRecordedStep).filter(Boolean);
   const next = normalizeRecordedStep(rawStep, steps.length);
   if (!next) return steps;
-  const previous = steps.at(-1);
+  let previous = steps.at(-1);
+  if (next.action === "select_option" && previous?.action === "click" && recordedTargetKey(previous.target) === recordedTargetKey(next.target) && next.recordedAt - previous.recordedAt < 1e4) {
+    steps.pop();
+    previous = steps.at(-1);
+  }
   if (RECORDED_FORM_ACTIONS.has(next.action)) {
     if (previous?.action === RECORDED_STEP_GROUP_ACTION && previous.groupType === RECORDED_FORM_BATCH_TYPE) {
       steps[steps.length - 1] = createRecordedFormBatch(
@@ -1974,7 +2150,23 @@ function appendRecordedStep(currentSteps, rawStep) {
     if (steps.length >= MAX_RECORDED_FLOW_STEPS) return steps;
     return [...steps, createRecordedFormBatch([next])];
   }
+  if (next.action === "upload_file" && previous?.action === "click" && next.triggerTarget && recordedTargetKey(previous.target) === recordedTargetKey(next.triggerTarget) && next.recordedAt - previous.recordedAt < 3e4) {
+    steps[steps.length - 1] = {
+      ...next,
+      id: previous.id,
+      prompt: previous.prompt
+    };
+    return steps;
+  }
   const sameTarget = previous && recordedTargetKey(previous.target) === recordedTargetKey(next.target);
+  if (sameTarget && previous.action === "click" && next.action === "double_click" && next.recordedAt - previous.recordedAt < 1e3) {
+    steps[steps.length - 1] = {
+      ...next,
+      id: previous.id,
+      prompt: previous.prompt
+    };
+    return steps;
+  }
   if (sameTarget && previous.action === "fill" && next.action === "fill" && next.recordedAt - previous.recordedAt < 1e4) {
     steps[steps.length - 1] = {
       ...next,
@@ -2016,16 +2208,22 @@ function normalizeRecordedFlows(value) {
 function recordedFlowNameKey(value) {
   return clipText(value, MAX_NAME_CHARACTERS).normalize("NFKC").toLowerCase();
 }
-function recordedStepAgentReplayReason(step, topLevelIndex) {
+function recordedStepPromptReplayReason(step, topLevelIndex) {
   const children = step.action === RECORDED_STEP_GROUP_ACTION ? step.children || [] : [step];
   if (step.prompt || children.some((child) => child.prompt)) {
     return `Step ${topLevelIndex + 1} has a user prompt and requires adaptive agent replay.`;
   }
+  return "";
+}
+function recordedStepDirectReplayBlocker(step, topLevelIndex) {
+  const promptReason = recordedStepPromptReplayReason(step, topLevelIndex);
+  if (promptReason) return promptReason;
+  const children = step.action === RECORDED_STEP_GROUP_ACTION ? step.children || [] : [step];
   if (children.some((child) => !DIRECT_REPLAY_ACTIONS.has(child.action))) {
-    return `Step ${topLevelIndex + 1} uses an action that direct replay does not support.`;
+    return `Step ${topLevelIndex + 1} uses an action that saved-locator replay does not support.`;
   }
   if (children.some((child) => child.redacted === true)) {
-    return `Step ${topLevelIndex + 1} contains a redacted value and requires agent replay.`;
+    return `Step ${topLevelIndex + 1} contains a redacted value that direct replay cannot enter.`;
   }
   return "";
 }
@@ -2044,7 +2242,7 @@ function buildRecordedFlowDirectReplayPlan(value) {
   for (let topLevelIndex = 0; topLevelIndex < flow.steps.length; topLevelIndex += 1) {
     const step = flow.steps[topLevelIndex];
     const children = step.action === RECORDED_STEP_GROUP_ACTION ? step.children || [] : [step];
-    const blocker = recordedStepAgentReplayReason(step, topLevelIndex);
+    const blocker = recordedStepDirectReplayBlocker(step, topLevelIndex);
     if (blocker) {
       return {
         eligible: steps.length > 0,
@@ -2065,6 +2263,14 @@ function buildRecordedFlowDirectReplayPlan(value) {
   }
   return { eligible: true, flow, handoffStepIndex: null, reason: "", steps };
 }
+function stripLocalFileBindings(step) {
+  const sanitized = { ...step };
+  delete sanitized.localFilePaths;
+  if (Array.isArray(sanitized.children)) {
+    sanitized.children = sanitized.children.map(stripLocalFileBindings);
+  }
+  return sanitized;
+}
 function parseRecordedFlowsImport(value) {
   let source = value;
   if (typeof source === "string") {
@@ -2083,7 +2289,10 @@ function parseRecordedFlowsImport(value) {
   if (!Array.isArray(source.flows)) {
     throw new Error("The recorded flows export does not contain a flow list.");
   }
-  const flows = normalizeRecordedFlows(source.flows);
+  const flows = normalizeRecordedFlows(source.flows).map((flow) => ({
+    ...flow,
+    steps: flow.steps.map(stripLocalFileBindings)
+  }));
   if (!flows.length) throw new Error("The selected file does not contain any valid saved flows.");
   return flows;
 }
@@ -2099,11 +2308,15 @@ function recordedStepTitle(step, index = 0) {
   const target = normalized.target.name || normalized.target.label || normalized.target.text || normalized.target.placeholder || normalized.target.testId || normalized.target.elementId || normalized.target.tag || "page";
   const verbs = {
     click: "Click",
+    context_click: "Right-click",
+    double_click: "Double-click",
+    drag_drop: "Drag",
     fill: "Fill",
     navigate: "Open",
     select_option: "Select",
     set_checked: normalized.value ? "Check" : "Uncheck",
-    submit: "Submit"
+    submit: "Submit",
+    upload_file: "Upload to"
   };
   return `${verbs[normalized.action] || normalized.action} \u201C${target}\u201D`;
 }
@@ -2544,7 +2757,7 @@ async function waitForRecordedFlowPageReady(tabId, {
   navigationStartGraceMs = 0,
   now = () => Date.now(),
   pollIntervalMs = 150,
-  postLoadQuietMs = 250,
+  postLoadQuietMs = 350,
   tabIsReady = (tab) => tab?.status === "complete",
   timeoutMs = DEFAULT_RECORDED_FLOW_PAGE_LOAD_TIMEOUT_MS
 } = {}) {
@@ -2725,7 +2938,14 @@ function createRecordedFlowService({
     const previous = draft.steps.at(-1);
     const now = Date.now();
     if (previous && (previous.action === "navigate" && (previous.value === url || previous.url === url) || previous.resultUrl === url)) return snapshot();
-    if (previous && ["click", "select_option", "set_checked"].includes(previous.action) && now - previous.recordedAt < 6e3) {
+    if (previous && [
+      "click",
+      "double_click",
+      "select_option",
+      "set_checked",
+      "submit",
+      "upload_file"
+    ].includes(previous.action) && now - previous.recordedAt < 6e3) {
       previous.resultUrl = String(url);
       draft.updatedAt = now;
       await persistDraft();
@@ -2745,6 +2965,7 @@ function createRecordedFlowService({
     name,
     stepId,
     prompt,
+    localFilePaths,
     move,
     remove: remove2
   }) {
@@ -2758,6 +2979,12 @@ function createRecordedFlowService({
       } else {
         if (prompt !== void 0) {
           draft.steps[index].prompt = String(prompt).trim().slice(0, 1200);
+        }
+        if (localFilePaths !== void 0) {
+          if (draft.steps[index].action !== "upload_file") {
+            throw new Error("Local file paths can only be assigned to an upload step.");
+          }
+          draft.steps[index].localFilePaths = (Array.isArray(localFilePaths) ? localFilePaths : []).map((path) => String(path ?? "").slice(0, 4096)).slice(0, 20);
         }
         if (move === "up" && index > 0) {
           [draft.steps[index - 1], draft.steps[index]] = [draft.steps[index], draft.steps[index - 1]];
@@ -15726,7 +15953,8 @@ var RECORDED_FLOWS_STORAGE_KEY = STORAGE_KEYS.recordedFlows;
 var RECORDED_FLOW_DRAFT_STORAGE_KEY = STORAGE_KEYS.recordedFlowDraft;
 var RECORDED_FLOW_INTER_STEP_DELAY_MS = 250;
 var RECORDED_FLOW_NAVIGATION_START_GRACE_MS = 750;
-var RECORDED_FLOW_TARGET_TIMEOUT_MS = 3e4;
+var RECORDED_FLOW_TARGET_TIMEOUT_MS = 2500;
+var RECORDED_FLOW_UPLOAD_SETTLE_MS = 3500;
 var connectedTabId = null;
 var fastModeEnabled = false;
 var fastPromptTargetTabId = null;
@@ -15929,6 +16157,25 @@ async function prepareRecordedFlowStart(flow, tab, action) {
   });
   return ready2.tab;
 }
+function recordedFlowUploadIsAuthorized(flow, step, tab, replayContext) {
+  const authorization = replayContext?.uploadAuthorization;
+  if (!authorization || typeof authorization !== "object") return false;
+  const confirmedAt = Number(authorization.confirmedAt);
+  if (!Number.isFinite(confirmedAt) || Date.now() - confirmedAt > 10 * 60 * 1e3) return false;
+  if (String(authorization.flowId || "") !== String(flow.id || "")) return false;
+  const entry = (Array.isArray(authorization.entries) ? authorization.entries : []).find((candidate) => String(candidate?.stepId || "") === String(step.id || ""));
+  const authorizedPaths = Array.isArray(entry?.filePaths) ? entry.filePaths.map((path) => String(path).trim()) : [];
+  const recordedPaths = Array.isArray(step.localFilePaths) ? step.localFilePaths.map((path) => String(path).trim()) : [];
+  if (!recordedPaths.length || authorizedPaths.length !== recordedPaths.length || recordedPaths.some((path, index) => path !== authorizedPaths[index])) return false;
+  let currentOrigin = "";
+  try {
+    currentOrigin = new URL(String(tab?.url || "")).origin;
+  } catch {
+    return false;
+  }
+  const destinationOrigins = Array.isArray(entry?.destinationOrigins) ? entry.destinationOrigins.map((origin) => String(origin)) : [];
+  return destinationOrigins.includes(currentOrigin);
+}
 async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
   const plan = buildRecordedFlowDirectReplayPlan(rawFlow);
   if (!plan.eligible) {
@@ -15969,6 +16216,21 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
     const preparedControllerTabIds = /* @__PURE__ */ new Set();
     for (const step of plan.steps) {
       activeStep = step;
+      const nextPlannedAction = plan.steps[completedSteps + 1];
+      const completesTopLevelStep = nextPlannedAction?.topLevelIndex !== step.topLevelIndex;
+      const absoluteStepIndex = Math.max(
+        0,
+        Number(replayContext.startStepIndex) || 0
+      ) + step.topLevelIndex;
+      const topLevelStep = plan.flow.steps[step.topLevelIndex] || step;
+      const replayProgress = replayContext.runId && completesTopLevelStep ? {
+        action: step.action,
+        completedSteps: absoluteStepIndex + 1,
+        message: `Completed step ${absoluteStepIndex + 1}: ${recordedStepTitle(topLevelStep, absoluteStepIndex)}`,
+        runId: String(replayContext.runId),
+        stepIndex: absoluteStepIndex,
+        totalSteps: Math.max(1, Number(replayContext.totalSteps) || plan.steps.length)
+      } : null;
       assertBrowserActionActive(action);
       trackBrowserActionTab(action, tab.id);
       if (step.action !== "navigate") {
@@ -15981,7 +16243,7 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
           preparedControllerTabIds.add(tab.id);
         }
       }
-      const canOpenNewTab = ["click", "submit"].includes(step.action);
+      const canOpenNewTab = ["click", "double_click", "submit"].includes(step.action);
       const newTabWatcher = canOpenNewTab ? watchForNewTabCreation({
         tabsApi: chrome.tabs,
         beforeTabIds: /* @__PURE__ */ new Set(),
@@ -16001,12 +16263,20 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
           tab = ready2.tab;
           preparedControllerTabIds.delete(tab.id);
           result = { action: step.action, navigated: true, success: true };
+        } else if (step.action === "upload_file") {
+          result = await executeBrowserFileUpload({
+            confirmed: recordedFlowUploadIsAuthorized(plan.flow, step, tab, replayContext),
+            filePaths: step.localFilePaths,
+            recordedTarget: step.target,
+            recordedTriggerTarget: step.triggerTarget
+          }, action);
         } else {
           const replayMessage = {
             source: CONTENT_REQUEST_SOURCE,
             tool: "bridge_flow_replay_step",
             args: {
               confirmed: true,
+              replayProgress,
               step,
               timeoutMs: RECORDED_FLOW_TARGET_TIMEOUT_MS
             }
@@ -16014,6 +16284,7 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
           try {
             result = await chrome.tabs.sendMessage(tab.id, replayMessage);
           } catch (deliveryError) {
+            assertBrowserActionActive(action);
             let recoveredNavigation = null;
             if (canOpenNewTab) {
               const urlBeforeAction = String(tab.pendingUrl || tab.url || "");
@@ -16056,7 +16327,7 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
           }
         }
       } catch (error) {
-        if (["click", "submit"].includes(step.action) && step.resultUrl) {
+        if (["click", "double_click", "submit"].includes(step.action) && step.resultUrl) {
           try {
             tab = await waitForRecordedFlowResultUrl(tab.id, step.resultUrl, action);
             result = {
@@ -16073,6 +16344,12 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
             { resumeStepIndex: step.topLevelIndex }
           );
         }
+      }
+      if (replayProgress) {
+        await chrome.runtime.sendMessage({
+          type: EXTENSION_EVENTS.flowReplayProgress,
+          ...replayProgress
+        }).catch(() => null);
       }
       if (canOpenNewTab) {
         const openedTab = await newTabWatcher.promise;
@@ -16091,33 +16368,14 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
         const ready2 = await waitForRecordedFlowPageReady(tab.id, {
           assertActive: () => assertBrowserActionActive(action),
           getTab: (id) => chrome.tabs.get(id).catch(() => null),
-          navigationStartGraceMs: canOpenNewTab ? RECORDED_FLOW_NAVIGATION_START_GRACE_MS : RECORDED_FLOW_INTER_STEP_DELAY_MS
+          navigationStartGraceMs: canOpenNewTab ? RECORDED_FLOW_NAVIGATION_START_GRACE_MS : step.action === "upload_file" ? RECORDED_FLOW_UPLOAD_SETTLE_MS : RECORDED_FLOW_INTER_STEP_DELAY_MS
         });
         tab = ready2.tab;
       }
       if (canOpenNewTab) preparedControllerTabIds.delete(tab.id);
       await setConnectedTab(tab.id);
       completedSteps += 1;
-      const nextAction = plan.steps[completedSteps];
-      const completedTopLevelStep = nextAction?.topLevelIndex !== step.topLevelIndex;
-      if (completedTopLevelStep) completedFlowSteps += 1;
-      if (replayContext.runId && completedTopLevelStep) {
-        const absoluteStepIndex = Math.max(
-          0,
-          Number(replayContext.startStepIndex) || 0
-        ) + step.topLevelIndex;
-        const topLevelStep = plan.flow.steps[step.topLevelIndex] || step;
-        void chrome.runtime.sendMessage({
-          type: EXTENSION_EVENTS.flowReplayProgress,
-          action: step.action,
-          completedSteps: absoluteStepIndex + 1,
-          message: `Completed step ${absoluteStepIndex + 1}: ${recordedStepTitle(topLevelStep, absoluteStepIndex)}`,
-          runId: String(replayContext.runId),
-          stepIndex: absoluteStepIndex,
-          totalSteps: Math.max(1, Number(replayContext.totalSteps) || plan.steps.length)
-        }).catch(() => {
-        });
-      }
+      if (completesTopLevelStep) completedFlowSteps += 1;
     }
     if (Number.isInteger(plan.handoffStepIndex)) {
       return {
@@ -16145,6 +16403,7 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
       completedSteps,
       completedFlowSteps,
       failedAction: activeStep?.action || "prepare_start_page",
+      failedChildIndex: Number.isInteger(activeStep?.childIndex) ? activeStep.childIndex : null,
       failedStepId: activeStep?.id || "",
       failedStepTitle: activeStep ? recordedStepTitle(activeStep, resumeStepIndex) : "Open the recorded start page",
       resumeStepIndex,
@@ -16878,8 +17137,13 @@ async function executeBrowserFileUpload(args, action) {
     );
   }
   const index = Number(args?.index);
-  if (!Number.isInteger(index) || index < 0) {
-    throw new Error("browser_upload_file requires a non-negative control index from the latest page state.");
+  const hasIndex = Number.isInteger(index) && index >= 0;
+  const recordedTarget = args?.recordedTarget && typeof args.recordedTarget === "object" ? args.recordedTarget : null;
+  const recordedTriggerTarget = args?.recordedTriggerTarget && typeof args.recordedTriggerTarget === "object" ? args.recordedTriggerTarget : null;
+  if (!hasIndex && !recordedTarget && !recordedTriggerTarget) {
+    throw new Error(
+      "browser_upload_file requires either a non-negative control index or a recorded upload target."
+    );
   }
   const filePaths = normalizeUploadFilePaths(args?.filePaths);
   const status = await getStatus();
@@ -16902,7 +17166,13 @@ async function executeBrowserFileUpload(args, action) {
     const preparedTarget = await sendControllerBridge(
       status.tabId,
       "bridge_prepare_file_upload_target",
-      { index, token: uploadToken, fileNames }
+      {
+        fileNames,
+        index: hasIndex ? index : void 0,
+        recordedTarget,
+        recordedTriggerTarget,
+        token: uploadToken
+      }
     );
     if (preparedTarget?.success === false) {
       throw new Error(
@@ -16953,7 +17223,11 @@ async function executeBrowserFileUpload(args, action) {
     const clickResult = await sendControllerBridge(
       status.tabId,
       "bridge_click_file_upload_target",
-      { index }
+      {
+        index: hasIndex ? index : void 0,
+        recordedTarget,
+        recordedTriggerTarget
+      }
     );
     if (clickResult?.success === false) {
       throw new Error(clickResult.error || clickResult.message || "The upload control could not be clicked.");
@@ -17515,7 +17789,7 @@ async function executeBrowserTool(tool, args = {}) {
     if (activeBrowserAction === action) activeBrowserAction = null;
   }
 }
-async function handleMessage(message) {
+async function handleMessage(message, sender = {}) {
   if (message.command === "initialize_side_panel") {
     if (!fastModeEnabled) return { mode: "normal", workspace: null };
     const target = await restoreOrActivateFastWorkspace();
@@ -17635,6 +17909,9 @@ async function handleMessage(message) {
     return releaseTranslationCapture();
   }
   if (message.command === "flow_record_run_direct") {
+    if (sender.url !== chrome.runtime.getURL("side-panel/index.html")) {
+      throw new Error("Recorded flow replay can only be started from the Lumi side panel.");
+    }
     return executeRecordedFlowDirect(message.flow, message.replayContext);
   }
   if (message.command === "flow_record_status") {
@@ -17657,6 +17934,7 @@ async function handleMessage(message) {
       name: message.name,
       stepId: message.stepId,
       prompt: message.prompt,
+      localFilePaths: message.localFilePaths,
       move: message.move,
       remove: message.remove === true
     });
@@ -17919,7 +18197,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   if (message?.type !== MESSAGE_TYPE || sender.id !== chrome.runtime.id) return false;
-  ready.then(() => handleMessage(message)).then((result) => sendResponse({ ok: true, result })).catch((error) => sendResponse({
+  ready.then(() => handleMessage(message, sender)).then((result) => sendResponse({ ok: true, result })).catch((error) => sendResponse({
     ok: false,
     error: error instanceof Error ? error.message : "Lumi Live request failed."
   }));

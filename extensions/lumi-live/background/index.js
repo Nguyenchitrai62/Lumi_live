@@ -59,7 +59,12 @@ const RECORDED_FLOWS_STORAGE_KEY = STORAGE_KEYS.recordedFlows;
 const RECORDED_FLOW_DRAFT_STORAGE_KEY = STORAGE_KEYS.recordedFlowDraft;
 const RECORDED_FLOW_INTER_STEP_DELAY_MS = 250;
 const RECORDED_FLOW_NAVIGATION_START_GRACE_MS = 750;
-const RECORDED_FLOW_TARGET_TIMEOUT_MS = 30000;
+// Direct replay is the fast path. Once the page is ready, hand an unresolved
+// target to the agent instead of keeping the whole flow blocked for 30 seconds.
+// Adaptive upper bound: ready controls run immediately; late hydration gets a
+// short grace period without changing the recorded action or target.
+const RECORDED_FLOW_TARGET_TIMEOUT_MS = 2500;
+const RECORDED_FLOW_UPLOAD_SETTLE_MS = 3500;
 
 let connectedTabId = null;
 let fastModeEnabled = false;
@@ -297,6 +302,37 @@ async function prepareRecordedFlowStart(flow, tab, action) {
   return ready.tab;
 }
 
+function recordedFlowUploadIsAuthorized(flow, step, tab, replayContext) {
+  const authorization = replayContext?.uploadAuthorization;
+  if (!authorization || typeof authorization !== "object") return false;
+  const confirmedAt = Number(authorization.confirmedAt);
+  if (!Number.isFinite(confirmedAt) || Date.now() - confirmedAt > 10 * 60 * 1000) return false;
+  if (String(authorization.flowId || "") !== String(flow.id || "")) return false;
+  const entry = (Array.isArray(authorization.entries) ? authorization.entries : [])
+    .find((candidate) => String(candidate?.stepId || "") === String(step.id || ""));
+  const authorizedPaths = Array.isArray(entry?.filePaths)
+    ? entry.filePaths.map((path) => String(path).trim())
+    : [];
+  const recordedPaths = Array.isArray(step.localFilePaths)
+    ? step.localFilePaths.map((path) => String(path).trim())
+    : [];
+  if (
+    !recordedPaths.length
+    || authorizedPaths.length !== recordedPaths.length
+    || recordedPaths.some((path, index) => path !== authorizedPaths[index])
+  ) return false;
+  let currentOrigin = "";
+  try {
+    currentOrigin = new URL(String(tab?.url || "")).origin;
+  } catch {
+    return false;
+  }
+  const destinationOrigins = Array.isArray(entry?.destinationOrigins)
+    ? entry.destinationOrigins.map((origin) => String(origin))
+    : [];
+  return destinationOrigins.includes(currentOrigin);
+}
+
 async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
   const plan = buildRecordedFlowDirectReplayPlan(rawFlow);
   if (!plan.eligible) {
@@ -343,6 +379,23 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
     const preparedControllerTabIds = new Set();
     for (const step of plan.steps) {
       activeStep = step;
+      const nextPlannedAction = plan.steps[completedSteps + 1];
+      const completesTopLevelStep = nextPlannedAction?.topLevelIndex !== step.topLevelIndex;
+      const absoluteStepIndex = Math.max(
+        0,
+        Number(replayContext.startStepIndex) || 0,
+      ) + step.topLevelIndex;
+      const topLevelStep = plan.flow.steps[step.topLevelIndex] || step;
+      const replayProgress = replayContext.runId && completesTopLevelStep
+        ? {
+          action: step.action,
+          completedSteps: absoluteStepIndex + 1,
+          message: `Completed step ${absoluteStepIndex + 1}: ${recordedStepTitle(topLevelStep, absoluteStepIndex)}`,
+          runId: String(replayContext.runId),
+          stepIndex: absoluteStepIndex,
+          totalSteps: Math.max(1, Number(replayContext.totalSteps) || plan.steps.length),
+        }
+        : null;
       assertBrowserActionActive(action);
       trackBrowserActionTab(action, tab.id);
       if (step.action !== "navigate") {
@@ -356,7 +409,7 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
         }
       }
 
-      const canOpenNewTab = ["click", "submit"].includes(step.action);
+      const canOpenNewTab = ["click", "double_click", "submit"].includes(step.action);
       const newTabWatcher = canOpenNewTab
         ? watchForNewTabCreation({
           tabsApi: chrome.tabs,
@@ -378,12 +431,20 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
           tab = ready.tab;
           preparedControllerTabIds.delete(tab.id);
           result = { action: step.action, navigated: true, success: true };
+        } else if (step.action === "upload_file") {
+          result = await executeBrowserFileUpload({
+            confirmed: recordedFlowUploadIsAuthorized(plan.flow, step, tab, replayContext),
+            filePaths: step.localFilePaths,
+            recordedTarget: step.target,
+            recordedTriggerTarget: step.triggerTarget,
+          }, action);
         } else {
           const replayMessage = {
             source: CONTENT_REQUEST_SOURCE,
             tool: "bridge_flow_replay_step",
             args: {
               confirmed: true,
+              replayProgress,
               step,
               timeoutMs: RECORDED_FLOW_TARGET_TIMEOUT_MS,
             },
@@ -391,6 +452,7 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
           try {
             result = await chrome.tabs.sendMessage(tab.id, replayMessage);
           } catch (deliveryError) {
+            assertBrowserActionActive(action);
             let recoveredNavigation = null;
             if (canOpenNewTab) {
               const urlBeforeAction = String(tab.pendingUrl || tab.url || "");
@@ -443,7 +505,7 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
           }
         }
       } catch (error) {
-        if (["click", "submit"].includes(step.action) && step.resultUrl) {
+        if (["click", "double_click", "submit"].includes(step.action) && step.resultUrl) {
           try {
             tab = await waitForRecordedFlowResultUrl(tab.id, step.resultUrl, action);
             result = {
@@ -461,6 +523,16 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
             { resumeStepIndex: step.topLevelIndex },
           );
         }
+      }
+
+      // The UI acknowledgement is deliberately before navigation/result-page
+      // settling. The step action is already verified; page readiness still
+      // gates the next action without making LUMI TASK look stuck.
+      if (replayProgress) {
+        await chrome.runtime.sendMessage({
+          type: EXTENSION_EVENTS.flowReplayProgress,
+          ...replayProgress,
+        }).catch(() => null);
       }
 
       if (canOpenNewTab) {
@@ -482,32 +554,16 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
           getTab: (id) => chrome.tabs.get(id).catch(() => null),
           navigationStartGraceMs: canOpenNewTab
             ? RECORDED_FLOW_NAVIGATION_START_GRACE_MS
-            : RECORDED_FLOW_INTER_STEP_DELAY_MS,
+            : step.action === "upload_file"
+              ? RECORDED_FLOW_UPLOAD_SETTLE_MS
+              : RECORDED_FLOW_INTER_STEP_DELAY_MS,
         });
         tab = ready.tab;
       }
       if (canOpenNewTab) preparedControllerTabIds.delete(tab.id);
       await setConnectedTab(tab.id);
       completedSteps += 1;
-      const nextAction = plan.steps[completedSteps];
-      const completedTopLevelStep = nextAction?.topLevelIndex !== step.topLevelIndex;
-      if (completedTopLevelStep) completedFlowSteps += 1;
-      if (replayContext.runId && completedTopLevelStep) {
-        const absoluteStepIndex = Math.max(
-          0,
-          Number(replayContext.startStepIndex) || 0,
-        ) + step.topLevelIndex;
-        const topLevelStep = plan.flow.steps[step.topLevelIndex] || step;
-        void chrome.runtime.sendMessage({
-          type: EXTENSION_EVENTS.flowReplayProgress,
-          action: step.action,
-          completedSteps: absoluteStepIndex + 1,
-          message: `Completed step ${absoluteStepIndex + 1}: ${recordedStepTitle(topLevelStep, absoluteStepIndex)}`,
-          runId: String(replayContext.runId),
-          stepIndex: absoluteStepIndex,
-          totalSteps: Math.max(1, Number(replayContext.totalSteps) || plan.steps.length),
-        }).catch(() => {});
-      }
+      if (completesTopLevelStep) completedFlowSteps += 1;
     }
     if (Number.isInteger(plan.handoffStepIndex)) {
       return {
@@ -537,6 +593,9 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
       completedSteps,
       completedFlowSteps,
       failedAction: activeStep?.action || "prepare_start_page",
+      failedChildIndex: Number.isInteger(activeStep?.childIndex)
+        ? activeStep.childIndex
+        : null,
       failedStepId: activeStep?.id || "",
       failedStepTitle: activeStep
         ? recordedStepTitle(activeStep, resumeStepIndex)
@@ -1356,8 +1415,18 @@ async function executeBrowserFileUpload(args, action) {
     );
   }
   const index = Number(args?.index);
-  if (!Number.isInteger(index) || index < 0) {
-    throw new Error("browser_upload_file requires a non-negative control index from the latest page state.");
+  const hasIndex = Number.isInteger(index) && index >= 0;
+  const recordedTarget = args?.recordedTarget && typeof args.recordedTarget === "object"
+    ? args.recordedTarget
+    : null;
+  const recordedTriggerTarget = args?.recordedTriggerTarget
+    && typeof args.recordedTriggerTarget === "object"
+    ? args.recordedTriggerTarget
+    : null;
+  if (!hasIndex && !recordedTarget && !recordedTriggerTarget) {
+    throw new Error(
+      "browser_upload_file requires either a non-negative control index or a recorded upload target.",
+    );
   }
   const filePaths = normalizeUploadFilePaths(args?.filePaths);
   const status = await getStatus();
@@ -1381,7 +1450,13 @@ async function executeBrowserFileUpload(args, action) {
     const preparedTarget = await sendControllerBridge(
       status.tabId,
       "bridge_prepare_file_upload_target",
-      { index, token: uploadToken, fileNames },
+      {
+        fileNames,
+        index: hasIndex ? index : undefined,
+        recordedTarget,
+        recordedTriggerTarget,
+        token: uploadToken,
+      },
     );
     if (preparedTarget?.success === false) {
       throw new Error(
@@ -1436,7 +1511,11 @@ async function executeBrowserFileUpload(args, action) {
     const clickResult = await sendControllerBridge(
       status.tabId,
       "bridge_click_file_upload_target",
-      { index },
+      {
+        index: hasIndex ? index : undefined,
+        recordedTarget,
+        recordedTriggerTarget,
+      },
     );
     if (clickResult?.success === false) {
       throw new Error(clickResult.error || clickResult.message || "The upload control could not be clicked.");
@@ -2057,7 +2136,7 @@ async function executeBrowserTool(tool, args = {}) {
   }
 }
 
-async function handleMessage(message) {
+async function handleMessage(message, sender = {}) {
   if (message.command === "initialize_side_panel") {
     if (!fastModeEnabled) return { mode: "normal", workspace: null };
     const target = await restoreOrActivateFastWorkspace();
@@ -2180,6 +2259,9 @@ async function handleMessage(message) {
     return releaseTranslationCapture();
   }
   if (message.command === "flow_record_run_direct") {
+    if (sender.url !== chrome.runtime.getURL("side-panel/index.html")) {
+      throw new Error("Recorded flow replay can only be started from the Lumi side panel.");
+    }
     return executeRecordedFlowDirect(message.flow, message.replayContext);
   }
   if (message.command === "flow_record_status") {
@@ -2202,6 +2284,7 @@ async function handleMessage(message) {
       name: message.name,
       stepId: message.stepId,
       prompt: message.prompt,
+      localFilePaths: message.localFilePaths,
       move: message.move,
       remove: message.remove === true,
     });
@@ -2477,7 +2560,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   if (message?.type !== MESSAGE_TYPE || sender.id !== chrome.runtime.id) return false;
-  ready.then(() => handleMessage(message))
+  ready.then(() => handleMessage(message, sender))
     .then((result) => sendResponse({ ok: true, result }))
     .catch((error) => sendResponse({
       ok: false,

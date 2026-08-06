@@ -17,7 +17,7 @@ export async function waitForRecordedFlowPageReady(tabId, {
   navigationStartGraceMs = 0,
   now = () => Date.now(),
   pollIntervalMs = 150,
-  postLoadQuietMs = 250,
+  postLoadQuietMs = 350,
   tabIsReady = (tab) => tab?.status === "complete",
   timeoutMs = DEFAULT_RECORDED_FLOW_PAGE_LOAD_TIMEOUT_MS,
 } = {}) {
