@@ -3,7 +3,15 @@ import {
   extractActiveContextIdentifiers,
   sanitizeActiveContextUrl,
 } from "../core/active-tab-context.js";
-import { EXTENSION_EVENTS, STORAGE_KEYS } from "../core/extension-config.js";
+import {
+  EXTENSION_EVENTS,
+  PAGE_CONTROLLER_PROTOCOL_VERSION,
+  STORAGE_KEYS,
+} from "../core/extension-config.js";
+import {
+  buildRecordedFlowDirectReplayPlan,
+  recordedStepTitle,
+} from "../core/recorded-flows.js";
 import { normalizeVisualPreferences } from "../core/visual-preferences.js";
 import { saveCapturedTabAsset } from "./captured-tab-assets.js";
 import {
@@ -29,7 +37,7 @@ import { createRecordedFlowService } from "./recorded-flow-service.js";
 import { createVideoAnalysisService } from "./video-analysis-service.js";
 
 const MESSAGE_TYPE = EXTENSION_EVENTS.request;
-const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
+const CONTENT_REQUEST_SOURCE = `lumi-page-agent-service-v${PAGE_CONTROLLER_PROTOCOL_VERSION}`;
 const TARGET_STORAGE_KEY = STORAGE_KEYS.targetTabId;
 const TARGET_CHANGED_MESSAGE = EXTENSION_EVENTS.targetChanged;
 const PANEL_LIFECYCLE_MESSAGE = EXTENSION_EVENTS.lifecycle;
@@ -186,6 +194,301 @@ async function handleRecordedFlowStep(message, sender) {
   ) return;
   const draft = await recordedFlows.append(message.step);
   broadcastFlowRecordingChanged(draft);
+}
+
+function isDynamicRecordedUrlSegment(value) {
+  return /^\d{2,}$/.test(value)
+    || /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(value)
+    || /^[0-9a-z_-]{20,}$/i.test(value);
+}
+
+function dynamicRecordedUrlSegmentsMatch(expected, actual) {
+  if (/^\d{2,}$/.test(expected)) return /^\d{2,}$/.test(actual);
+  if (/^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(expected)) {
+    return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(actual);
+  }
+  return /^[0-9a-z_-]{20,}$/i.test(expected)
+    && /^[0-9a-z_-]{20,}$/i.test(actual);
+}
+
+function recordedUrlValueMatches(actual, expected) {
+  if (expected === "[redacted]" || actual === expected) return true;
+  return isDynamicRecordedUrlSegment(expected)
+    && dynamicRecordedUrlSegmentsMatch(expected, actual);
+}
+
+function recordedUrlHashMatches(actualHash, expectedHash) {
+  if (!expectedHash || expectedHash.includes("[redacted]")) return true;
+  const actualParts = actualHash.replace(/^#/, "").split("/");
+  const expectedParts = expectedHash.replace(/^#/, "").split("/");
+  return actualParts.length === expectedParts.length
+    && expectedParts.every((part, index) => recordedUrlValueMatches(actualParts[index], part));
+}
+
+function recordedFlowUrlMatches(actualValue, expectedValue) {
+  try {
+    const actual = new URL(actualValue);
+    const expected = new URL(expectedValue);
+    if (actual.origin !== expected.origin) return false;
+    const actualParts = actual.pathname.split("/").filter(Boolean);
+    const expectedParts = expected.pathname.split("/").filter(Boolean);
+    if (actualParts.length !== expectedParts.length) return false;
+    if (!expectedParts.every((part, index) => (
+      part === actualParts[index]
+      || isDynamicRecordedUrlSegment(part)
+        && dynamicRecordedUrlSegmentsMatch(part, actualParts[index])
+    ))) return false;
+    for (const [key, value] of expected.searchParams) {
+      const actualValues = actual.searchParams.getAll(key);
+      if (!actualValues.some((candidate) => recordedUrlValueMatches(candidate, value))) {
+        return false;
+      }
+    }
+    return recordedUrlHashMatches(actual.hash, expected.hash);
+  } catch {
+    return String(actualValue || "") === String(expectedValue || "");
+  }
+}
+
+async function waitForRecordedFlowResultUrl(tabId, expectedUrl, action) {
+  let latest = null;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    assertBrowserActionActive(action);
+    latest = await chrome.tabs.get(tabId).catch(() => null);
+    if (!latest) break;
+    if (recordedFlowUrlMatches(latest.pendingUrl || latest.url, expectedUrl)) {
+      return latest.status === "complete"
+        ? latest
+        : waitForTabToSettle(tabId, action);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`The page did not reach the recorded result URL: ${expectedUrl}`);
+}
+
+async function prepareRecordedFlowStart(flow, tab, action) {
+  if (!flow.startUrl || recordedFlowUrlMatches(tab.url, flow.startUrl)) return tab;
+  if (!isControllablePage(flow.startUrl)) {
+    throw new Error("The recorded start URL is not a controllable web page.");
+  }
+  trackBrowserActionTab(action, tab.id);
+  await chrome.tabs.update(tab.id, { url: flow.startUrl });
+  return waitForTabToSettle(tab.id, action);
+}
+
+async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
+  const plan = buildRecordedFlowDirectReplayPlan(rawFlow);
+  if (!plan.eligible) {
+    return {
+      success: false,
+      completedSteps: 0,
+      completedFlowSteps: 0,
+      failedAction: "plan_flow",
+      failedStepId: plan.flow?.steps?.[0]?.id || "",
+      failedStepTitle: plan.flow?.steps?.[0]
+        ? recordedStepTitle(plan.flow.steps[0], 0)
+        : "Prepare recorded flow",
+      resumeStepIndex: 0,
+      error: plan.reason,
+    };
+  }
+
+  const action = { cancelled: false, tabIds: new Set(), cancelHandlers: new Set() };
+  activeBrowserAction = action;
+  let completedSteps = 0;
+  let completedFlowSteps = 0;
+  let activeStep = null;
+  let tab = connectedTabId
+    ? await chrome.tabs.get(connectedTabId).catch(() => null)
+    : null;
+  if (!tab?.id || !isControllablePage(tab.url)) tab = await getActiveTab();
+  if (!tab?.id || !isControllablePage(tab.url)) {
+    if (activeBrowserAction === action) activeBrowserAction = null;
+    return {
+      success: false,
+      completedSteps,
+      completedFlowSteps,
+      failedAction: "prepare_start_page",
+      failedStepId: plan.steps[0]?.id || "",
+      failedStepTitle: "Open the recorded start page",
+      resumeStepIndex: 0,
+      error: "Open a controllable http, https, or permitted file page before running this flow.",
+    };
+  }
+
+  try {
+    await setConnectedTab(tab.id);
+    tab = await prepareRecordedFlowStart(plan.flow, tab, action);
+    const preparedControllerTabIds = new Set();
+    for (const step of plan.steps) {
+      activeStep = step;
+      assertBrowserActionActive(action);
+      trackBrowserActionTab(action, tab.id);
+      if (step.action !== "navigate") {
+        if (!preparedControllerTabIds.has(tab.id)) {
+          if (!await ensureController(tab.id, 5)) {
+            throw Object.assign(new Error("The page controller was not ready after navigation."), {
+              resumeStepIndex: step.topLevelIndex,
+            });
+          }
+          preparedControllerTabIds.add(tab.id);
+        }
+      }
+
+      const canOpenNewTab = ["click", "submit"].includes(step.action);
+      const newTabWatcher = canOpenNewTab
+        ? watchForNewTabCreation({
+          tabsApi: chrome.tabs,
+          beforeTabIds: new Set(),
+          sourceTab: tab,
+          timeoutMs: 100,
+        })
+        : null;
+      let result;
+      try {
+        if (step.action === "navigate") {
+          const url = String(step.value || step.url || "").trim();
+          if (!isControllablePage(url)) throw new Error("The recorded navigation URL is not controllable.");
+          await chrome.tabs.update(tab.id, { url });
+          tab = await waitForTabToSettle(tab.id, action);
+          preparedControllerTabIds.delete(tab.id);
+          result = { action: step.action, navigated: true, success: true };
+        } else {
+          const replayMessage = {
+            source: CONTENT_REQUEST_SOURCE,
+            tool: "bridge_flow_replay_step",
+            args: {
+              confirmed: true,
+              step,
+              timeoutMs: 10000,
+            },
+          };
+          try {
+            result = await chrome.tabs.sendMessage(tab.id, replayMessage);
+          } catch (deliveryError) {
+            // A click or form submit may have replaced the document without changing
+            // its URL. Reinstall the controller only after that delivery failure.
+            preparedControllerTabIds.delete(tab.id);
+            if (!await ensureController(tab.id, 5)) throw deliveryError;
+            preparedControllerTabIds.add(tab.id);
+            result = await chrome.tabs.sendMessage(tab.id, replayMessage);
+          }
+          if (
+            result?.success === true
+            && (
+              result.verifiedDirectReplay !== true
+              || result.replayProtocolVersion !== PAGE_CONTROLLER_PROTOCOL_VERSION
+            )
+          ) {
+            throw new Error(
+              "The page controller returned an unverified direct-replay success. Reload Lumi so the current controller can verify this step.",
+            );
+          }
+          if (result?.success !== true) {
+            throw new Error(
+              result?.error
+                || result?.message
+                || "The page controller did not confirm that the recorded action succeeded.",
+            );
+          }
+        }
+      } catch (error) {
+        if (["click", "submit"].includes(step.action) && step.resultUrl) {
+          try {
+            tab = await waitForRecordedFlowResultUrl(tab.id, step.resultUrl, action);
+            result = {
+              action: step.action,
+              recoveredAfterNavigation: true,
+              success: true,
+            };
+          } catch {
+            // Preserve the original action error when the recorded navigation did not happen.
+          }
+        }
+        if (!result?.success) {
+          throw Object.assign(
+            new Error(error instanceof Error ? error.message : "The recorded action failed."),
+            { resumeStepIndex: step.topLevelIndex },
+          );
+        }
+      }
+
+      if (canOpenNewTab) {
+        const openedTab = await newTabWatcher.promise;
+        if (openedTab?.id) {
+          const activation = await activateClickedNewTab(openedTab, action, {
+            fastMode: fastModeEnabled,
+          });
+          tab = await chrome.tabs.get(openedTab.id);
+          if (activation.controllerReady) preparedControllerTabIds.add(tab.id);
+        }
+      }
+      if (step.resultUrl) {
+        tab = await waitForRecordedFlowResultUrl(tab.id, step.resultUrl, action);
+      } else {
+        const latest = await chrome.tabs.get(tab.id);
+        tab = latest.status === "complete" ? latest : await waitForTabToSettle(tab.id, action);
+      }
+      await setConnectedTab(tab.id);
+      completedSteps += 1;
+      const nextAction = plan.steps[completedSteps];
+      const completedTopLevelStep = nextAction?.topLevelIndex !== step.topLevelIndex;
+      if (completedTopLevelStep) completedFlowSteps += 1;
+      if (replayContext.runId && completedTopLevelStep) {
+        const absoluteStepIndex = Math.max(
+          0,
+          Number(replayContext.startStepIndex) || 0,
+        ) + step.topLevelIndex;
+        const topLevelStep = plan.flow.steps[step.topLevelIndex] || step;
+        void chrome.runtime.sendMessage({
+          type: EXTENSION_EVENTS.flowReplayProgress,
+          action: step.action,
+          completedSteps: absoluteStepIndex + 1,
+          message: `Completed step ${absoluteStepIndex + 1}: ${recordedStepTitle(topLevelStep, absoluteStepIndex)}`,
+          runId: String(replayContext.runId),
+          stepIndex: absoluteStepIndex,
+          totalSteps: Math.max(1, Number(replayContext.totalSteps) || plan.steps.length),
+        }).catch(() => {});
+      }
+    }
+    if (Number.isInteger(plan.handoffStepIndex)) {
+      return {
+        success: true,
+        completed: false,
+        completedSteps,
+        completedFlowSteps,
+        handoffRequired: true,
+        resumeStepIndex: plan.handoffStepIndex,
+        handoffReason: plan.reason,
+      };
+    }
+    return {
+      success: true,
+      completed: true,
+      completedSteps,
+      completedFlowSteps,
+      stepCount: plan.steps.length,
+      tab: serializeTab(tab),
+    };
+  } catch (error) {
+    const resumeStepIndex = Number.isInteger(error?.resumeStepIndex)
+      ? error.resumeStepIndex
+      : activeStep?.topLevelIndex || plan.steps[completedSteps]?.topLevelIndex || 0;
+    return {
+      success: false,
+      completedSteps,
+      completedFlowSteps,
+      failedAction: activeStep?.action || "prepare_start_page",
+      failedStepId: activeStep?.id || "",
+      failedStepTitle: activeStep
+        ? recordedStepTitle(activeStep, resumeStepIndex)
+        : "Open the recorded start page",
+      resumeStepIndex,
+      error: error instanceof Error ? error.message : "Direct recorded-flow replay failed.",
+    };
+  } finally {
+    if (activeBrowserAction === action) activeBrowserAction = null;
+  }
 }
 
 const ready = loadBackgroundState();
@@ -377,7 +680,10 @@ async function pingController(tabId) {
     source: CONTENT_REQUEST_SOURCE,
     tool: "bridge_controller_ping",
     args: {},
-  }).then((result) => Boolean(result?.success)).catch(() => false);
+  }).then((result) => (
+    result?.success === true
+    && result.protocolVersion === PAGE_CONTROLLER_PROTOCOL_VERSION
+  )).catch(() => false);
 }
 
 async function getVisualPreferences() {
@@ -1794,6 +2100,9 @@ async function handleMessage(message) {
   if (message.command === "release_tab_audio") {
     return releaseTranslationCapture();
   }
+  if (message.command === "flow_record_run_direct") {
+    return executeRecordedFlowDirect(message.flow, message.replayContext);
+  }
   if (message.command === "flow_record_status") {
     const currentDraft = recordedFlows.snapshot();
     if (currentDraft?.recording && Number.isInteger(currentDraft.tabId)) {
@@ -1818,7 +2127,7 @@ async function handleMessage(message) {
       remove: message.remove === true,
     });
     broadcastFlowRecordingChanged(draft);
-    return { draft };
+    return { draft, flows: await recordedFlows.list() };
   }
   if (message.command === "flow_record_save") {
     await stopFlowRecording();

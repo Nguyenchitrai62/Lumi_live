@@ -4,12 +4,14 @@
 var EXTENSION_EVENTS = Object.freeze({
   flowRecordedStep: "lumi_live_flow_recorded_step",
   flowRecordingChanged: "lumi_live_flow_recording_changed",
+  flowReplayProgress: "lumi_live_flow_replay_progress",
   lifecycle: "lumi_live_lifecycle",
   request: "lumi_live_request",
   targetChanged: "lumi_live_target_changed",
   translationState: "lumi_live_translation_state",
   videoAnalysisProgress: "lumi_live_video_analysis_progress"
 });
+var PAGE_CONTROLLER_PROTOCOL_VERSION = 4;
 var STORAGE_KEYS = Object.freeze({
   apiKey: "lumiGeminiApiKey",
   groqApiKey: "lumiGroqApiKey",
@@ -1762,6 +1764,313 @@ function extractActiveContextIdentifiers(safeUrl) {
   }
 }
 
+// extensions/lumi-live/core/recorded-flows.js
+var RECORDED_FLOW_SCHEMA_VERSION = 2;
+var MAX_RECORDED_FLOWS = 120;
+var MAX_RECORDED_FLOW_STEPS = 100;
+var MAX_RECORDED_STEP_PROMPT_CHARACTERS = 1200;
+var RECORDED_STEP_GROUP_ACTION = "agent_group";
+var RECORDED_FORM_BATCH_TYPE = "form_batch";
+var RECORDED_FLOW_EXPORT_FORMAT = "lumi-recorded-flows";
+var RECORDED_FLOW_EXPORT_VERSION = 1;
+var DIRECT_REPLAY_ACTIONS = /* @__PURE__ */ new Set([
+  "click",
+  "fill",
+  "navigate",
+  "select_option",
+  "set_checked",
+  "submit"
+]);
+var MAX_NAME_CHARACTERS = 120;
+var MAX_TARGET_TEXT_CHARACTERS = 240;
+var MAX_VALUE_CHARACTERS = 2e3;
+var RECORDED_FORM_ACTIONS = /* @__PURE__ */ new Set(["fill", "select_option", "set_checked"]);
+function isObject2(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+function clipText(value, limit) {
+  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
+}
+function newId(prefix) {
+  const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${suffix}`;
+}
+function normalizeTimestamp(value, fallback = Date.now()) {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp > 0 ? Math.round(timestamp) : fallback;
+}
+function normalizeRecordedTarget(value) {
+  const source = isObject2(value) ? value : {};
+  return {
+    tag: clipText(source.tag, 40).toLowerCase(),
+    type: clipText(source.type, 60).toLowerCase(),
+    role: clipText(source.role, 80).toLowerCase(),
+    name: clipText(source.name, MAX_TARGET_TEXT_CHARACTERS),
+    label: clipText(source.label, MAX_TARGET_TEXT_CHARACTERS),
+    text: clipText(source.text, MAX_TARGET_TEXT_CHARACTERS),
+    placeholder: clipText(source.placeholder, MAX_TARGET_TEXT_CHARACTERS),
+    testId: clipText(source.testId, MAX_TARGET_TEXT_CHARACTERS),
+    elementId: clipText(source.elementId, MAX_TARGET_TEXT_CHARACTERS),
+    inputName: clipText(source.inputName, MAX_TARGET_TEXT_CHARACTERS),
+    href: clipText(source.href, 1e3),
+    selector: clipText(source.selector, 1e3)
+  };
+}
+function recordedTargetKey(target) {
+  const normalized = normalizeRecordedTarget(target);
+  return normalized.testId || normalized.elementId || normalized.selector || [
+    normalized.tag,
+    normalized.role,
+    normalized.name,
+    normalized.label,
+    normalized.text,
+    normalized.placeholder
+  ].join("\0");
+}
+function normalizeStep(value, index = 0, depth = 0) {
+  if (!isObject2(value)) return null;
+  const allowedActions = /* @__PURE__ */ new Set([
+    RECORDED_STEP_GROUP_ACTION,
+    "click",
+    "fill",
+    "navigate",
+    "select_option",
+    "set_checked",
+    "submit"
+  ]);
+  const action = allowedActions.has(value.action) ? value.action : "";
+  if (!action) return null;
+  if (action === RECORDED_STEP_GROUP_ACTION && depth > 3) return null;
+  const target = normalizeRecordedTarget(value.target);
+  const recordedAt = normalizeTimestamp(value.recordedAt);
+  const step = {
+    id: clipText(value.id, 180) || newId(`step-${index + 1}`),
+    action,
+    target,
+    prompt: String(value.prompt ?? "").trim().slice(
+      0,
+      MAX_RECORDED_STEP_PROMPT_CHARACTERS
+    ),
+    url: clipText(value.url, 3e3),
+    title: clipText(value.title, 500),
+    recordedAt
+  };
+  if (action === RECORDED_STEP_GROUP_ACTION) {
+    const children = (Array.isArray(value.children) ? value.children : []).flatMap((child, childIndex) => {
+      const normalized = normalizeStep(child, childIndex, depth + 1);
+      if (!normalized) return [];
+      return normalized.action === RECORDED_STEP_GROUP_ACTION ? normalized.children || [] : [normalized];
+    }).slice(0, MAX_RECORDED_FLOW_STEPS);
+    if (!children.length) return null;
+    step.children = children;
+    if (value.groupType === RECORDED_FORM_BATCH_TYPE) {
+      step.groupType = RECORDED_FORM_BATCH_TYPE;
+    }
+    if (value.resultUrl !== void 0) step.resultUrl = clipText(value.resultUrl, 3e3);
+    return step;
+  }
+  if (value.redacted === true) step.redacted = true;
+  else if (typeof value.value === "boolean") step.value = value.value;
+  else if (value.value !== void 0) step.value = String(value.value).slice(0, MAX_VALUE_CHARACTERS);
+  if (value.optionText !== void 0) {
+    step.optionText = clipText(value.optionText, MAX_TARGET_TEXT_CHARACTERS);
+  }
+  if (value.resultUrl !== void 0) step.resultUrl = clipText(value.resultUrl, 3e3);
+  return step;
+}
+function normalizeRecordedStep(value, index = 0) {
+  return normalizeStep(value, index, 0);
+}
+function createRecordedFormBatch(rawSteps, options = {}) {
+  const children = (Array.isArray(rawSteps) ? rawSteps : []).flatMap((step, index) => {
+    const normalized = normalizeRecordedStep(step, index);
+    if (!normalized) return [];
+    return normalized.action === RECORDED_STEP_GROUP_ACTION ? normalized.children || [] : [normalized];
+  }).filter((step) => RECORDED_FORM_ACTIONS.has(step.action)).slice(0, MAX_RECORDED_FLOW_STEPS);
+  if (!children.length) throw new Error("A form batch requires at least one form action.");
+  const source = isObject2(options) ? options : {};
+  const first = children[0];
+  const last = children.at(-1);
+  return normalizeRecordedStep({
+    id: source.id || newId("form-batch"),
+    action: RECORDED_STEP_GROUP_ACTION,
+    groupType: RECORDED_FORM_BATCH_TYPE,
+    target: {
+      tag: "form",
+      role: "group",
+      name: "Form fields"
+    },
+    prompt: source.prompt || "",
+    url: first.url,
+    title: first.title,
+    recordedAt: first.recordedAt,
+    resultUrl: last.resultUrl,
+    children
+  });
+}
+function mergeRecordedFormChild(children, next) {
+  const nextKey = recordedTargetKey(next.target);
+  const existingIndex = children.findIndex((child) => child.action === next.action && recordedTargetKey(child.target) === nextKey);
+  if (existingIndex < 0) return [...children, next];
+  const existing = children[existingIndex];
+  const merged = [...children];
+  merged[existingIndex] = {
+    ...next,
+    id: existing.id,
+    prompt: existing.prompt
+  };
+  return merged;
+}
+function appendRecordedStep(currentSteps, rawStep) {
+  const steps = (Array.isArray(currentSteps) ? currentSteps : []).map(normalizeRecordedStep).filter(Boolean);
+  const next = normalizeRecordedStep(rawStep, steps.length);
+  if (!next) return steps;
+  const previous = steps.at(-1);
+  if (RECORDED_FORM_ACTIONS.has(next.action)) {
+    if (previous?.action === RECORDED_STEP_GROUP_ACTION && previous.groupType === RECORDED_FORM_BATCH_TYPE) {
+      steps[steps.length - 1] = createRecordedFormBatch(
+        mergeRecordedFormChild(previous.children, next),
+        { id: previous.id, prompt: previous.prompt }
+      );
+      return steps;
+    }
+    if (steps.length >= MAX_RECORDED_FLOW_STEPS) return steps;
+    return [...steps, createRecordedFormBatch([next])];
+  }
+  const sameTarget = previous && recordedTargetKey(previous.target) === recordedTargetKey(next.target);
+  if (sameTarget && previous.action === "fill" && next.action === "fill" && next.recordedAt - previous.recordedAt < 1e4) {
+    steps[steps.length - 1] = {
+      ...next,
+      id: previous.id,
+      prompt: previous.prompt
+    };
+    return steps;
+  }
+  if (sameTarget && previous.action === next.action && previous.value === next.value && next.recordedAt - previous.recordedAt < 350) {
+    return steps;
+  }
+  if (steps.length >= MAX_RECORDED_FLOW_STEPS) return steps;
+  return [...steps, next];
+}
+function normalizeRecordedFlow(value) {
+  if (!isObject2(value)) return null;
+  const now = Date.now();
+  const steps = (Array.isArray(value.steps) ? value.steps : []).map(normalizeRecordedStep).filter(Boolean).slice(0, MAX_RECORDED_FLOW_STEPS);
+  const createdAt = normalizeTimestamp(value.createdAt, now);
+  return {
+    schemaVersion: RECORDED_FLOW_SCHEMA_VERSION,
+    id: clipText(value.id, 180) || newId("flow"),
+    name: clipText(value.name, MAX_NAME_CHARACTERS) || "Untitled flow",
+    startUrl: clipText(value.startUrl, 3e3),
+    startTitle: clipText(value.startTitle, 500),
+    steps,
+    createdAt,
+    updatedAt: Math.max(createdAt, normalizeTimestamp(value.updatedAt, now))
+  };
+}
+function normalizeRecordedFlows(value) {
+  const ids = /* @__PURE__ */ new Set();
+  return (Array.isArray(value) ? value : []).map(normalizeRecordedFlow).filter((flow) => {
+    if (!flow || ids.has(flow.id)) return false;
+    ids.add(flow.id);
+    return true;
+  }).sort((left, right) => right.updatedAt - left.updatedAt).slice(0, MAX_RECORDED_FLOWS);
+}
+function recordedFlowNameKey(value) {
+  return clipText(value, MAX_NAME_CHARACTERS).normalize("NFKC").toLowerCase();
+}
+function recordedStepAgentReplayReason(step, topLevelIndex) {
+  const children = step.action === RECORDED_STEP_GROUP_ACTION ? step.children || [] : [step];
+  if (step.prompt || children.some((child) => child.prompt)) {
+    return `Step ${topLevelIndex + 1} has a user prompt and requires adaptive agent replay.`;
+  }
+  if (children.some((child) => !DIRECT_REPLAY_ACTIONS.has(child.action))) {
+    return `Step ${topLevelIndex + 1} uses an action that direct replay does not support.`;
+  }
+  if (children.some((child) => child.redacted === true)) {
+    return `Step ${topLevelIndex + 1} contains a redacted value and requires agent replay.`;
+  }
+  return "";
+}
+function buildRecordedFlowDirectReplayPlan(value) {
+  const flow = normalizeRecordedFlow(value);
+  if (!flow || !flow.steps.length) {
+    return {
+      eligible: false,
+      flow,
+      handoffStepIndex: 0,
+      reason: "This recorded flow has no steps to run.",
+      steps: []
+    };
+  }
+  const steps = [];
+  for (let topLevelIndex = 0; topLevelIndex < flow.steps.length; topLevelIndex += 1) {
+    const step = flow.steps[topLevelIndex];
+    const children = step.action === RECORDED_STEP_GROUP_ACTION ? step.children || [] : [step];
+    const blocker = recordedStepAgentReplayReason(step, topLevelIndex);
+    if (blocker) {
+      return {
+        eligible: steps.length > 0,
+        flow,
+        handoffStepIndex: topLevelIndex,
+        reason: blocker,
+        steps
+      };
+    }
+    for (let childIndex = 0; childIndex < children.length; childIndex += 1) {
+      const child = children[childIndex];
+      steps.push({
+        ...child,
+        childIndex: step.action === RECORDED_STEP_GROUP_ACTION ? childIndex : null,
+        topLevelIndex
+      });
+    }
+  }
+  return { eligible: true, flow, handoffStepIndex: null, reason: "", steps };
+}
+function parseRecordedFlowsImport(value) {
+  let source = value;
+  if (typeof source === "string") {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      throw new Error("The selected file is not valid JSON.");
+    }
+  }
+  if (!isObject2(source) || source.format !== RECORDED_FLOW_EXPORT_FORMAT) {
+    throw new Error("This is not a Lumi recorded flows export file.");
+  }
+  if (Number(source.formatVersion) !== RECORDED_FLOW_EXPORT_VERSION) {
+    throw new Error("This recorded flows export version is not supported.");
+  }
+  if (!Array.isArray(source.flows)) {
+    throw new Error("The recorded flows export does not contain a flow list.");
+  }
+  const flows = normalizeRecordedFlows(source.flows);
+  if (!flows.length) throw new Error("The selected file does not contain any valid saved flows.");
+  return flows;
+}
+function recordedStepTitle(step, index = 0) {
+  const normalized = normalizeRecordedStep(step, index);
+  if (!normalized) return `Step ${index + 1}`;
+  if (normalized.action === RECORDED_STEP_GROUP_ACTION) {
+    if (normalized.groupType === RECORDED_FORM_BATCH_TYPE) {
+      return `Fill form (${normalized.children.length} fields)`;
+    }
+    return `Adaptive form step (${normalized.children.length} actions)`;
+  }
+  const target = normalized.target.name || normalized.target.label || normalized.target.text || normalized.target.placeholder || normalized.target.testId || normalized.target.elementId || normalized.target.tag || "page";
+  const verbs = {
+    click: "Click",
+    fill: "Fill",
+    navigate: "Open",
+    select_option: "Select",
+    set_checked: normalized.value ? "Check" : "Uncheck",
+    submit: "Submit"
+  };
+  return `${verbs[normalized.action] || normalized.action} \u201C${target}\u201D`;
+}
+
 // extensions/lumi-live/core/ui-config.js
 var DEFAULT_FAST_MODE_ENABLED = true;
 var DEFAULT_SHOW_ELEMENT_HIGHLIGHTS = false;
@@ -2178,236 +2487,6 @@ function localFileName(filePath) {
 }
 function isFileChooserDebuggerEvent(source, method, tabId) {
   return source?.tabId === tabId && method === "Page.fileChooserOpened";
-}
-
-// extensions/lumi-live/core/recorded-flows.js
-var RECORDED_FLOW_SCHEMA_VERSION = 2;
-var MAX_RECORDED_FLOWS = 120;
-var MAX_RECORDED_FLOW_STEPS = 100;
-var MAX_RECORDED_STEP_PROMPT_CHARACTERS = 1200;
-var RECORDED_STEP_GROUP_ACTION = "agent_group";
-var RECORDED_FORM_BATCH_TYPE = "form_batch";
-var RECORDED_FLOW_EXPORT_FORMAT = "lumi-recorded-flows";
-var RECORDED_FLOW_EXPORT_VERSION = 1;
-var MAX_NAME_CHARACTERS = 120;
-var MAX_TARGET_TEXT_CHARACTERS = 240;
-var MAX_VALUE_CHARACTERS = 2e3;
-var RECORDED_FORM_ACTIONS = /* @__PURE__ */ new Set(["fill", "select_option", "set_checked"]);
-function isObject2(value) {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-function clipText(value, limit) {
-  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
-}
-function newId(prefix) {
-  const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  return `${prefix}-${suffix}`;
-}
-function normalizeTimestamp(value, fallback = Date.now()) {
-  const timestamp = Number(value);
-  return Number.isFinite(timestamp) && timestamp > 0 ? Math.round(timestamp) : fallback;
-}
-function normalizeRecordedTarget(value) {
-  const source = isObject2(value) ? value : {};
-  return {
-    tag: clipText(source.tag, 40).toLowerCase(),
-    type: clipText(source.type, 60).toLowerCase(),
-    role: clipText(source.role, 80).toLowerCase(),
-    name: clipText(source.name, MAX_TARGET_TEXT_CHARACTERS),
-    label: clipText(source.label, MAX_TARGET_TEXT_CHARACTERS),
-    text: clipText(source.text, MAX_TARGET_TEXT_CHARACTERS),
-    placeholder: clipText(source.placeholder, MAX_TARGET_TEXT_CHARACTERS),
-    testId: clipText(source.testId, MAX_TARGET_TEXT_CHARACTERS),
-    elementId: clipText(source.elementId, MAX_TARGET_TEXT_CHARACTERS),
-    inputName: clipText(source.inputName, MAX_TARGET_TEXT_CHARACTERS),
-    href: clipText(source.href, 1e3),
-    selector: clipText(source.selector, 1e3)
-  };
-}
-function recordedTargetKey(target) {
-  const normalized = normalizeRecordedTarget(target);
-  return normalized.testId || normalized.elementId || normalized.selector || [
-    normalized.tag,
-    normalized.role,
-    normalized.name,
-    normalized.label,
-    normalized.text,
-    normalized.placeholder
-  ].join("\0");
-}
-function normalizeStep(value, index = 0, depth = 0) {
-  if (!isObject2(value)) return null;
-  const allowedActions = /* @__PURE__ */ new Set([
-    RECORDED_STEP_GROUP_ACTION,
-    "click",
-    "fill",
-    "navigate",
-    "select_option",
-    "set_checked",
-    "submit"
-  ]);
-  const action = allowedActions.has(value.action) ? value.action : "";
-  if (!action) return null;
-  if (action === RECORDED_STEP_GROUP_ACTION && depth > 3) return null;
-  const target = normalizeRecordedTarget(value.target);
-  const recordedAt = normalizeTimestamp(value.recordedAt);
-  const step = {
-    id: clipText(value.id, 180) || newId(`step-${index + 1}`),
-    action,
-    target,
-    prompt: String(value.prompt ?? "").trim().slice(
-      0,
-      MAX_RECORDED_STEP_PROMPT_CHARACTERS
-    ),
-    url: clipText(value.url, 3e3),
-    title: clipText(value.title, 500),
-    recordedAt
-  };
-  if (action === RECORDED_STEP_GROUP_ACTION) {
-    const children = (Array.isArray(value.children) ? value.children : []).flatMap((child, childIndex) => {
-      const normalized = normalizeStep(child, childIndex, depth + 1);
-      if (!normalized) return [];
-      return normalized.action === RECORDED_STEP_GROUP_ACTION ? normalized.children || [] : [normalized];
-    }).slice(0, MAX_RECORDED_FLOW_STEPS);
-    if (!children.length) return null;
-    step.children = children;
-    if (value.groupType === RECORDED_FORM_BATCH_TYPE) {
-      step.groupType = RECORDED_FORM_BATCH_TYPE;
-    }
-    if (value.resultUrl !== void 0) step.resultUrl = clipText(value.resultUrl, 3e3);
-    return step;
-  }
-  if (value.redacted === true) step.redacted = true;
-  else if (typeof value.value === "boolean") step.value = value.value;
-  else if (value.value !== void 0) step.value = String(value.value).slice(0, MAX_VALUE_CHARACTERS);
-  if (value.optionText !== void 0) {
-    step.optionText = clipText(value.optionText, MAX_TARGET_TEXT_CHARACTERS);
-  }
-  if (value.resultUrl !== void 0) step.resultUrl = clipText(value.resultUrl, 3e3);
-  return step;
-}
-function normalizeRecordedStep(value, index = 0) {
-  return normalizeStep(value, index, 0);
-}
-function createRecordedFormBatch(rawSteps, options = {}) {
-  const children = (Array.isArray(rawSteps) ? rawSteps : []).flatMap((step, index) => {
-    const normalized = normalizeRecordedStep(step, index);
-    if (!normalized) return [];
-    return normalized.action === RECORDED_STEP_GROUP_ACTION ? normalized.children || [] : [normalized];
-  }).filter((step) => RECORDED_FORM_ACTIONS.has(step.action)).slice(0, MAX_RECORDED_FLOW_STEPS);
-  if (!children.length) throw new Error("A form batch requires at least one form action.");
-  const source = isObject2(options) ? options : {};
-  const first = children[0];
-  const last = children.at(-1);
-  return normalizeRecordedStep({
-    id: source.id || newId("form-batch"),
-    action: RECORDED_STEP_GROUP_ACTION,
-    groupType: RECORDED_FORM_BATCH_TYPE,
-    target: {
-      tag: "form",
-      role: "group",
-      name: "Form fields"
-    },
-    prompt: source.prompt || "",
-    url: first.url,
-    title: first.title,
-    recordedAt: first.recordedAt,
-    resultUrl: last.resultUrl,
-    children
-  });
-}
-function mergeRecordedFormChild(children, next) {
-  const nextKey = recordedTargetKey(next.target);
-  const existingIndex = children.findIndex((child) => child.action === next.action && recordedTargetKey(child.target) === nextKey);
-  if (existingIndex < 0) return [...children, next];
-  const existing = children[existingIndex];
-  const merged = [...children];
-  merged[existingIndex] = {
-    ...next,
-    id: existing.id,
-    prompt: existing.prompt
-  };
-  return merged;
-}
-function appendRecordedStep(currentSteps, rawStep) {
-  const steps = (Array.isArray(currentSteps) ? currentSteps : []).map(normalizeRecordedStep).filter(Boolean);
-  const next = normalizeRecordedStep(rawStep, steps.length);
-  if (!next) return steps;
-  const previous = steps.at(-1);
-  if (RECORDED_FORM_ACTIONS.has(next.action)) {
-    if (previous?.action === RECORDED_STEP_GROUP_ACTION && previous.groupType === RECORDED_FORM_BATCH_TYPE) {
-      steps[steps.length - 1] = createRecordedFormBatch(
-        mergeRecordedFormChild(previous.children, next),
-        { id: previous.id, prompt: previous.prompt }
-      );
-      return steps;
-    }
-    if (steps.length >= MAX_RECORDED_FLOW_STEPS) return steps;
-    return [...steps, createRecordedFormBatch([next])];
-  }
-  const sameTarget = previous && recordedTargetKey(previous.target) === recordedTargetKey(next.target);
-  if (sameTarget && previous.action === "fill" && next.action === "fill" && next.recordedAt - previous.recordedAt < 1e4) {
-    steps[steps.length - 1] = {
-      ...next,
-      id: previous.id,
-      prompt: previous.prompt
-    };
-    return steps;
-  }
-  if (sameTarget && previous.action === next.action && previous.value === next.value && next.recordedAt - previous.recordedAt < 350) {
-    return steps;
-  }
-  if (steps.length >= MAX_RECORDED_FLOW_STEPS) return steps;
-  return [...steps, next];
-}
-function normalizeRecordedFlow(value) {
-  if (!isObject2(value)) return null;
-  const now = Date.now();
-  const steps = (Array.isArray(value.steps) ? value.steps : []).map(normalizeRecordedStep).filter(Boolean).slice(0, MAX_RECORDED_FLOW_STEPS);
-  const createdAt = normalizeTimestamp(value.createdAt, now);
-  return {
-    schemaVersion: RECORDED_FLOW_SCHEMA_VERSION,
-    id: clipText(value.id, 180) || newId("flow"),
-    name: clipText(value.name, MAX_NAME_CHARACTERS) || "Untitled flow",
-    startUrl: clipText(value.startUrl, 3e3),
-    startTitle: clipText(value.startTitle, 500),
-    steps,
-    createdAt,
-    updatedAt: Math.max(createdAt, normalizeTimestamp(value.updatedAt, now))
-  };
-}
-function normalizeRecordedFlows(value) {
-  const ids = /* @__PURE__ */ new Set();
-  return (Array.isArray(value) ? value : []).map(normalizeRecordedFlow).filter((flow) => {
-    if (!flow || ids.has(flow.id)) return false;
-    ids.add(flow.id);
-    return true;
-  }).sort((left, right) => right.updatedAt - left.updatedAt).slice(0, MAX_RECORDED_FLOWS);
-}
-function recordedFlowNameKey(value) {
-  return clipText(value, MAX_NAME_CHARACTERS).normalize("NFKC").toLowerCase();
-}
-function parseRecordedFlowsImport(value) {
-  let source = value;
-  if (typeof source === "string") {
-    try {
-      source = JSON.parse(source);
-    } catch {
-      throw new Error("The selected file is not valid JSON.");
-    }
-  }
-  if (!isObject2(source) || source.format !== RECORDED_FLOW_EXPORT_FORMAT) {
-    throw new Error("This is not a Lumi recorded flows export file.");
-  }
-  if (Number(source.formatVersion) !== RECORDED_FLOW_EXPORT_VERSION) {
-    throw new Error("This recorded flows export version is not supported.");
-  }
-  if (!Array.isArray(source.flows)) {
-    throw new Error("The recorded flows export does not contain a flow list.");
-  }
-  const flows = normalizeRecordedFlows(source.flows);
-  if (!flows.length) throw new Error("The selected file does not contain any valid saved flows.");
-  return flows;
 }
 
 // extensions/lumi-live/background/recorded-flow-service.js
@@ -15528,7 +15607,7 @@ ${transcript}`
 
 // extensions/lumi-live/background/index.js
 var MESSAGE_TYPE = EXTENSION_EVENTS.request;
-var CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
+var CONTENT_REQUEST_SOURCE = `lumi-page-agent-service-v${PAGE_CONTROLLER_PROTOCOL_VERSION}`;
 var TARGET_STORAGE_KEY = STORAGE_KEYS.targetTabId;
 var TARGET_CHANGED_MESSAGE = EXTENSION_EVENTS.targetChanged;
 var PANEL_LIFECYCLE_MESSAGE = EXTENSION_EVENTS.lifecycle;
@@ -15667,6 +15746,258 @@ async function handleRecordedFlowStep(message, sender) {
   if (!Number.isInteger(tabId) || !recordedFlows.isRecordingTab(tabId) || message.sessionId !== recordedFlows.sessionId()) return;
   const draft = await recordedFlows.append(message.step);
   broadcastFlowRecordingChanged(draft);
+}
+function isDynamicRecordedUrlSegment(value) {
+  return /^\d{2,}$/.test(value) || /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(value) || /^[0-9a-z_-]{20,}$/i.test(value);
+}
+function dynamicRecordedUrlSegmentsMatch(expected, actual) {
+  if (/^\d{2,}$/.test(expected)) return /^\d{2,}$/.test(actual);
+  if (/^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(expected)) {
+    return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(actual);
+  }
+  return /^[0-9a-z_-]{20,}$/i.test(expected) && /^[0-9a-z_-]{20,}$/i.test(actual);
+}
+function recordedUrlValueMatches(actual, expected) {
+  if (expected === "[redacted]" || actual === expected) return true;
+  return isDynamicRecordedUrlSegment(expected) && dynamicRecordedUrlSegmentsMatch(expected, actual);
+}
+function recordedUrlHashMatches(actualHash, expectedHash) {
+  if (!expectedHash || expectedHash.includes("[redacted]")) return true;
+  const actualParts = actualHash.replace(/^#/, "").split("/");
+  const expectedParts = expectedHash.replace(/^#/, "").split("/");
+  return actualParts.length === expectedParts.length && expectedParts.every((part, index) => recordedUrlValueMatches(actualParts[index], part));
+}
+function recordedFlowUrlMatches(actualValue, expectedValue) {
+  try {
+    const actual = new URL(actualValue);
+    const expected = new URL(expectedValue);
+    if (actual.origin !== expected.origin) return false;
+    const actualParts = actual.pathname.split("/").filter(Boolean);
+    const expectedParts = expected.pathname.split("/").filter(Boolean);
+    if (actualParts.length !== expectedParts.length) return false;
+    if (!expectedParts.every((part, index) => part === actualParts[index] || isDynamicRecordedUrlSegment(part) && dynamicRecordedUrlSegmentsMatch(part, actualParts[index]))) return false;
+    for (const [key, value] of expected.searchParams) {
+      const actualValues = actual.searchParams.getAll(key);
+      if (!actualValues.some((candidate) => recordedUrlValueMatches(candidate, value))) {
+        return false;
+      }
+    }
+    return recordedUrlHashMatches(actual.hash, expected.hash);
+  } catch {
+    return String(actualValue || "") === String(expectedValue || "");
+  }
+}
+async function waitForRecordedFlowResultUrl(tabId, expectedUrl, action) {
+  let latest = null;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    assertBrowserActionActive(action);
+    latest = await chrome.tabs.get(tabId).catch(() => null);
+    if (!latest) break;
+    if (recordedFlowUrlMatches(latest.pendingUrl || latest.url, expectedUrl)) {
+      return latest.status === "complete" ? latest : waitForTabToSettle(tabId, action);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`The page did not reach the recorded result URL: ${expectedUrl}`);
+}
+async function prepareRecordedFlowStart(flow, tab, action) {
+  if (!flow.startUrl || recordedFlowUrlMatches(tab.url, flow.startUrl)) return tab;
+  if (!isControllablePage(flow.startUrl)) {
+    throw new Error("The recorded start URL is not a controllable web page.");
+  }
+  trackBrowserActionTab(action, tab.id);
+  await chrome.tabs.update(tab.id, { url: flow.startUrl });
+  return waitForTabToSettle(tab.id, action);
+}
+async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
+  const plan = buildRecordedFlowDirectReplayPlan(rawFlow);
+  if (!plan.eligible) {
+    return {
+      success: false,
+      completedSteps: 0,
+      completedFlowSteps: 0,
+      failedAction: "plan_flow",
+      failedStepId: plan.flow?.steps?.[0]?.id || "",
+      failedStepTitle: plan.flow?.steps?.[0] ? recordedStepTitle(plan.flow.steps[0], 0) : "Prepare recorded flow",
+      resumeStepIndex: 0,
+      error: plan.reason
+    };
+  }
+  const action = { cancelled: false, tabIds: /* @__PURE__ */ new Set(), cancelHandlers: /* @__PURE__ */ new Set() };
+  activeBrowserAction = action;
+  let completedSteps = 0;
+  let completedFlowSteps = 0;
+  let activeStep = null;
+  let tab = connectedTabId ? await chrome.tabs.get(connectedTabId).catch(() => null) : null;
+  if (!tab?.id || !isControllablePage(tab.url)) tab = await getActiveTab();
+  if (!tab?.id || !isControllablePage(tab.url)) {
+    if (activeBrowserAction === action) activeBrowserAction = null;
+    return {
+      success: false,
+      completedSteps,
+      completedFlowSteps,
+      failedAction: "prepare_start_page",
+      failedStepId: plan.steps[0]?.id || "",
+      failedStepTitle: "Open the recorded start page",
+      resumeStepIndex: 0,
+      error: "Open a controllable http, https, or permitted file page before running this flow."
+    };
+  }
+  try {
+    await setConnectedTab(tab.id);
+    tab = await prepareRecordedFlowStart(plan.flow, tab, action);
+    const preparedControllerTabIds = /* @__PURE__ */ new Set();
+    for (const step of plan.steps) {
+      activeStep = step;
+      assertBrowserActionActive(action);
+      trackBrowserActionTab(action, tab.id);
+      if (step.action !== "navigate") {
+        if (!preparedControllerTabIds.has(tab.id)) {
+          if (!await ensureController(tab.id, 5)) {
+            throw Object.assign(new Error("The page controller was not ready after navigation."), {
+              resumeStepIndex: step.topLevelIndex
+            });
+          }
+          preparedControllerTabIds.add(tab.id);
+        }
+      }
+      const canOpenNewTab = ["click", "submit"].includes(step.action);
+      const newTabWatcher = canOpenNewTab ? watchForNewTabCreation({
+        tabsApi: chrome.tabs,
+        beforeTabIds: /* @__PURE__ */ new Set(),
+        sourceTab: tab,
+        timeoutMs: 100
+      }) : null;
+      let result;
+      try {
+        if (step.action === "navigate") {
+          const url = String(step.value || step.url || "").trim();
+          if (!isControllablePage(url)) throw new Error("The recorded navigation URL is not controllable.");
+          await chrome.tabs.update(tab.id, { url });
+          tab = await waitForTabToSettle(tab.id, action);
+          preparedControllerTabIds.delete(tab.id);
+          result = { action: step.action, navigated: true, success: true };
+        } else {
+          const replayMessage = {
+            source: CONTENT_REQUEST_SOURCE,
+            tool: "bridge_flow_replay_step",
+            args: {
+              confirmed: true,
+              step,
+              timeoutMs: 1e4
+            }
+          };
+          try {
+            result = await chrome.tabs.sendMessage(tab.id, replayMessage);
+          } catch (deliveryError) {
+            preparedControllerTabIds.delete(tab.id);
+            if (!await ensureController(tab.id, 5)) throw deliveryError;
+            preparedControllerTabIds.add(tab.id);
+            result = await chrome.tabs.sendMessage(tab.id, replayMessage);
+          }
+          if (result?.success === true && (result.verifiedDirectReplay !== true || result.replayProtocolVersion !== PAGE_CONTROLLER_PROTOCOL_VERSION)) {
+            throw new Error(
+              "The page controller returned an unverified direct-replay success. Reload Lumi so the current controller can verify this step."
+            );
+          }
+          if (result?.success !== true) {
+            throw new Error(
+              result?.error || result?.message || "The page controller did not confirm that the recorded action succeeded."
+            );
+          }
+        }
+      } catch (error) {
+        if (["click", "submit"].includes(step.action) && step.resultUrl) {
+          try {
+            tab = await waitForRecordedFlowResultUrl(tab.id, step.resultUrl, action);
+            result = {
+              action: step.action,
+              recoveredAfterNavigation: true,
+              success: true
+            };
+          } catch {
+          }
+        }
+        if (!result?.success) {
+          throw Object.assign(
+            new Error(error instanceof Error ? error.message : "The recorded action failed."),
+            { resumeStepIndex: step.topLevelIndex }
+          );
+        }
+      }
+      if (canOpenNewTab) {
+        const openedTab = await newTabWatcher.promise;
+        if (openedTab?.id) {
+          const activation = await activateClickedNewTab(openedTab, action, {
+            fastMode: fastModeEnabled
+          });
+          tab = await chrome.tabs.get(openedTab.id);
+          if (activation.controllerReady) preparedControllerTabIds.add(tab.id);
+        }
+      }
+      if (step.resultUrl) {
+        tab = await waitForRecordedFlowResultUrl(tab.id, step.resultUrl, action);
+      } else {
+        const latest = await chrome.tabs.get(tab.id);
+        tab = latest.status === "complete" ? latest : await waitForTabToSettle(tab.id, action);
+      }
+      await setConnectedTab(tab.id);
+      completedSteps += 1;
+      const nextAction = plan.steps[completedSteps];
+      const completedTopLevelStep = nextAction?.topLevelIndex !== step.topLevelIndex;
+      if (completedTopLevelStep) completedFlowSteps += 1;
+      if (replayContext.runId && completedTopLevelStep) {
+        const absoluteStepIndex = Math.max(
+          0,
+          Number(replayContext.startStepIndex) || 0
+        ) + step.topLevelIndex;
+        const topLevelStep = plan.flow.steps[step.topLevelIndex] || step;
+        void chrome.runtime.sendMessage({
+          type: EXTENSION_EVENTS.flowReplayProgress,
+          action: step.action,
+          completedSteps: absoluteStepIndex + 1,
+          message: `Completed step ${absoluteStepIndex + 1}: ${recordedStepTitle(topLevelStep, absoluteStepIndex)}`,
+          runId: String(replayContext.runId),
+          stepIndex: absoluteStepIndex,
+          totalSteps: Math.max(1, Number(replayContext.totalSteps) || plan.steps.length)
+        }).catch(() => {
+        });
+      }
+    }
+    if (Number.isInteger(plan.handoffStepIndex)) {
+      return {
+        success: true,
+        completed: false,
+        completedSteps,
+        completedFlowSteps,
+        handoffRequired: true,
+        resumeStepIndex: plan.handoffStepIndex,
+        handoffReason: plan.reason
+      };
+    }
+    return {
+      success: true,
+      completed: true,
+      completedSteps,
+      completedFlowSteps,
+      stepCount: plan.steps.length,
+      tab: serializeTab(tab)
+    };
+  } catch (error) {
+    const resumeStepIndex = Number.isInteger(error?.resumeStepIndex) ? error.resumeStepIndex : activeStep?.topLevelIndex || plan.steps[completedSteps]?.topLevelIndex || 0;
+    return {
+      success: false,
+      completedSteps,
+      completedFlowSteps,
+      failedAction: activeStep?.action || "prepare_start_page",
+      failedStepId: activeStep?.id || "",
+      failedStepTitle: activeStep ? recordedStepTitle(activeStep, resumeStepIndex) : "Open the recorded start page",
+      resumeStepIndex,
+      error: error instanceof Error ? error.message : "Direct recorded-flow replay failed."
+    };
+  } finally {
+    if (activeBrowserAction === action) activeBrowserAction = null;
+  }
 }
 var ready = loadBackgroundState();
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {
@@ -15845,7 +16176,7 @@ async function pingController(tabId) {
     source: CONTENT_REQUEST_SOURCE,
     tool: "bridge_controller_ping",
     args: {}
-  }).then((result) => Boolean(result?.success)).catch(() => false);
+  }).then((result) => result?.success === true && result.protocolVersion === PAGE_CONTROLLER_PROTOCOL_VERSION).catch(() => false);
 }
 async function getVisualPreferences() {
   const stored = await chrome.storage.local.get([
@@ -17135,6 +17466,9 @@ async function handleMessage(message) {
   if (message.command === "release_tab_audio") {
     return releaseTranslationCapture();
   }
+  if (message.command === "flow_record_run_direct") {
+    return executeRecordedFlowDirect(message.flow, message.replayContext);
+  }
   if (message.command === "flow_record_status") {
     const currentDraft = recordedFlows.snapshot();
     if (currentDraft?.recording && Number.isInteger(currentDraft.tabId)) {
@@ -17159,7 +17493,7 @@ async function handleMessage(message) {
       remove: message.remove === true
     });
     broadcastFlowRecordingChanged(draft);
-    return { draft };
+    return { draft, flows: await recordedFlows.list() };
   }
   if (message.command === "flow_record_save") {
     await stopFlowRecording();

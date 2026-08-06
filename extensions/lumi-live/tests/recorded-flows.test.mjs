@@ -4,7 +4,9 @@ import test from "node:test";
 
 import {
   appendRecordedStep,
+  buildRecordedFlowDirectReplayPlan,
   buildRecordedFlowAgentPrompt,
+  buildRecordedFlowHybridReplayPlan,
   createRecordedFlowsExport,
   normalizeRecordedFlow,
   parseRecordedFlowsImport,
@@ -18,8 +20,15 @@ import {
   applyRecordedStepPromptEditorView,
   dataTransferContainsRecordedFlowJson,
   downloadRecordedFlowsExport,
+  renameRecordedFlowImportItem,
+  recordedFlowAgentStepFailureNotice,
+  recordedFlowAgentUnavailableNotice,
   recordedFlowJsonFilesFromTransfer,
+  recordedFlowReplayFailureNotice,
   recordedFlowsExportFilename,
+  resolveRecordedFlowAgentCompletion,
+  selectRecordedFlowImportItem,
+  validateRecordedFlowImportReview,
 } from "../side-panel/recorded-flow-panel.js";
 
 const extensionRoot = new URL("../", import.meta.url);
@@ -161,6 +170,205 @@ test("flow normalization retains ordered actions and redacts sensitive values", 
   assert.equal(recordedStepTitle(flow.steps[1], 1), "Uncheck “Delete project”");
 });
 
+test("prompt-free flows build a flattened direct locator replay plan", () => {
+  const firstBatch = appendRecordedStep([], recordedStep());
+  const flow = {
+    name: "Fast project creation",
+    steps: [
+      firstBatch[0],
+      recordedStep({
+        action: "click",
+        id: "step-b",
+        target: { elementId: "save", name: "Save", selector: "#save", tag: "button" },
+        value: undefined,
+      }),
+    ],
+  };
+
+  const plan = buildRecordedFlowDirectReplayPlan(flow);
+
+  assert.equal(plan.eligible, true);
+  assert.deepEqual(plan.steps.map((step) => step.action), ["fill", "click"]);
+  assert.deepEqual(plan.steps.map((step) => step.topLevelIndex), [0, 1]);
+});
+
+test("prompts and redacted values keep recorded flows on adaptive agent replay", () => {
+  const prompted = buildRecordedFlowDirectReplayPlan({
+    name: "Adaptive project creation",
+    steps: [recordedStep({ prompt: "Generate a unique name." })],
+  });
+  const redacted = buildRecordedFlowDirectReplayPlan({
+    name: "Secret entry",
+    steps: [recordedStep({ redacted: true, value: undefined })],
+  });
+
+  assert.equal(prompted.eligible, false);
+  assert.match(prompted.reason, /requires adaptive agent replay/);
+  assert.equal(redacted.eligible, false);
+  assert.match(redacted.reason, /redacted value/);
+});
+
+test("a mixed flow replays its prompt-free prefix before handing off to the agent", () => {
+  const plan = buildRecordedFlowDirectReplayPlan({
+    name: "Hybrid project creation",
+    steps: [
+      recordedStep({ action: "click", target: { elementId: "new", name: "New" } }),
+      recordedStep({ prompt: "Generate a unique project name." }),
+      recordedStep({ action: "click", target: { elementId: "save", name: "Save" } }),
+    ],
+  });
+
+  assert.equal(plan.eligible, true);
+  assert.deepEqual(plan.steps.map((step) => step.action), ["click"]);
+  assert.equal(plan.handoffStepIndex, 1);
+  assert.match(plan.reason, /requires adaptive agent replay/);
+});
+
+test("hybrid replay isolates one prompted step between direct locator segments", () => {
+  const plan = buildRecordedFlowHybridReplayPlan({
+    name: "Four-step hybrid flow",
+    steps: [
+      recordedStep({ action: "click", target: { elementId: "open", name: "Open" } }),
+      recordedStep({ prompt: "Choose a valid unique project name." }),
+      recordedStep({ action: "click", target: { elementId: "save", name: "Save" } }),
+      recordedStep({ action: "click", target: { elementId: "confirm", name: "Confirm" } }),
+    ],
+  });
+
+  assert.deepEqual(plan.segments, [
+    { type: "direct", startStepIndex: 0, endStepIndex: 1, reason: "" },
+    {
+      type: "agent",
+      startStepIndex: 1,
+      endStepIndex: 2,
+      reason: "Step 2 has a user prompt and requires adaptive agent replay.",
+    },
+    { type: "direct", startStepIndex: 2, endStepIndex: 4, reason: "" },
+  ]);
+});
+
+test("a bounded agent prompt contains only its assigned hybrid step", () => {
+  const prompt = buildRecordedFlowAgentPrompt({
+    name: "Bounded hybrid flow",
+    steps: [
+      recordedStep({ action: "click", target: { name: "Open" } }),
+      recordedStep({ prompt: "Choose the best available option.", target: { name: "Option" } }),
+      recordedStep({ action: "click", target: { name: "Save" } }),
+      recordedStep({ action: "click", target: { name: "Confirm" } }),
+    ],
+  }, {
+    startStepIndex: 1,
+    endStepIndex: 1,
+  });
+
+  assert.match(prompt, /execute only step 2/i);
+  assert.match(prompt, /Do not execute any earlier or later recorded step/);
+  assert.match(prompt, /2\. Recorded action/);
+  assert.doesNotMatch(prompt, /1\. Recorded action/);
+  assert.doesNotMatch(prompt, /3\. Recorded action/);
+  assert.doesNotMatch(prompt, /4\. Recorded action/);
+  assert.match(prompt, /finish step 2 only/);
+});
+
+test("bounded agent prompt resumes after prior direct steps without repeating them", () => {
+  const prompt = buildRecordedFlowAgentPrompt({
+    name: "Recover direct replay",
+    steps: [
+      recordedStep(),
+      recordedStep({ action: "click", id: "step-b", target: { name: "Save" } }),
+    ],
+  }, {
+    startStepIndex: 1,
+  });
+
+  assert.match(prompt, /Hybrid replay already completed steps 1 through 1/);
+  assert.match(prompt, /Resume at step 2; do not repeat completed steps/);
+  assert.doesNotMatch(prompt, /Direct locator replay stopped because/);
+  assert.match(prompt, /finish steps 2 through 2/);
+  assert.match(prompt, /Flow stopped at step N/);
+  assert.match(prompt, /Never end or abandon a flow turn silently/);
+});
+
+test("recorded flow failures identify the exact step, action, and reason", () => {
+  const flow = {
+    name: "Create project",
+    steps: [
+      recordedStep(),
+      recordedStep({ action: "click", id: "step-b", target: { name: "Save" } }),
+    ],
+  };
+  const replayNotice = recordedFlowReplayFailureNotice(flow, {
+    error: "No matching element appeared.",
+    failedAction: "click",
+    failedStepTitle: "Click “Save”",
+    resumeStepIndex: 1,
+  });
+  const agentNotice = recordedFlowAgentUnavailableNotice(
+    flow,
+    1,
+    "The agent request could not start.",
+  );
+  const agentFailureNotice = recordedFlowAgentStepFailureNotice(flow, 1, {
+    success: false,
+    result: "The Save control stayed disabled.",
+  });
+  assert.match(replayNotice, /stopped at step 2/);
+  assert.match(replayNotice, /Click “Save”/);
+  assert.match(replayNotice, /action “click”/);
+  assert.match(replayNotice, /No matching element appeared/);
+  assert.match(agentNotice, /could not start agent processing for step 2/);
+  assert.match(agentNotice, /agent request could not start/);
+  assert.match(agentFailureNotice, /stopped at step 2/);
+  assert.match(agentFailureNotice, /Save control stayed disabled/);
+});
+
+test("a prompted flow step continues from its authoritative structured task completion", () => {
+  const history = [
+    {
+      type: "task_started",
+      taskId: "task-flow-step-3",
+      turnSequence: 27,
+    },
+    {
+      type: "task_done",
+      taskId: "task-flow-step-3",
+      success: true,
+      result: "Prompted step 3 completed.",
+      evidence: "The requested page state is visible.",
+      reason: "done",
+    },
+  ];
+
+  assert.deepEqual(resolveRecordedFlowAgentCompletion(history, 27), {
+    success: true,
+    result: "Prompted step 3 completed.",
+    evidence: "The requested page state is visible.",
+    reason: "done",
+    taskId: "task-flow-step-3",
+  });
+  assert.equal(resolveRecordedFlowAgentCompletion(history, 28).success, false);
+});
+
+test("a prompt-free ten-step flow still reports the exact direct replay failure", () => {
+  const flow = {
+    name: "Ten direct steps",
+    steps: Array.from({ length: 10 }, (_, index) => recordedStep({
+      action: "click",
+      id: `direct-${index + 1}`,
+      target: { name: `Button ${index + 1}` },
+    })),
+  };
+  const notice = recordedFlowReplayFailureNotice(flow, {
+    error: "The saved locator no longer matches a visible control.",
+    failedAction: "click",
+    resumeStepIndex: 7,
+  });
+
+  assert.match(notice, /stopped at step 8/);
+  assert.match(notice, /Button 8/);
+  assert.match(notice, /saved locator no longer matches/);
+});
+
 test("recorded flow export creates a versioned JSON payload for the selected flows", () => {
   const exportedAt = Date.UTC(2026, 7, 5, 9, 30, 0);
   const payload = createRecordedFlowsExport([
@@ -269,6 +477,52 @@ test("flow JSON drag detection works when Chrome omits the file MIME type", () =
     files: [{ name: "notes.txt", type: "text/plain" }],
     items: [],
   }), false);
+});
+
+test("a conflicting import renames inline to green-ready or overwrites by deliberate tick", () => {
+  const savedFlow = { id: "saved-a", name: "Create project" };
+  const newConflictItem = () => ({
+    action: "",
+    error: "",
+    existingFlowId: "",
+    existingMatches: [savedFlow],
+    flow: { id: "import-a", name: "Create project" },
+    hadNameConflict: true,
+    name: "Create project",
+    ready: false,
+    selected: false,
+  });
+
+  const renamed = newConflictItem();
+  renameRecordedFlowImportItem(renamed, "Create project – imported");
+  validateRecordedFlowImportReview([renamed], [savedFlow]);
+  assert.equal(renamed.action, "rename");
+  assert.equal(renamed.ready, true);
+  assert.equal(renamed.selected, true);
+  assert.equal(renamed.error, "");
+
+  renameRecordedFlowImportItem(renamed, "Create imported ");
+  validateRecordedFlowImportReview([renamed], [savedFlow]);
+  assert.equal(renamed.name, "Create imported ");
+  assert.equal(renamed.ready, true);
+  renameRecordedFlowImportItem(renamed, `${renamed.name}flow`);
+  validateRecordedFlowImportReview([renamed], [savedFlow]);
+  assert.equal(renamed.name, "Create imported flow");
+  assert.equal(renamed.ready, true);
+
+  renameRecordedFlowImportItem(renamed, "CREATE   PROJECT");
+  validateRecordedFlowImportReview([renamed], [savedFlow]);
+  assert.equal(renamed.ready, false);
+  assert.equal(renamed.selected, false);
+  assert.match(renamed.error, /already in use/);
+
+  const overwritten = newConflictItem();
+  selectRecordedFlowImportItem(overwritten, true);
+  validateRecordedFlowImportReview([overwritten], [savedFlow]);
+  assert.equal(overwritten.action, "overwrite");
+  assert.equal(overwritten.existingFlowId, savedFlow.id);
+  assert.equal(overwritten.ready, true);
+  assert.equal(overwritten.selected, true);
 });
 
 test("agent flow prompt treats page metadata as context and per-step prompts as user instructions", () => {
@@ -521,8 +775,8 @@ test("recorded flow service automatically batches form actions and starts a new 
   await service.stop();
 });
 
-test("extension wires recording, review, persistence, and agent replay through its runtime", async () => {
-  const [html, panel, panelEntry, worker, controller, bundle, backgroundBundle, config, model, recorder, styles] = await Promise.all([
+test("extension wires recording, direct replay, persistence, and prompted agent steps through its runtime", async () => {
+  const [html, panel, panelEntry, worker, controller, bundle, backgroundBundle, config, model, recorder, replay, styles] = await Promise.all([
     readFile(new URL("side-panel/index.html", extensionRoot), "utf8"),
     readFile(new URL("side-panel/recorded-flow-panel.js", extensionRoot), "utf8"),
     readFile(new URL("side-panel/index.js", extensionRoot), "utf8"),
@@ -533,6 +787,7 @@ test("extension wires recording, review, persistence, and agent replay through i
     readFile(new URL("core/extension-config.js", extensionRoot), "utf8"),
     readFile(new URL("core/recorded-flows.js", extensionRoot), "utf8"),
     readFile(new URL("browser/flow-recorder.js", extensionRoot), "utf8"),
+    readFile(new URL("browser/recorded-flow-replay.js", extensionRoot), "utf8"),
     readFile(new URL("side-panel/styles.css", extensionRoot), "utf8"),
   ]);
 
@@ -556,6 +811,8 @@ test("extension wires recording, review, persistence, and agent replay through i
   assert.match(html, /id="flowExportConfirmButton"/);
   assert.match(html, /id="flowRunDraftButton"/);
   assert.match(html, /automatically recorded as one batch step/);
+  assert.match(html, /Steps without prompts replay directly from saved locators/);
+  assert.match(html, /deliberately tick the flow to overwrite/);
   assert.match(panel, /data-flow-step-prompt/);
   assert.match(panel, /flow-step-add-prompt/);
   assert.match(panel, /promptButton\.addEventListener\("click"/);
@@ -573,27 +830,122 @@ test("extension wires recording, review, persistence, and agent replay through i
   assert.match(panel, /if \(elements\.panel\.hidden\) return/);
   assert.match(panel, /addEventListener\("drop", handleFlowDrop, true\)/);
   assert.match(panel, /Will overwrite/);
+  assert.match(panel, /renameRecordedFlowImportItem/);
+  assert.match(panel, /selectRecordedFlowImportItem/);
+  assert.match(panel, /publishFlowEvent\("success"/);
+  assert.match(panel, /"start"/);
+  assert.match(panel, /prepareFlowRun\(plan\.flow\)/);
+  assert.match(panel, /freshSavedFlowForRun/);
+  assert.match(panel, /await flushEditorChanges\(\)/);
+  assert.match(panel, /sendRuntime\("flow_record_status"\)/);
+  assert.match(panel, /directStepCount.*promptedStepCount/s);
+  assert.match(panel, /onFlowRunStateChange\(true, run\.flow\)/);
+  assert.doesNotMatch(panel, /data\.flowImportResolution/);
+  assert.doesNotMatch(panel, /data-flow-import-resolution/);
   assert.match(styles, /\.flow-import-review-item\.is-ready/);
   assert.match(styles, /\.flow-import-review-item\.is-conflict/);
+  assert.match(styles, /\.flow-import-review-item\.is-ready \.flow-import-rename/);
   assert.match(styles, /html\.is-flow-import-dragging/);
+  assert.match(styles, /\.message-flow-run\[data-state="error"\]/);
+  assert.match(styles, /\.flow-run-step-list/);
+  assert.match(styles, /\.flow-task-log-step-list \{[^}]*overflow: visible/);
+  assert.match(styles, /\.flow-run-step\[hidden\] \{ display: none/);
+  assert.match(styles, /\.flow-run-step\[data-state="recovered"\]/);
   assert.doesNotMatch(panel, /Keep this recorded flow/);
   assert.doesNotMatch(panel, /window\.confirm/);
-  assert.match(panel, /deleteButton\.disabled = busy/);
+  assert.match(panel, /deleteButton\.disabled = controlsAreLocked\(\)/);
   assert.match(panel, /flow_record_stop/);
+  assert.match(panel, /flow_record_run_direct/);
   assert.match(panel, /buildRecordedFlowAgentPrompt/);
+  assert.match(panel, /buildRecordedFlowHybridReplayPlan/);
+  assert.match(panel, /continueAfterAgent/);
+  assert.match(panel, /stopDirectFlowRun/);
+  assert.match(panel, /stopUnexpectedFlowRun/);
+  assert.match(panel, /segmentAtStep\(run\.plan, index\)\?\.type === "direct"/);
+  assert.match(panel, /recordedFlowReplayFailureNotice\(run\.flow, result\)/);
+  assert.match(
+    panel,
+    /const notice = recordedFlowAgentUnavailableNotice[^]*?setPanelOpen\(false\);[^]*?return false;/,
+  );
+  assert.match(
+    panel,
+    /function stopFlowRun[^]*?publishFlowEvent\("error"[^]*?setPanelOpen\(false\);[^]*?finishFlowRun\(run\)/,
+  );
+  assert.match(
+    panel,
+    /function stopDirectFlowRun[^]*?publishFlowEvent\("error"[^]*?setPanelOpen\(false\);[^]*?finishFlowRun\(run\)/,
+  );
+  assert.doesNotMatch(panel, /startSingleAgentStep\(run, failedStepIndex/);
+  assert.match(panel, /completedStepIndex < completedDirectEnd/);
+  assert.match(panel, /reportedDirectStepIndexes\.add\(completedStepIndex\)/);
+  assert.match(panel, /stepState: "failed"/);
+  assert.match(panel, /endStepIndex: stepIndex/);
+  assert.match(panel, /recordedFlowReplayFailureNotice/);
+  assert.match(panel, /recordedFlowAgentUnavailableNotice/);
   assert.match(model, /createRecordedFormBatch/);
+  assert.match(model, /buildRecordedFlowDirectReplayPlan/);
   assert.match(recorder, /\[data-action\]/);
   assert.match(recorder, /return delegatedTarget \|\| null/);
+  assert.match(replay, /waitForRecordedTarget/);
+  assert.match(replay, /executeRecordedFlowStep/);
   assert.match(panelEntry, /confirmAction:\s*requestChatConfirmation/);
+  assert.match(panelEntry, /reportFlowEvent/);
+  assert.match(panelEntry, /recordedFlowRunCards/);
+  assert.match(panelEntry, /recordedStepTitle/);
+  assert.match(panelEntry, /flow-run-step-list/);
+  assert.match(panelEntry, /author\.textContent = "LUMI TASK"/);
+  assert.match(panelEntry, /flow-task-log-step-list/);
+  assert.match(panelEntry, /row\.hidden = index > 0/);
+  assert.match(panelEntry, /item\.row\.hidden = false/);
+  assert.match(panelEntry, /elements\.transcript\.append\(card\.article\)/);
+  assert.doesNotMatch(panelEntry, /authorLabel: "Recorded flow"/);
+  assert.doesNotMatch(panelEntry, /flow-run-checklist/);
+  assert.match(panelEntry, /recordedFlowInternalTaskIds/);
+  assert.match(panelEntry, /filterTaskTranscriptHistory/);
+  assert.match(panelEntry, /stepState === "completed-all"/);
+  assert.match(panelEntry, /reportFlowEvent:\s*renderRecordedFlowEvent/);
+  assert.match(panelEntry, /prepareFlowRun:\s*startRecordedFlowChatSession/);
+  assert.match(panelEntry, /onFlowRunStateChange:\s*setRecordedFlowRunActive/);
+  assert.match(panelEntry, /event\?\.type === "task_done" && settleRecordedFlowAgentTurn\(\)/);
+  assert.match(panelEntry, /turns: \[\{ role: "user", text: requestText \}\]/);
+  assert.match(panelEntry, /remember: false/);
+  assert.doesNotMatch(panelEntry, /createMessage\(isStart \? "user"/);
+  assert.match(panelEntry, /onAgentTaskComplete/);
+  assert.match(panelEntry, /settleRecordedFlowAgentTurn/);
+  assert.match(panelEntry, /render: false/);
   assert.match(worker, /message\.command === "flow_record_start"/);
   assert.match(worker, /message\.command === "flow_record_save"/);
   assert.match(worker, /message\.command === "flow_record_import_preview"/);
   assert.match(worker, /message\.command === "flow_record_import"/);
+  assert.match(worker, /message\.command === "flow_record_run_direct"/);
+  assert.match(worker, /return \{ draft, flows: await recordedFlows\.list\(\) \}/);
+  assert.match(worker, /failedStepTitle/);
+  assert.match(worker, /failedAction/);
+  assert.match(worker, /result\?\.success !== true/);
+  assert.match(worker, /preparedControllerTabIds/);
+  assert.match(worker, /Reinstall the controller only after that delivery failure/);
+  assert.match(worker, /const canOpenNewTab = \["click", "submit"\]/);
+  assert.match(worker, /newTabWatcher = canOpenNewTab/);
+  assert.match(worker, /EXTENSION_EVENTS\.flowReplayProgress/);
+  assert.match(config, /flowReplayProgress/);
+  assert.match(config, /PAGE_CONTROLLER_PROTOCOL_VERSION = 4/);
+  assert.match(worker, /lumi-page-agent-service-v\$\{PAGE_CONTROLLER_PROTOCOL_VERSION\}/);
+  assert.match(worker, /result\.protocolVersion === PAGE_CONTROLLER_PROTOCOL_VERSION/);
+  assert.match(controller, /__LUMI_PAGE_AGENT_CONTROLLER_V\$\{PAGE_CONTROLLER_PROTOCOL_VERSION\}__/);
+  assert.match(controller, /protocolVersion: PAGE_CONTROLLER_PROTOCOL_VERSION/);
+  assert.match(controller, /\[LumiFlowReplay\] failed/);
+  assert.match(controller, /verifiedDirectReplay: true/);
+  assert.match(controller, /replayProtocolVersion: PAGE_CONTROLLER_PROTOCOL_VERSION/);
+  assert.match(worker, /result\.verifiedDirectReplay !== true/);
+  assert.match(worker, /unverified direct-replay success/);
   assert.match(backgroundBundle, /message\.command === "flow_record_import_preview"/);
   assert.match(backgroundBundle, /message\.command === "flow_record_import"/);
+  assert.match(backgroundBundle, /message\.command === "flow_record_run_direct"/);
   assert.match(worker, /recordNavigation/);
   assert.match(worker, /onHistoryStateUpdated/);
   assert.match(controller, /bridge_flow_record_start/);
+  assert.match(controller, /bridge_flow_replay_step/);
   assert.match(bundle, /bridge_flow_record_start/);
+  assert.match(bundle, /bridge_flow_replay_step/);
   assert.match(config, /recordedFlows:\s*"lumiRecordedFlows"/);
 });

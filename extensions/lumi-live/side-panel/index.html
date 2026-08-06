@@ -180,11 +180,11 @@
               <span id="flowStepCount">0 steps</span>
             </header>
             <ol id="flowStepList" class="flow-step-list"></ol>
-            <p id="flowStepEmpty" class="flow-empty">Clicks are recorded as steps. Consecutive form inputs are automatically recorded as one batch step.</p>
+            <p id="flowStepEmpty" class="flow-empty">Clicks are recorded as steps. Consecutive form inputs are automatically recorded as one batch step. Steps without prompts replay directly from saved locators; adaptive prompts hand off to the agent.</p>
           </section>
 
           <div class="flow-draft-actions">
-            <button id="flowRunDraftButton" class="is-primary" type="button" disabled>Run current flow with agent</button>
+            <button id="flowRunDraftButton" class="is-primary" type="button" disabled>Run current flow</button>
           </div>
 
           <section class="flow-library-section" aria-labelledby="flowLibraryTitle">
@@ -247,7 +247,7 @@
             </div>
             <button id="flowImportReviewCloseButton" class="flow-import-close" type="button" aria-label="Close import review" title="Close">&times;</button>
           </header>
-          <p id="flowImportReviewDescription">Green flows are ready and selected by default. Resolve each red name conflict by overwriting a matching flow or choosing a unique name.</p>
+          <p id="flowImportReviewDescription">Green flows are ready. For a red name conflict, enter a unique name below or deliberately tick the flow to overwrite its saved match.</p>
           <div id="flowImportReviewList" class="flow-import-review-list" role="group" aria-label="Flows available to import"></div>
           <footer>
             <span id="flowImportSelectionCount" aria-live="polite">0 flows selected</span>

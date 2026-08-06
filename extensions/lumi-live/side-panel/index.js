@@ -9,6 +9,7 @@ import {
   normalizeAvatarMode,
 } from "./pixel-avatar-controller.js";
 import { EXTENSION_EVENTS, STORAGE_KEYS } from "../core/extension-config.js";
+import { recordedStepTitle } from "../core/recorded-flows.js";
 import {
   BROWSER_TOOLS,
   BUILTIN_TOOLS,
@@ -94,9 +95,13 @@ import {
 } from "../live/agent-protocol.js";
 import { createTaskOrchestrator } from "../live/task-orchestrator.js";
 import { createTaskStepView } from "./task-step-view.js";
-import { createRecordedFlowPanel } from "./recorded-flow-panel.js";
+import {
+  createRecordedFlowPanel,
+  resolveRecordedFlowAgentCompletion,
+} from "./recorded-flow-panel.js";
 import { collectAutomaticBrowserVerification } from "./browser-action-verification.js";
 import {
+  filterTaskTranscriptHistory,
   shouldRenderStandaloneToolActivity,
   taskOwnsTurn,
 } from "./task-transcript-policy.js";
@@ -234,6 +239,8 @@ let isMuted = true;
 let agentTurnActive = false;
 let turnCancellationPending = false;
 let turnExecutionSequence = 0;
+let pendingRecordedFlowAgentTurn = null;
+const recordedFlowInternalTaskIds = new Set();
 let userTurnAuthorized = false;
 let turnCancellationDrainTimeoutId = null;
 let turnCancellationWatchdogTimeoutId = null;
@@ -280,6 +287,7 @@ const conversationHistory = [];
 const localChatHistory = [];
 let chatHistoryState = normalizeLocalChatHistoryState(null);
 let chatSessionMutationPending = false;
+let recordedFlowRunActive = false;
 let chatChangeCancellationPromise = Promise.resolve([]);
 let pendingChatConfirmationResolve = null;
 let chatSnapshotPersistTimerId = null;
@@ -342,6 +350,7 @@ const panelAudio = createPanelAudioController({
   getInputState: () => ({
     canSendAudio: isGeminiTransportReady()
       && !isMuted
+      && !recordedFlowRunActive
       && !typedTurnInFlight
       && !turnCancellationPending
       && !pendingSessionHandoffSocket,
@@ -360,6 +369,11 @@ const panelAudio = createPanelAudioController({
     directVideoPresentationTurnSequence = null;
     beginTurnWork(turnExecutionSequence);
     taskOrchestrator.cancelTask("The task was interrupted by a new voice request.");
+    settleRecordedFlowAgentTurn({
+      result: "The flow agent step was interrupted by a new voice request.",
+      reason: "interrupted",
+      force: true,
+    });
     activeTurnUserRequest = "";
     finalizeTranscript("user");
     finalizeTranscript("lumi");
@@ -437,12 +451,50 @@ function syncTaskFailureNotice(event, change) {
 const taskOrchestrator = createTaskOrchestrator({
   maxSteps: DEFAULT_AGENT_MAX_STEPS,
   onHistoryChange: (history, event, change) => {
-    if (change === "restore") taskStepView.hydrate(history);
-    else taskStepView.render(history);
-    syncTaskFailureNotice(event, change);
+    if (change === "clear") recordedFlowInternalTaskIds.clear();
+    const isRecordedFlowTaskStart = event?.type === "task_started"
+      && pendingRecordedFlowAgentTurn
+      && Number(event.turnSequence) === pendingRecordedFlowAgentTurn.turnSequence;
+    if (isRecordedFlowTaskStart) recordedFlowInternalTaskIds.add(event.taskId);
+    const internalRecordedFlowTask = recordedFlowInternalTaskIds.has(event?.taskId);
+    const visibleHistory = filterTaskTranscriptHistory(
+      history,
+      recordedFlowInternalTaskIds,
+    );
+    if (change === "restore") taskStepView.hydrate(visibleHistory);
+    else taskStepView.render(visibleHistory);
+    if (!internalRecordedFlowTask) syncTaskFailureNotice(event, change);
     scheduleActiveChatSnapshotPersist();
+    if (event?.type === "task_done" && settleRecordedFlowAgentTurn()) {
+      // A structured done action is authoritative. Continue the saved flow now
+      // instead of depending on a later model turnComplete frame that may never
+      // arrive after the tool response.
+      setAgentTurnActive(false);
+      finishTurnWork();
+      userTurnAuthorized = false;
+      activeTurnUserRequest = "";
+    }
   },
 });
+
+function settleRecordedFlowAgentTurn(fallback = {}) {
+  const pending = pendingRecordedFlowAgentTurn;
+  if (!pending) return false;
+  pendingRecordedFlowAgentTurn = null;
+  const completion = resolveRecordedFlowAgentCompletion(
+    taskOrchestrator.history,
+    pending.turnSequence,
+    fallback,
+  );
+  queueMicrotask(() => {
+    Promise.resolve(pending.onComplete(completion)).catch((error) => {
+      elements.statusLine.textContent = error instanceof Error
+        ? error.message
+        : "The saved flow could not continue after its agent step.";
+    });
+  });
+  return true;
+}
 
 function sendRuntime(command, payload = {}) {
   return chrome.runtime.sendMessage({
@@ -749,6 +801,7 @@ function syncMessageComposer() {
   const ready = sessionStatus === "ready";
   const transportReady = isGeminiTransportReady();
   const translationLocked = isLiveTranslationChatLocked();
+  const flowLocked = recordedFlowRunActive;
   const hasText = Boolean(elements.messageInput.value.trim());
   const hasContent = hasText
     || pendingAttachments.some((attachment) => attachment.parseStatus === "ready");
@@ -762,10 +815,13 @@ function syncMessageComposer() {
     && (agentTurnActive || turnCancellationPending || !transportReady)
     && hasContent;
   elements.messageForm.classList.toggle("is-translation-locked", translationLocked);
-  elements.messageForm.setAttribute("aria-busy", String(translationLocked));
-  elements.messageInput.disabled = textSendPending || translationLocked;
+  elements.messageForm.classList.toggle("is-flow-locked", flowLocked);
+  elements.messageForm.setAttribute("aria-busy", String(translationLocked || flowLocked));
+  elements.messageInput.disabled = textSendPending || translationLocked || flowLocked;
   elements.messageInput.placeholder = translationLocked
     ? "Stop translation to chat"
+    : flowLocked
+    ? "Recorded flow is running…"
     : textSendPending
     ? "Sending…"
     : ready
@@ -783,11 +839,13 @@ function syncMessageComposer() {
   elements.messageSubmit.title = submitLabel;
   elements.imageAttachmentButton.disabled =
     translationLocked
+    || flowLocked
     || textSendPending
     || attachmentParseCount > 0
     || pendingAttachments.length >= 5;
   elements.messageSubmit.disabled =
     translationLocked
+    || (flowLocked && !cancelMode)
     || textSendPending
     || attachmentParseCount > 0
     || (!hasContent && !cancelMode);
@@ -892,6 +950,7 @@ function resetPendingTurnExecution(message = "Cancelled by the user.") {
   pendingToolCallNames.clear();
   pendingToolActionNames.clear();
   taskOrchestrator.cancelTask(message);
+  settleRecordedFlowAgentTurn({ result: message, reason: "cancelled", force: true });
   browserToolRunning = false;
   panelAudio.stopPlayback();
   responseAudioGate.reset();
@@ -1144,7 +1203,10 @@ async function persistActiveChatSessionSnapshot() {
     sessionId: activeSession.id,
     transcriptHtml: createTranscriptSnapshotHtml(),
     transcriptScrollTop: elements.transcript.scrollTop,
-    taskHistory: taskOrchestrator.history,
+    taskHistory: filterTaskTranscriptHistory(
+      taskOrchestrator.history,
+      recordedFlowInternalTaskIds,
+    ),
   });
 }
 
@@ -1264,7 +1326,9 @@ function renderChatSessionList() {
     openButton.className = "chat-session-open";
     openButton.type = "button";
     openButton.dataset.chatSessionId = session.id;
-    openButton.disabled = chatSessionMutationPending || isLiveTranslationChatLocked();
+    openButton.disabled = chatSessionMutationPending
+      || isLiveTranslationChatLocked()
+      || recordedFlowRunActive;
     openButton.setAttribute(
       "aria-current",
       session.id === activeSession.id ? "true" : "false",
@@ -1286,7 +1350,9 @@ function renderChatSessionList() {
     deleteButton.className = "chat-session-delete";
     deleteButton.type = "button";
     deleteButton.dataset.deleteChatSessionId = session.id;
-    deleteButton.disabled = chatSessionMutationPending || isLiveTranslationChatLocked();
+    deleteButton.disabled = chatSessionMutationPending
+      || isLiveTranslationChatLocked()
+      || recordedFlowRunActive;
     deleteButton.setAttribute("aria-label", `Delete ${session.title}`);
     deleteButton.title = "Delete chat";
     deleteButton.innerHTML = `
@@ -1304,7 +1370,7 @@ function setChatSessionMutationPending(pending) {
   chatSessionMutationPending = pending === true;
   syncTranslationSensitiveControls();
   syncMessageComposer();
-  elements.clearHistoryButton.disabled = chatSessionMutationPending;
+  elements.clearHistoryButton.disabled = chatSessionMutationPending || recordedFlowRunActive;
   renderChatSessionList();
 }
 
@@ -1454,6 +1520,10 @@ async function runChatSessionMutation(operation) {
 }
 
 async function startNewChatSession() {
+  if (recordedFlowRunActive) {
+    elements.statusLine.textContent = "Wait for the recorded flow to finish before starting another chat.";
+    return false;
+  }
   if (isLiveTranslationChatLocked()) {
     elements.statusLine.textContent = "Stop Live Translate before starting another chat.";
     return false;
@@ -1528,7 +1598,51 @@ async function startNewChatSession() {
   });
 }
 
+async function startRecordedFlowChatSession(flow) {
+  if (isLiveTranslationChatLocked()) {
+    elements.statusLine.textContent = "Stop Live Translate before running a recorded flow.";
+    return false;
+  }
+  const flowName = String(flow?.name || "Untitled flow").trim() || "Untitled flow";
+  return runChatSessionMutation(async () => {
+    const cancelledInFlightTurn = cancelConversationWorkForChatChange();
+    await chatChangeCancellationPromise;
+    await flushActiveChatSnapshotPersist();
+    const timestamp = Date.now();
+    const requestText = `Run saved flow “${flowName}”`;
+    const nextSession = createLocalChatSession({
+      id: createChatSessionId(),
+      title: requestText,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      turns: [{ role: "user", text: requestText }],
+    });
+    clearConversationContext();
+    const previousSessions = chatHistoryState.sessions;
+    chatHistoryState = normalizeLocalChatHistoryState({
+      ...chatHistoryState,
+      activeSessionId: nextSession.id,
+      sessions: [
+        nextSession,
+        ...previousSessions.filter((session) => session.turns.length),
+      ],
+    });
+    removeSnapshotsForDroppedSessions(previousSessions, chatHistoryState.sessions);
+    await renderActiveChatSession();
+    await chatHistoryStore.save(chatHistoryState);
+    isolateChatContextAfterCancelledTurn(cancelledInFlightTurn);
+    preserveChatTransportForNewChat();
+    closeChatHistory();
+    elements.statusLine.textContent = `New chat opened for “${flowName}”. Starting flow…`;
+    return true;
+  });
+}
+
 async function activateChatSession(sessionId) {
+  if (recordedFlowRunActive) {
+    elements.statusLine.textContent = "Wait for the recorded flow to finish before switching chats.";
+    return false;
+  }
   if (isLiveTranslationChatLocked()) {
     elements.statusLine.textContent = "Stop Live Translate before switching chats.";
     return false;
@@ -1561,6 +1675,10 @@ async function activateChatSession(sessionId) {
 }
 
 async function deleteChatSession(sessionId) {
+  if (recordedFlowRunActive) {
+    elements.statusLine.textContent = "Wait for the recorded flow to finish before deleting a chat.";
+    return false;
+  }
   const selectedSession = chatHistoryState.sessions.find(
     (session) => session.id === sessionId,
   );
@@ -1605,6 +1723,10 @@ async function deleteChatSession(sessionId) {
 }
 
 async function clearLocalChatHistory() {
+  if (recordedFlowRunActive) {
+    elements.statusLine.textContent = "Wait for the recorded flow to finish before clearing chats.";
+    return false;
+  }
   const confirmed = await requestChatConfirmation({
     title: "Clear all chats?",
     message: "Clear every saved Lumi chat on this device and start a new conversation?",
@@ -2507,16 +2629,20 @@ function isLiveTranslationChatLocked() {
 
 function canUseMicrophoneControl() {
   return !chatSessionMutationPending
+    && !recordedFlowRunActive
     && !isLiveTranslationChatLocked()
     && (sessionStatus === "ready" || sessionStatus === "idle");
 }
 
 function syncTranslationSensitiveControls() {
   const translationLocked = isLiveTranslationChatLocked();
-  const chatNavigationLocked = chatSessionMutationPending || translationLocked;
+  const chatNavigationLocked = chatSessionMutationPending
+    || translationLocked
+    || recordedFlowRunActive;
   elements.chatHistoryButton.disabled = chatNavigationLocked;
   elements.newChatButton.disabled = chatNavigationLocked;
   elements.historyNewChatButton.disabled = chatNavigationLocked;
+  elements.clearHistoryButton.disabled = chatNavigationLocked;
   elements.fastModeButton.disabled = translationLocked;
   elements.thinkingButton.disabled = translationLocked;
   if (translationLocked) setThinkingMenuOpen(false);
@@ -3129,6 +3255,17 @@ async function handleServerMessage(event, sourceSocket) {
       cancelled: wasUserCancellation,
       interrupted: !wasUserCancellation,
     });
+    if (pendingRecordedFlowAgentTurn) {
+      const interruptionMessage = wasUserCancellation
+        ? "The flow agent step was cancelled by the user."
+        : "The flow agent step was interrupted before completion.";
+      taskOrchestrator.cancelTask(interruptionMessage);
+      settleRecordedFlowAgentTurn({
+        result: interruptionMessage,
+        reason: wasUserCancellation ? "cancelled" : "interrupted",
+        force: true,
+      });
+    }
     if (wasUserCancellation) {
       elements.statusLine.textContent = "Current action cancelled. Lumi is ready for your next request.";
     } else {
@@ -3392,6 +3529,13 @@ async function handleServerMessage(event, sourceSocket) {
       finalizeTranscript("thinking");
       setAgentTurnActive(false);
       finishTurnWork({ cancelled: wasUserCancellation });
+      settleRecordedFlowAgentTurn({
+        result: wasUserCancellation
+          ? "The flow agent step was cancelled by the user."
+          : "The agent turn ended without a verified structured completion.",
+        reason: wasUserCancellation ? "cancelled" : "missing_structured_completion",
+        force: wasUserCancellation,
+      });
       userTurnAuthorized = false;
       activeTurnUserRequest = "";
       if (wasUserCancellation) {
@@ -3810,6 +3954,11 @@ function cleanupMedia({ cancelActiveTask = true } = {}) {
     taskOrchestrator.cancelTask(
       "The Gemini Live session ended before the task completed.",
     );
+    settleRecordedFlowAgentTurn({
+      result: "The Gemini Live session ended before the flow agent step completed.",
+      reason: "session_ended",
+      force: true,
+    });
   }
   activeApiKey = "";
   pendingLiveTranslationStart = false;
@@ -3935,6 +4084,7 @@ async function sendText(
     displayTextOverride = "",
     render = true,
     remember = true,
+    onAgentTaskComplete = null,
   } = {},
 ) {
   const clean = String(text || "").trim();
@@ -4020,6 +4170,12 @@ async function sendText(
   }
   activeTurnUserRequest = userRequestText;
   turnExecutionSequence += 1;
+  if (typeof onAgentTaskComplete === "function") {
+    pendingRecordedFlowAgentTurn = {
+      turnSequence: turnExecutionSequence,
+      onComplete: onAgentTaskComplete,
+    };
+  }
   directVideoPresentationTurnSequence = null;
   beginTurnWork(turnExecutionSequence);
   if (suppressServerOutputUntilNextUserTurn) markFreshUserInputStarted();
@@ -4225,11 +4381,227 @@ fastModeController = createFastModeController({
   },
 });
 
+const recordedFlowRunCards = new Map();
+
+function createRecordedFlowTaskLog(flow) {
+  const notice = createMessage("lumi", "");
+  notice.article.classList.add("message-flow-run", "message-flow-task-log");
+  notice.article.setAttribute("aria-live", "polite");
+  const author = notice.article.firstElementChild;
+  if (author) author.textContent = "LUMI TASK";
+  const header = document.createElement("div");
+  header.className = "flow-run-header";
+  const title = document.createElement("strong");
+  title.className = "flow-run-title";
+  const state = document.createElement("span");
+  state.className = "flow-run-state";
+  header.append(title, state);
+  const detail = document.createElement("p");
+  detail.className = "flow-run-detail";
+  const progress = document.createElement("div");
+  progress.className = "flow-run-progress";
+  progress.setAttribute("role", "progressbar");
+  progress.setAttribute("aria-valuemin", "0");
+  const progressValue = document.createElement("i");
+  progress.append(progressValue);
+  const footer = document.createElement("div");
+  footer.className = "flow-run-footer";
+  const count = document.createElement("span");
+  count.className = "flow-run-count";
+  const mode = document.createElement("span");
+  mode.className = "flow-run-mode";
+  footer.append(count, mode);
+  const warning = document.createElement("p");
+  warning.className = "flow-run-warning";
+  warning.hidden = true;
+  const stepList = document.createElement("ol");
+  stepList.className = "flow-run-step-list flow-task-log-step-list";
+  stepList.setAttribute("aria-label", "Lumi task recorded flow log");
+  const stepRows = (flow?.steps || []).map((step, index) => {
+    const row = document.createElement("li");
+    row.className = "flow-run-step";
+    row.dataset.state = "pending";
+    row.dataset.mode = String(step?.prompt || "").trim() ? "agent" : "direct";
+    row.dataset.stepIndex = String(index);
+    row.hidden = index > 0;
+    const number = document.createElement("span");
+    number.className = "flow-run-step-number";
+    number.textContent = String(index + 1);
+    const copy = document.createElement("span");
+    copy.className = "flow-run-step-copy";
+    const stepTitle = document.createElement("strong");
+    const baseTitle = recordedStepTitle(step, index);
+    const stepPrompt = String(step?.prompt || "").trim();
+    stepTitle.textContent = stepPrompt
+      ? `${baseTitle} — ${stepPrompt}`
+      : baseTitle;
+    const stepStatus = document.createElement("small");
+    stepStatus.textContent = "Waiting";
+    copy.append(stepTitle, stepStatus);
+    const badge = document.createElement("span");
+    badge.className = "flow-run-step-badge";
+    badge.textContent = row.dataset.mode === "agent" ? "Agent" : "Direct";
+    row.append(number, copy, badge);
+    stepList.append(row);
+    return { badge, row, status: stepStatus };
+  });
+  notice.content.textContent = "";
+  notice.content.append(header, detail, progress, stepList, footer, warning);
+  return {
+    article: notice.article,
+    count,
+    detail,
+    mode,
+    progress,
+    progressValue,
+    state,
+    stepList,
+    stepRows,
+    title,
+    warning,
+  };
+}
+
+function renderRecordedFlowEvent({
+  completedSteps = 0,
+  flow,
+  kind,
+  message,
+  phase = "",
+  runId,
+  stepIndex = 0,
+  stepState = "",
+  totalSteps = 0,
+}) {
+  const key = String(runId || `recorded-flow-${flow?.id || flow?.name || "active"}`);
+  let card = recordedFlowRunCards.get(key);
+  if (!card) {
+    card = createRecordedFlowTaskLog(flow);
+    recordedFlowRunCards.set(key, card);
+    if (recordedFlowRunCards.size > 30) {
+      recordedFlowRunCards.delete(recordedFlowRunCards.keys().next().value);
+    }
+  }
+
+  const total = Math.max(0, Number(totalSteps) || flow?.steps?.length || 0);
+  const completed = Math.min(total, Math.max(0, Number(completedSteps) || 0));
+  const currentStep = total
+    ? Math.min(total, Math.max(1, (Number(stepIndex) || 0) + 1))
+    : 0;
+  const terminal = kind === "success" || kind === "error";
+  const state = kind === "success"
+    ? "success"
+    : kind === "error" ? "error" : kind === "warning" ? "recovering" : "running";
+  const stateLabel = kind === "success"
+    ? "Complete"
+    : kind === "error"
+      ? "Failed"
+      : phase === "recovery" || kind === "warning"
+        ? "Recovering"
+        : phase === "agent" ? "Agent" : phase === "direct" ? "Direct" : "Starting";
+  const progressPercent = total ? Math.round(completed / total * 100) : 0;
+
+  const setStepRowState = (index, nextState, modeOverride = "") => {
+    const item = card.stepRows[index];
+    if (!item) return;
+    item.row.hidden = false;
+    if (item.row.dataset.state === "recovered" && nextState === "completed") return;
+    item.row.dataset.state = nextState;
+    if (modeOverride === "agent" || modeOverride === "direct") {
+      item.row.dataset.mode = modeOverride;
+    }
+    const labels = {
+      completed: "Completed",
+      failed: "Could not perform this step",
+      pending: "Waiting",
+      recovered: "Recovered by agent",
+      recovering: "Direct replay failed; agent is recovering",
+      running: item.row.dataset.mode === "agent" ? "Agent is working" : "Replaying saved locator",
+    };
+    item.status.textContent = labels[nextState] || "Waiting";
+    item.badge.textContent = nextState === "recovered"
+      ? "Recovered"
+      : nextState === "failed"
+        ? "Failed"
+        : nextState === "recovering"
+          ? "Recovering"
+          : item.row.dataset.mode === "agent" ? "Agent" : "Direct";
+  };
+  for (let index = 0; index < completed; index += 1) {
+    setStepRowState(index, "completed");
+  }
+  const normalizedStepIndex = total
+    ? Math.min(total - 1, Math.max(0, Number(stepIndex) || 0))
+    : -1;
+  if (kind === "success" || stepState === "completed-all") {
+    for (let index = 0; index < total; index += 1) setStepRowState(index, "completed");
+  } else if (normalizedStepIndex >= 0) {
+    const rowMode = phase === "agent" ? "agent" : phase === "direct" ? "direct" : "";
+    if (stepState === "completed") {
+      setStepRowState(normalizedStepIndex, "completed", rowMode);
+      const nextStepIndex = normalizedStepIndex + 1;
+      if (
+        phase === "direct"
+        && nextStepIndex < total
+        && !String(flow?.steps?.[nextStepIndex]?.prompt || "").trim()
+      ) {
+        setStepRowState(nextStepIndex, "running", "direct");
+      }
+    } else if (stepState === "recovered") {
+      setStepRowState(normalizedStepIndex, "recovered", "agent");
+    } else if (stepState === "recovering" || kind === "warning") {
+      setStepRowState(normalizedStepIndex, "recovering");
+    } else if (stepState === "failed" || kind === "error") {
+      setStepRowState(normalizedStepIndex, "failed", rowMode);
+    } else if (stepState === "running") {
+      setStepRowState(normalizedStepIndex, "running", rowMode);
+    } else if (stepState === "pending") {
+      setStepRowState(normalizedStepIndex, "pending");
+    }
+  }
+
+  card.article.dataset.state = state;
+  card.article.setAttribute("role", kind === "error" ? "alert" : "status");
+  card.article.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
+  card.title.textContent = flow?.name || "Recorded flow";
+  card.state.textContent = stateLabel;
+  card.detail.textContent = String(message || "").trim();
+  card.count.textContent = terminal && kind === "success"
+    ? `${total}/${total} steps`
+    : total ? `${completed}/${total} complete · step ${currentStep}` : "Preparing";
+  card.mode.textContent = phase === "agent"
+    ? "Prompt step"
+    : phase === "recovery" ? "Agent fallback" : phase === "direct" ? "Saved locator" : "";
+  card.progress.setAttribute("aria-valuemax", String(total || 1));
+  card.progress.setAttribute("aria-valuenow", String(completed));
+  card.progressValue.style.width = `${progressPercent}%`;
+  if (kind === "warning") {
+    card.warning.hidden = false;
+    card.warning.textContent = String(message || "").trim();
+  }
+  elements.transcript.append(card.article);
+  scheduleActiveChatSnapshotPersist();
+  scrollTranscriptToLatest({ smooth: true });
+}
+
+function setRecordedFlowRunActive(active) {
+  recordedFlowRunActive = active === true;
+  syncTranslationSensitiveControls();
+  syncMessageComposer();
+  renderChatSessionList();
+}
+
 const recordedFlowPanel = createRecordedFlowPanel({
   confirmAction: requestChatConfirmation,
+  prepareFlowRun: startRecordedFlowChatSession,
+  onFlowRunStateChange: setRecordedFlowRunActive,
+  reportFlowEvent: renderRecordedFlowEvent,
   sendRuntime,
-  runAgentFlow: (flow, prompt) => sendText(prompt, {
+  runAgentFlow: (flow, prompt, { onComplete } = {}) => sendText(prompt, {
     displayTextOverride: `Run saved flow “${flow.name}”`,
+    onAgentTaskComplete: onComplete,
+    remember: false,
+    render: false,
   }),
   setStatus: (message) => {
     elements.statusLine.textContent = message;

@@ -36,10 +36,14 @@ import {
   MAX_SEMANTIC_ANCHORS,
 } from "./semantic-anchor-context.js";
 import { createFlowRecorder } from "./flow-recorder.js";
-import { EXTENSION_EVENTS } from "../core/extension-config.js";
+import { executeRecordedFlowStep } from "./recorded-flow-replay.js";
+import {
+  EXTENSION_EVENTS,
+  PAGE_CONTROLLER_PROTOCOL_VERSION,
+} from "../core/extension-config.js";
 
-const CONTENT_REQUEST_SOURCE = "lumi-page-agent-service";
-const GLOBAL_KEY = "__LUMI_PAGE_AGENT_CONTROLLER__";
+const CONTENT_REQUEST_SOURCE = `lumi-page-agent-service-v${PAGE_CONTROLLER_PROTOCOL_VERSION}`;
+const GLOBAL_KEY = `__LUMI_PAGE_AGENT_CONTROLLER_V${PAGE_CONTROLLER_PROTOCOL_VERSION}__`;
 const HIGHLIGHT_STYLE_ID = "lumi-page-agent-highlight-preference";
 const CLICK_EFFECT_STYLE_ID = "lumi-page-agent-click-effect-preference";
 export const FAST_PAGE_STATE_MAX_CHARACTERS = 160000;
@@ -565,6 +569,7 @@ if (!globalThis[GLOBAL_KEY]) {
       return {
         success: true,
         ready: true,
+        protocolVersion: PAGE_CONTROLLER_PROTOCOL_VERSION,
         visualPreferences: runtime.visualPreferences,
         mediaElementAudioPrepared: mediaElementAudio.isPrepared(),
       };
@@ -606,6 +611,36 @@ if (!globalThis[GLOBAL_KEY]) {
 
     if (tool === "bridge_flow_record_stop") {
       return flowRecorder.stop();
+    }
+
+    if (tool === "bridge_flow_replay_step") {
+      const replayStep = args.step || {};
+      const replayTarget = replayStep.target || {};
+      const replayLog = {
+        action: String(replayStep.action || ""),
+        name: String(replayTarget.name || replayTarget.label || "").slice(0, 160),
+        protocolVersion: PAGE_CONTROLLER_PROTOCOL_VERSION,
+        selector: String(replayTarget.selector || "").slice(0, 240),
+      };
+      console.debug("[LumiFlowReplay] start", JSON.stringify(replayLog));
+      try {
+        const result = await executeRecordedFlowStep(replayStep, {
+          confirmed: args.confirmed === true,
+          timeoutMs: args.timeoutMs,
+        });
+        console.debug("[LumiFlowReplay] success", JSON.stringify(replayLog));
+        return {
+          ...result,
+          replayProtocolVersion: PAGE_CONTROLLER_PROTOCOL_VERSION,
+          verifiedDirectReplay: true,
+        };
+      } catch (error) {
+        console.error("[LumiFlowReplay] failed", JSON.stringify({
+          ...replayLog,
+          error: error instanceof Error ? error.message : "Direct replay failed.",
+        }));
+        throw error;
+      }
     }
 
     const pageController = getController();

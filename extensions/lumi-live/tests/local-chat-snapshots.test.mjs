@@ -52,7 +52,7 @@ test("wires IndexedDB snapshots into full transcript replay and local-only stora
   assert.match(panelController, /transcriptHtml:\s*createTranscriptSnapshotHtml\(\)/);
   assert.match(panelController, /data-transient-video-transcript/);
   assert.match(panelController, /transientTranscript\.remove\(\)/);
-  assert.match(panelController, /taskHistory:\s*taskOrchestrator\.history/);
+  assert.match(panelController, /taskHistory:\s*filterTaskTranscriptHistory\(/);
   assert.match(panelController, /restoreActiveChatSessionSnapshot/);
   assert.match(panelController, /attachRestoredTranscriptDisclosures/);
   assert.match(taskView, /const hydrate = \(history = \[\]\)/);

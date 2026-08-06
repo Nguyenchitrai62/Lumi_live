@@ -41,10 +41,17 @@ function attributeSelectorValue(value) {
   return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+function isLikelyDynamicElementId(value) {
+  const id = String(value || "");
+  return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(id)
+    || /^(?:react-select|headlessui|radix|mui|ember|mat-input|generated)[-_:]/i.test(id)
+    || /[-_:]\d{5,}$/.test(id);
+}
+
 function stableSelector(element) {
   const testId = element.getAttribute("data-testid");
   if (testId) return `[data-testid="${attributeSelectorValue(testId)}"]`;
-  if (element.id) return `#${CSS.escape(element.id)}`;
+  if (element.id && !isLikelyDynamicElementId(element.id)) return `#${CSS.escape(element.id)}`;
   const name = element.getAttribute("name");
   if (name) {
     const selector = `${element.tagName.toLowerCase()}[name="${attributeSelectorValue(name)}"]`;

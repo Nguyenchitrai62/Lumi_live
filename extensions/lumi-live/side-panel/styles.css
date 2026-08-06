@@ -296,7 +296,8 @@ body.petals-off .petal-field { opacity: 0; }
 .flow-import-review-item.is-conflict .flow-import-review-badge { color: var(--danger); background: rgba(180,72,96,.13); }
 .flow-import-resolution { display: grid; gap: 6px; }
 .flow-import-resolution[hidden], .flow-import-rename[hidden], .flow-import-error[hidden] { display: none; }
-.flow-import-resolution select, .flow-import-rename { width: 100%; min-height: 38px; border: 1px solid var(--line-strong); border-radius: 9px; padding: 0 9px; color: var(--ink); background: var(--surface); font-size: 10.5px; }
+.flow-import-rename { width: 100%; min-height: 38px; border: 1px solid var(--line-strong); border-radius: 9px; padding: 0 9px; color: var(--ink); background: var(--surface); font-size: 10.5px; }
+.flow-import-review-item.is-ready .flow-import-rename { border-color: rgba(47,148,116,.62); background: rgba(245,255,251,.96); }
 .flow-import-error { color: var(--danger); font-size: 9.5px; font-weight: 750; line-height: 1.4; }
 .flow-import-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
 .flow-import-dialog > footer > span { color: var(--muted); font-size: 9.5px; font-weight: 750; }
@@ -311,6 +312,59 @@ body.petals-off .petal-field { opacity: 0; }
 .message-content:not(.markdown-body) { white-space: pre-wrap; }
 .message-lumi { border-bottom-left-radius: 5px; background: rgba(255, 255, 255, .97); }
 .message-lumi span { color: var(--lavender-deep); }
+.message-flow-notice { width: min(96%, 560px); }
+.message-flow-notice.is-error { border-color: rgba(185, 48, 62, .5); color: #7d1f2b; background: rgba(255, 239, 241, .98); }
+.message-flow-notice.is-error span { color: #a12635; }
+.message-flow-notice.is-info { border-color: rgba(91, 73, 164, .42); background: rgba(246, 243, 255, .98); }
+.message-flow-run { width: min(96%,560px); border-color: rgba(91,73,164,.3); background: rgba(250,248,255,.98); transition: border-color var(--ui-motion-fast) ease, background var(--ui-motion-fast) ease; }
+.message-flow-run > span:first-child { margin-bottom: 7px; }
+.message-flow-run .message-content { display: grid; gap: 8px; }
+.flow-run-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.flow-run-title { min-width: 0; overflow: hidden; color: var(--ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.message-flow-run .flow-run-state { display: inline-flex; flex: 0 0 auto; align-items: center; min-height: 21px; margin: 0; border-radius: 999px; padding: 0 8px; color: var(--lavender-deep); background: rgba(111,84,187,.1); font-size: 8.5px; font-weight: 950; letter-spacing: .03em; }
+.flow-run-detail { color: var(--ink); font-size: 11px !important; line-height: 1.45 !important; }
+.flow-run-progress { position: relative; height: 5px; overflow: hidden; border-radius: 999px; background: rgba(91,73,164,.12); }
+.flow-run-progress > i { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg,#765bc5,#5e9fc7); transition: width 160ms ease; }
+.message-flow-run[data-state="running"] .flow-run-progress::after,
+.message-flow-run[data-state="recovering"] .flow-run-progress::after { content: ""; position: absolute; inset: 0; width: 34%; background: linear-gradient(90deg,transparent,rgba(255,255,255,.72),transparent); transform: translateX(-120%); animation: flow-run-scan 1.25s ease-in-out infinite; }
+.flow-run-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.flow-run-step-list { display: grid; gap: 5px; margin: 0; padding: 1px 3px 1px 0; list-style: none; }
+.flow-task-log-step-list { max-height: none; overflow: visible; pointer-events: auto; touch-action: auto; }
+.message-flow-task-log { border-color: rgba(91,73,164,.38); background: rgba(248,246,255,.98); }
+.message-flow-task-log .flow-run-step { align-items: start; }
+.message-flow-task-log .flow-run-step-copy strong,
+.message-flow-task-log .flow-run-step-copy small { overflow: visible; text-overflow: clip; white-space: normal; }
+.flow-run-step { display: grid; grid-template-columns: 24px minmax(0,1fr) auto; align-items: center; gap: 8px; min-height: 38px; border: 1px solid rgba(91,73,164,.13); border-radius: 10px; padding: 5px 7px; background: rgba(255,255,255,.62); transition: border-color var(--ui-motion-fast) ease, background var(--ui-motion-fast) ease; }
+.flow-run-step[hidden] { display: none; }
+.message-flow-run .flow-run-step-number { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; margin: 0; border-radius: 7px; color: var(--lavender-deep); background: rgba(111,84,187,.1); font-size: 9px; font-weight: 950; }
+.message-flow-run .flow-run-step-copy { display: grid; min-width: 0; gap: 1px; margin: 0; }
+.flow-run-step-copy strong { overflow: hidden; color: var(--ink); font-size: 10px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.flow-run-step-copy small { overflow: hidden; color: var(--muted); font-size: 8.5px; font-weight: 750; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.message-flow-run .flow-run-step-badge { display: inline-flex; align-items: center; min-height: 19px; margin: 0; border-radius: 999px; padding: 0 7px; color: var(--muted); background: rgba(91,73,164,.07); font-size: 7.5px; font-weight: 950; letter-spacing: .02em; }
+.flow-run-step[data-state="running"] { border-color: rgba(91,73,164,.42); background: rgba(244,240,255,.9); }
+.flow-run-step[data-state="running"] .flow-run-step-number { color: #fff; background: var(--lavender-deep); }
+.flow-run-step[data-state="completed"] { border-color: rgba(47,148,116,.25); background: rgba(241,252,247,.78); }
+.flow-run-step[data-state="completed"] .flow-run-step-number,
+.flow-run-step[data-state="recovered"] .flow-run-step-number { color: #fff; background: #2f9474; }
+.flow-run-step[data-state="completed"] .flow-run-step-badge { color: #276d57; background: rgba(47,148,116,.12); }
+.flow-run-step[data-state="recovering"] { border-color: rgba(210,138,48,.48); background: rgba(255,248,235,.9); }
+.flow-run-step[data-state="recovering"] .flow-run-step-badge { color: #815016; background: rgba(210,138,48,.14); }
+.flow-run-step[data-state="recovered"] { border-color: rgba(47,148,116,.38); background: rgba(236,251,245,.9); }
+.flow-run-step[data-state="recovered"] .flow-run-step-badge { color: #276d57; background: rgba(47,148,116,.14); }
+.flow-run-step[data-state="failed"] { border-color: rgba(185,48,62,.5); background: rgba(255,239,241,.9); }
+.flow-run-step[data-state="failed"] .flow-run-step-number { color: #fff; background: #b9303e; }
+.flow-run-step[data-state="failed"] .flow-run-step-badge { color: #a12635; background: rgba(185,48,62,.12); }
+.message-flow-run :is(.flow-run-count,.flow-run-mode) { display: block; margin: 0; color: var(--muted); font-size: 9px; font-weight: 800; }
+.flow-run-warning { border-left: 3px solid #d28a30; padding-left: 8px; color: #815016; font-size: 10px !important; line-height: 1.45 !important; }
+.message-flow-run[data-state="recovering"] { border-color: rgba(210,138,48,.48); background: rgba(255,249,238,.98); }
+.message-flow-run[data-state="recovering"] .flow-run-state { color: #815016; background: rgba(210,138,48,.14); }
+.message-flow-run[data-state="success"] { border-color: rgba(47,148,116,.45); background: rgba(242,253,248,.98); }
+.message-flow-run[data-state="success"] .flow-run-state { color: #276d57; background: rgba(47,148,116,.13); }
+.message-flow-run[data-state="success"] .flow-run-progress > i { background: #2f9474; }
+.message-flow-run[data-state="error"] { border-color: rgba(185,48,62,.5); background: rgba(255,239,241,.98); }
+.message-flow-run[data-state="error"] .flow-run-state { color: #a12635; background: rgba(185,48,62,.12); }
+.message-flow-run[data-state="error"] .flow-run-progress > i { background: #b9303e; }
+@keyframes flow-run-scan { 0% { transform: translateX(-120%); } 68%,100% { transform: translateX(360%); } }
 .message-user { margin-left: auto; border-color: transparent; border-bottom-right-radius: 5px; color: #fff; background: linear-gradient(135deg, #6d54bb, #543c9b); }
 .message-user span { color: rgba(255,255,255,.84); }
 .message .message-meta { display: flex; justify-content: flex-end; gap: 6px; margin-top: 7px; padding-top: 5px; border-top: 1px solid color-mix(in srgb, var(--line) 62%, transparent); }
@@ -696,6 +750,22 @@ html.is-flow-import-dragging .image-drop-hint { display: none; }
   .badge-live { color: #92ddc4; background: #253f38; }
   .badge-error { color: #f4a9b9; background: #472a34; }
   .message-lumi, .message-form { background: rgba(41, 34, 55, .96); }
+  .message-flow-notice.is-error { color: #ffd6df; border-color: rgba(240, 112, 139, .62); background: rgba(83, 35, 49, .97); }
+  .message-flow-notice.is-error span { color: #ff9eb4; }
+  .message-flow-notice.is-info { border-color: rgba(173, 151, 255, .48); background: rgba(54, 45, 78, .97); }
+  .message-flow-run { border-color: rgba(173,151,255,.42); background: rgba(48,40,67,.97); }
+  .message-flow-task-log { border-color: rgba(173,151,255,.48); background: rgba(43,36,60,.98); }
+  .message-flow-run[data-state="recovering"] { border-color: rgba(231,168,83,.5); background: rgba(75,55,34,.97); }
+  .message-flow-run[data-state="success"] { border-color: rgba(85,190,153,.5); background: rgba(31,65,53,.97); }
+  .message-flow-run[data-state="error"] { border-color: rgba(240,112,139,.62); background: rgba(83,35,49,.97); }
+  .flow-run-step { border-color: rgba(173,151,255,.2); background: rgba(31,26,42,.38); }
+  .flow-run-step[data-state="running"] { border-color: rgba(173,151,255,.52); background: rgba(91,73,164,.2); }
+  .flow-run-step[data-state="completed"],
+  .flow-run-step[data-state="recovered"] { border-color: rgba(85,190,153,.38); background: rgba(31,65,53,.6); }
+  .flow-run-step[data-state="recovering"] { border-color: rgba(231,168,83,.5); background: rgba(75,55,34,.68); }
+  .flow-run-step[data-state="failed"] { border-color: rgba(240,112,139,.62); background: rgba(83,35,49,.68); }
+  .flow-run-warning { color: #f1c27d; }
+  .flow-import-review-item.is-ready .flow-import-rename { border-color: rgba(85,190,153,.62); background: rgba(31,65,53,.96); }
   .message-form button:disabled { color: #aaa0b7; background: #3a3346; }
   .message-form .mute-control { color: var(--ink); border-color: var(--line); background: var(--surface-strong); }
   .message-form .mute-control[aria-pressed="true"] { color: var(--danger); border-color: rgba(240,154,176,.34); background: rgba(240,154,176,.1); }

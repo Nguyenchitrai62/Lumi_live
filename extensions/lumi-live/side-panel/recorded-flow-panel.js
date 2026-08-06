@@ -1,5 +1,6 @@
 import {
   buildRecordedFlowAgentPrompt,
+  buildRecordedFlowHybridReplayPlan,
   createRecordedFlowsExport,
   RECORDED_STEP_GROUP_ACTION,
   recordedFlowNameKey,
@@ -105,11 +106,148 @@ export function applyRecordedStepPromptEditorView({
   return true;
 }
 
+function normalizedStepIndex(flow, value) {
+  const maximum = Math.max(0, (flow?.steps?.length || 1) - 1);
+  const index = Number(value);
+  return Number.isInteger(index) ? Math.min(maximum, Math.max(0, index)) : 0;
+}
+
+export function recordedFlowReplayFailureNotice(flow, result = {}) {
+  const stepIndex = normalizedStepIndex(flow, result.resumeStepIndex);
+  const step = flow?.steps?.[stepIndex];
+  const title = String(result.failedStepTitle || "").trim()
+    || (step ? recordedStepTitle(step, stepIndex) : "Recorded action");
+  const action = String(result.failedAction || step?.action || "unknown").trim();
+  const reason = String(result.error || "The recorded action could not be completed.").trim();
+  return `Flow “${flow?.name || "Untitled flow"}” stopped at step ${stepIndex + 1}: ${title}. Lumi could not perform action “${action}”. Reason: ${reason}`;
+}
+
+export function recordedFlowAgentUnavailableNotice(flow, stepIndex = 0, detail = "") {
+  const index = normalizedStepIndex(flow, stepIndex);
+  const reason = String(detail || "Lumi chat is not connected, is busy, or could not accept the flow request.").trim();
+  return `Flow “${flow?.name || "Untitled flow"}” could not start agent processing for step ${index + 1}. ${reason}`;
+}
+
+export function recordedFlowAgentStepFailureNotice(flow, stepIndex = 0, completion = {}) {
+  const index = normalizedStepIndex(flow, stepIndex);
+  const step = flow?.steps?.[index];
+  const reason = String(
+    completion.result
+      || completion.error
+      || "The agent did not report a verified successful completion.",
+  ).trim();
+  return `Flow “${flow?.name || "Untitled flow"}” stopped at step ${index + 1}: ${step ? recordedStepTitle(step, index) : "Agent step"}. Reason: ${reason}`;
+}
+
+export function resolveRecordedFlowAgentCompletion(
+  history,
+  turnSequence,
+  fallback = {},
+) {
+  const events = Array.isArray(history) ? history : [];
+  const started = [...events].reverse().find((event) => (
+    event?.type === "task_started"
+    && event.turnSequence === turnSequence
+  ));
+  const done = started
+    ? [...events].reverse().find((event) => (
+      event?.type === "task_done"
+      && event.taskId === started.taskId
+    ))
+    : null;
+  if (done && fallback.force !== true) {
+    return {
+      success: done.success === true,
+      result: done.result,
+      evidence: done.evidence,
+      reason: done.reason,
+      taskId: done.taskId,
+    };
+  }
+  return {
+    success: false,
+    result: fallback.result
+      || "The agent turn ended without a verified structured completion.",
+    reason: fallback.reason || "missing_structured_completion",
+  };
+}
+
+export function renameRecordedFlowImportItem(item, name) {
+  item.name = String(name ?? "");
+  item.action = "rename";
+  item.existingFlowId = "";
+  item.selected = true;
+  return item;
+}
+
+export function selectRecordedFlowImportItem(item, selected) {
+  const checked = selected === true;
+  if (checked && !item.ready && item.existingMatches?.length) {
+    item.action = "overwrite";
+    item.existingFlowId = item.existingMatches[0].id;
+  } else if (!checked && item.action === "overwrite") {
+    item.action = "";
+    item.existingFlowId = "";
+  }
+  item.selected = checked;
+  return item;
+}
+
+export function validateRecordedFlowImportReview(items, savedFlows) {
+  const reviewItems = Array.isArray(items) ? items : [];
+  const storedFlows = Array.isArray(savedFlows) ? savedFlows : [];
+  const occupiedNames = new Set(storedFlows.map((flow) => recordedFlowNameKey(flow.name)));
+  const overwrittenFlowIds = new Set();
+  for (const item of reviewItems) {
+    item.ready = false;
+    item.error = "";
+    if (item.action === "overwrite") {
+      const existingFlow = storedFlows.find(
+        (flow) => flow.id === item.existingFlowId,
+      );
+      if (!existingFlow || overwrittenFlowIds.has(existingFlow.id)) {
+        item.error = "Choose a saved flow that is not already being overwritten.";
+      } else if (recordedFlowNameKey(existingFlow.name) !== recordedFlowNameKey(item.flow.name)) {
+        item.error = "The overwrite target must have the same flow name.";
+      } else {
+        overwrittenFlowIds.add(existingFlow.id);
+        item.ready = true;
+      }
+    } else if (item.action === "rename") {
+      const name = String(item.name || "");
+      const trimmedName = name.trim();
+      const nameKey = recordedFlowNameKey(trimmedName);
+      if (!trimmedName) item.error = "Enter a new flow name.";
+      else if (occupiedNames.has(nameKey)) item.error = "This flow name is already in use.";
+      else {
+        occupiedNames.add(nameKey);
+        item.ready = true;
+      }
+    } else if (item.action === "add") {
+      const nameKey = recordedFlowNameKey(item.flow.name);
+      if (occupiedNames.has(nameKey)) item.error = "This flow name is already in use.";
+      else {
+        occupiedNames.add(nameKey);
+        item.ready = true;
+      }
+    } else {
+      item.error = item.existingMatches.length
+        ? `Enter a unique name, or tick this flow to overwrite “${item.existingMatches[0].name}”.`
+        : "Enter a unique name before importing this flow.";
+    }
+    if (!item.ready) item.selected = false;
+  }
+  return reviewItems;
+}
+
 export function createRecordedFlowPanel({
   documentObject = document,
   sendRuntime,
   runAgentFlow,
+  prepareFlowRun = () => Promise.resolve(true),
+  onFlowRunStateChange = () => {},
   setStatus,
+  reportFlowEvent = () => {},
   confirmAction = () => Promise.resolve(false),
   downloadFlows = (selectedFlows) => downloadRecordedFlowsExport(selectedFlows, {
     documentObject,
@@ -150,7 +288,9 @@ export function createRecordedFlowPanel({
   let draft = null;
   let flows = [];
   let busy = false;
+  let activeFlowRun = null;
   let initialized = false;
+  let flowRunSequence = 0;
   const promptTimers = new Map();
   const expandedPromptIds = new Set();
   const collapsedPromptIds = new Set();
@@ -161,6 +301,10 @@ export function createRecordedFlowPanel({
   let importSourceText = "";
   let flowImportDragDepth = 0;
   let nameTimerId = null;
+
+  function controlsAreLocked() {
+    return busy || Boolean(activeFlowRun);
+  }
 
   function setPanelOpen(open) {
     if (!open) {
@@ -279,7 +423,7 @@ export function createRecordedFlowPanel({
     promptButton.className = "flow-step-add-prompt";
     promptButton.dataset.flowStepAction = "prompt";
     promptButton.dataset.stepId = step.id;
-    promptButton.disabled = busy;
+    promptButton.disabled = controlsAreLocked();
     promptButton.setAttribute("aria-expanded", String(promptExpanded));
     promptButton.setAttribute("aria-controls", `flow-step-prompt-${step.id}`);
     promptButton.textContent = promptExpanded
@@ -292,7 +436,7 @@ export function createRecordedFlowPanel({
     deleteButton.className = "flow-step-delete";
     deleteButton.dataset.flowStepAction = "delete";
     deleteButton.dataset.stepId = step.id;
-    deleteButton.disabled = busy;
+    deleteButton.disabled = controlsAreLocked();
     deleteButton.setAttribute("aria-label", "Delete step");
     deleteButton.title = "Delete step";
     deleteButton.textContent = "×";
@@ -312,7 +456,7 @@ export function createRecordedFlowPanel({
       : "Optional: tell the agent how to adapt this step…";
     prompt.value = step.prompt || "";
     prompt.dataset.flowStepPrompt = step.id;
-    prompt.disabled = busy;
+    prompt.disabled = controlsAreLocked();
     promptLabel.append(promptTitle, prompt);
     promptLabel.hidden = !promptExpanded;
     promptLabel.setAttribute("aria-hidden", String(!promptExpanded));
@@ -344,7 +488,7 @@ export function createRecordedFlowPanel({
       : hasDraft
         ? "Start a new recording"
         : "Start recording";
-    elements.record.disabled = busy;
+    elements.record.disabled = controlsAreLocked();
     elements.recordingStatus.dataset.state = recording ? "recording" : hasDraft ? "ready" : "empty";
     elements.recordingStatus.textContent = recording
       ? "Recording the selected browser tab. New actions are saved automatically."
@@ -357,9 +501,9 @@ export function createRecordedFlowPanel({
     for (const prompt of elements.stepList.querySelectorAll("[data-flow-step-prompt]")) {
       resizePrompt(prompt);
     }
-    elements.name.disabled = busy || !hasDraft;
+    elements.name.disabled = controlsAreLocked() || !hasDraft;
     if (documentObject.activeElement !== elements.name) elements.name.value = draft?.name || "";
-    elements.runDraft.disabled = busy || recording || !steps.length;
+    elements.runDraft.disabled = controlsAreLocked() || recording || !steps.length;
     restorePromptFocus(focus);
   }
 
@@ -386,7 +530,7 @@ export function createRecordedFlowPanel({
       button.dataset.flowId = flow.id;
       button.className = className;
       button.textContent = label;
-      button.disabled = busy || draft?.recording;
+      button.disabled = controlsAreLocked() || draft?.recording;
       actions.append(button);
     }
     item.append(copy, actions);
@@ -396,10 +540,10 @@ export function createRecordedFlowPanel({
   function renderLibrary() {
     elements.libraryEmpty.hidden = flows.length > 0;
     elements.libraryList.replaceChildren(...flows.map(createLibraryItem));
-    elements.importOpen.disabled = busy;
-    elements.importDropZone.disabled = busy;
-    elements.importFile.disabled = busy;
-    elements.exportOpen.disabled = busy || flows.length === 0;
+    elements.importOpen.disabled = controlsAreLocked();
+    elements.importDropZone.disabled = controlsAreLocked();
+    elements.importFile.disabled = controlsAreLocked();
+    elements.exportOpen.disabled = controlsAreLocked() || flows.length === 0;
     if (elements.exportDialog.open) renderExportSelection();
     if (elements.importDialog.open) updateImportReviewControls();
   }
@@ -467,64 +611,8 @@ export function createRecordedFlowPanel({
     setStatus(`Exported ${selectedFlows.length} saved ${selectedFlows.length === 1 ? "flow" : "flows"}.`);
   }
 
-  function suggestImportedFlowName(flowName, currentItemId) {
-    const occupiedNames = new Set(importSavedFlows.map((flow) => recordedFlowNameKey(flow.name)));
-    for (const item of importReviewItems) {
-      if (item.flow.id === currentItemId || item.action === "overwrite") continue;
-      const candidateName = item.action === "rename" ? item.name : item.flow.name;
-      if (candidateName) occupiedNames.add(recordedFlowNameKey(candidateName));
-    }
-    let suffix = 1;
-    let candidate = `${flowName} (imported)`;
-    while (occupiedNames.has(recordedFlowNameKey(candidate))) {
-      suffix += 1;
-      candidate = `${flowName} (imported ${suffix})`;
-    }
-    return candidate.slice(0, 120);
-  }
-
   function validateImportReview() {
-    const occupiedNames = new Set(importSavedFlows.map((flow) => recordedFlowNameKey(flow.name)));
-    const overwrittenFlowIds = new Set();
-    for (const item of importReviewItems) {
-      item.ready = false;
-      item.error = "";
-      if (item.action === "overwrite") {
-        const existingFlow = importSavedFlows.find(
-          (flow) => flow.id === item.existingFlowId,
-        );
-        if (!existingFlow || overwrittenFlowIds.has(existingFlow.id)) {
-          item.error = "Choose a saved flow that is not already being overwritten.";
-        } else if (recordedFlowNameKey(existingFlow.name) !== recordedFlowNameKey(item.flow.name)) {
-          item.error = "The overwrite target must have the same flow name.";
-        } else {
-          overwrittenFlowIds.add(existingFlow.id);
-          item.ready = true;
-        }
-      } else if (item.action === "rename") {
-        const name = String(item.name || "").trim();
-        const nameKey = recordedFlowNameKey(name);
-        if (!name) item.error = "Enter a new flow name.";
-        else if (occupiedNames.has(nameKey)) item.error = "This flow name is already in use.";
-        else {
-          item.name = name;
-          occupiedNames.add(nameKey);
-          item.ready = true;
-        }
-      } else if (item.action === "add") {
-        const nameKey = recordedFlowNameKey(item.flow.name);
-        if (occupiedNames.has(nameKey)) item.error = "This flow name is already in use.";
-        else {
-          occupiedNames.add(nameKey);
-          item.ready = true;
-        }
-      } else {
-        item.error = item.existingMatches.length
-          ? "Select this red flow to overwrite, or choose Rename."
-          : "Rename this flow before selecting it for import.";
-      }
-      if (!item.ready) item.selected = false;
-    }
+    validateRecordedFlowImportReview(importReviewItems, importSavedFlows);
   }
 
   function createImportReviewRow(item) {
@@ -550,32 +638,16 @@ export function createRecordedFlowPanel({
 
     const resolution = documentObject.createElement("div");
     resolution.className = "flow-import-resolution";
-    const select = documentObject.createElement("select");
-    select.dataset.flowImportResolution = item.flow.id;
-    select.setAttribute("aria-label", `Resolve ${item.flow.name}`);
-    const unresolved = documentObject.createElement("option");
-    unresolved.value = "";
-    unresolved.textContent = "Choose how to resolve this name conflict";
-    select.append(unresolved);
-    for (const existingFlow of item.existingMatches) {
-      const option = documentObject.createElement("option");
-      option.value = `overwrite:${existingFlow.id}`;
-      option.textContent = `Overwrite saved flow · ${formatUpdatedAt(existingFlow.updatedAt)}`;
-      select.append(option);
-    }
-    const renameOption = documentObject.createElement("option");
-    renameOption.value = "rename";
-    renameOption.textContent = "Import with a different name";
-    select.append(renameOption);
     const rename = documentObject.createElement("input");
     rename.type = "text";
     rename.className = "flow-import-rename";
     rename.maxLength = 120;
     rename.dataset.flowImportRename = item.flow.id;
     rename.setAttribute("aria-label", `New name for ${item.flow.name}`);
+    rename.placeholder = "Enter a unique name, or tick above to overwrite";
     const error = documentObject.createElement("small");
     error.className = "flow-import-error";
-    resolution.append(select, rename, error);
+    resolution.append(rename, error);
     row.append(main, resolution);
     importReviewRows.set(item.flow.id, {
       badge,
@@ -584,7 +656,6 @@ export function createRecordedFlowPanel({
       rename,
       resolution,
       row,
-      select,
     });
     return row;
   }
@@ -600,23 +671,19 @@ export function createRecordedFlowPanel({
       controls.row.classList.toggle("is-ready", item.ready && !willOverwrite);
       controls.checkbox.checked = item.selected;
       controls.checkbox.disabled = busy || (!item.ready && !item.existingMatches.length);
-      controls.select.value = item.action === "overwrite"
-        ? `overwrite:${item.existingFlowId}`
-        : item.action === "rename"
-          ? "rename"
-          : "";
-      controls.select.disabled = busy;
-      controls.rename.hidden = item.action !== "rename";
-      controls.rename.value = item.name;
+      controls.rename.hidden = !item.hadNameConflict;
+      if (controls.rename.value !== item.name) controls.rename.value = item.name;
       controls.rename.disabled = busy;
       controls.resolution.hidden = !item.hadNameConflict;
       controls.error.hidden = item.ready;
       controls.error.textContent = item.error;
       controls.badge.textContent = willOverwrite
-        ? item.selected ? "Will overwrite" : "Overwrite ready"
+        ? "Will overwrite"
         : item.ready
-          ? item.selected ? "Selected" : "Ready"
-          : "Name conflict";
+          ? item.action === "rename"
+            ? item.selected ? "Renamed · selected" : "Renamed · ready"
+            : item.selected ? "Selected" : "Ready"
+          : item.existingMatches.length ? "Name conflict · tick to overwrite" : "Name conflict";
       if (item.selected && item.ready) selectedCount += 1;
     }
     elements.importSelectionCount.textContent = `${selectedCount} ${selectedCount === 1 ? "flow" : "flows"} selected`;
@@ -699,7 +766,7 @@ export function createRecordedFlowPanel({
     renderImportReview();
     if (!elements.importDialog.open) elements.importDialog.showModal();
     const firstControl = elements.importList.querySelector(
-      "[data-flow-import-select]:not(:disabled), [data-flow-import-resolution]",
+      "[data-flow-import-rename], [data-flow-import-select]:not(:disabled)",
     );
     firstControl?.focus({ preventScroll: true });
   }
@@ -711,7 +778,7 @@ export function createRecordedFlowPanel({
         action: item.action,
         existingFlowId: item.existingFlowId,
         flowId: item.flow.id,
-        name: item.action === "rename" ? item.name : undefined,
+        name: item.action === "rename" ? String(item.name || "").trim() : undefined,
       }));
     if (!resolutions.length) throw new Error("Select at least one reviewed flow to import.");
     const result = await sendRuntime("flow_record_import", {
@@ -755,6 +822,12 @@ export function createRecordedFlowPanel({
     render();
   }
 
+  function acceptFlowState(result) {
+    if (result && Object.hasOwn(result, "draft")) draft = result.draft || null;
+    if (Array.isArray(result?.flows)) flows = result.flows;
+    return result;
+  }
+
   async function toggleRecording() {
     if (draft?.recording) {
       const result = await sendRuntime("flow_record_stop");
@@ -796,27 +869,384 @@ export function createRecordedFlowPanel({
     let result = await sendRuntime("flow_record_update", {
       name: elements.name.value.trim(),
     });
-    draft = result.draft;
+    acceptFlowState(result);
     for (const prompt of elements.stepList.querySelectorAll("[data-flow-step-prompt]")) {
       result = await sendRuntime("flow_record_update", {
         stepId: prompt.dataset.flowStepPrompt,
         prompt: prompt.value,
       });
-      draft = result.draft;
+      acceptFlowState(result);
     }
   }
 
-  async function runFlow(flow) {
-    const prompt = buildRecordedFlowAgentPrompt(flow);
+  async function freshSavedFlowForRun(flow) {
+    if (draft?.flowId === flow.id) await flushEditorChanges();
+    const state = acceptFlowState(await sendRuntime("flow_record_status"));
+    const freshFlow = state.flows?.find((candidate) => candidate.id === flow.id);
+    if (!freshFlow) throw new Error(`Saved flow “${flow.name}” is no longer available.`);
+    return freshFlow;
+  }
+
+  function publishFlowEvent(kind, message, flow, run = null, details = {}) {
+    try {
+      reportFlowEvent({
+        flow,
+        kind,
+        message,
+        runId: run?.id || "",
+        stepIndex: Number.isInteger(details.stepIndex)
+          ? details.stepIndex
+          : run?.currentStepIndex || 0,
+        completedSteps: Number.isInteger(details.completedSteps)
+          ? details.completedSteps
+          : run?.completedSteps || 0,
+        totalSteps: run?.flow?.steps?.length || flow?.steps?.length || 0,
+        phase: details.phase || "",
+        stepState: details.stepState || "",
+      });
+    } catch {
+      // Status text below remains the minimum visible fallback.
+    }
+  }
+
+  async function startAgentFlow(
+    run,
+    prompt,
+    stepIndex,
+    unavailableDetail = "",
+    onComplete = () => {},
+  ) {
+    const { flow } = run;
+    let started = false;
+    let failureDetail = unavailableDetail;
+    try {
+      started = await runAgentFlow(flow, prompt, { onComplete });
+    } catch (error) {
+      failureDetail = error instanceof Error ? error.message : unavailableDetail;
+    }
+    if (started) {
+      setStatus(`Agent is processing “${flow.name}” from step ${stepIndex + 1}.`);
+      publishFlowEvent(
+        "progress",
+        `Step ${stepIndex + 1} of ${flow.steps.length} · Agent processing`,
+        flow,
+        run,
+        { phase: "agent", stepIndex, stepState: "running" },
+      );
+      return true;
+    }
+    const notice = recordedFlowAgentUnavailableNotice(flow, stepIndex, failureDetail);
+    setStatus(notice);
+    publishFlowEvent("error", notice, flow, run, {
+      phase: "agent",
+      stepIndex,
+      stepState: "failed",
+    });
     setPanelOpen(false);
-    const started = await runAgentFlow(flow, prompt);
-    if (!started) {
-      setStatus("Lumi chat must be connected and idle before running a saved flow.");
+    return false;
+  }
+
+  function finishFlowRun(run) {
+    if (activeFlowRun !== run) return;
+    activeFlowRun = null;
+    try {
+      onFlowRunStateChange(false, run.flow);
+    } catch {
+      // Flow controls still unlock even if the host UI callback fails.
+    }
+    render();
+  }
+
+  function stopFlowRun(run, stepIndex, completion) {
+    if (activeFlowRun !== run) return;
+    const notice = recordedFlowAgentStepFailureNotice(run.flow, stepIndex, completion);
+    setStatus(notice);
+    publishFlowEvent("error", notice, run.flow, run, {
+      phase: "agent",
+      stepIndex,
+      stepState: "failed",
+    });
+    setPanelOpen(false);
+    finishFlowRun(run);
+  }
+
+  function stopDirectFlowRun(run, result) {
+    if (activeFlowRun !== run) return false;
+    const stepIndex = normalizedStepIndex(run.flow, result?.resumeStepIndex);
+    const notice = recordedFlowReplayFailureNotice(run.flow, result);
+    setStatus(notice);
+    publishFlowEvent("error", notice, run.flow, run, {
+      completedSteps: run.completedSteps,
+      phase: "direct",
+      stepIndex,
+      stepState: "failed",
+    });
+    setPanelOpen(false);
+    finishFlowRun(run);
+    return false;
+  }
+
+  function segmentAtStep(plan, stepIndex) {
+    return plan.segments.find((segment) => (
+      stepIndex >= segment.startStepIndex
+      && stepIndex < segment.endStepIndex
+    )) || null;
+  }
+
+  function stopUnexpectedFlowRun(run, stepIndex, error) {
+    const index = normalizedStepIndex(run.flow, stepIndex);
+    const detail = error instanceof Error ? error.message : "Hybrid replay could not continue.";
+    if (segmentAtStep(run.plan, index)?.type === "direct") {
+      return stopDirectFlowRun(run, {
+        error: detail,
+        resumeStepIndex: index,
+      });
+    }
+    stopFlowRun(run, index, { error: detail });
+    return false;
+  }
+
+  function createDirectSegmentFlow(flow, startStepIndex, endStepIndex) {
+    return {
+      ...flow,
+      startUrl: startStepIndex === 0 ? flow.startUrl : "",
+      startTitle: startStepIndex === 0 ? flow.startTitle : "",
+      steps: flow.steps.slice(startStepIndex, endStepIndex),
+    };
+  }
+
+  function continueAfterAgent(run, stepIndex, completion) {
+    if (activeFlowRun !== run) return;
+    if (completion?.success !== true) {
+      stopFlowRun(run, stepIndex, completion);
+      return;
+    }
+    run.completedSteps = Math.max(run.completedSteps, stepIndex + 1);
+    publishFlowEvent(
+      "progress",
+      `Completed prompted step ${stepIndex + 1}.`,
+      run.flow,
+      run,
+      {
+        completedSteps: stepIndex + 1,
+        phase: "agent",
+        stepIndex,
+        stepState: "completed",
+      },
+    );
+    setStatus(`Agent completed step ${stepIndex + 1}; continuing direct replay…`);
+    void continueFlowRun(run, stepIndex + 1).catch((error) => {
+      stopUnexpectedFlowRun(run, stepIndex + 1, error);
+    });
+  }
+
+  async function startSingleAgentStep(run, stepIndex) {
+    const prompt = buildRecordedFlowAgentPrompt(run.flow, {
+      startStepIndex: stepIndex,
+      endStepIndex: stepIndex,
+    });
+    const started = await startAgentFlow(
+      run,
+      prompt,
+      stepIndex,
+      "The prompted step requires Lumi chat, but the agent request could not start.",
+      (completion) => continueAfterAgent(run, stepIndex, completion),
+    );
+    if (!started) finishFlowRun(run);
+    return started;
+  }
+
+  async function continueFlowRun(run, nextStepIndex) {
+    if (activeFlowRun !== run) return false;
+    if (nextStepIndex >= run.flow.steps.length) {
+      run.completedSteps = run.flow.steps.length;
+      const completionNotice = `Completed flow “${run.flow.name}” (${run.flow.steps.length} steps).`;
+      setStatus(completionNotice);
+      publishFlowEvent("success", completionNotice, run.flow, run, {
+        completedSteps: run.flow.steps.length,
+        phase: "complete",
+        stepIndex: Math.max(0, run.flow.steps.length - 1),
+        stepState: "completed-all",
+      });
+      finishFlowRun(run);
+      return true;
+    }
+    run.currentStepIndex = nextStepIndex;
+    run.completedSteps = Math.max(run.completedSteps, nextStepIndex);
+
+    const segment = segmentAtStep(run.plan, nextStepIndex);
+    if (!segment) {
+      throw new Error(`No replay segment exists for step ${nextStepIndex + 1}.`);
+    }
+    if (segment.type === "agent") {
+      setStatus(`Step ${nextStepIndex + 1} has a prompt; the agent will process only this step…`);
+      publishFlowEvent(
+        "progress",
+        `Step ${nextStepIndex + 1} of ${run.flow.steps.length} · Agent prompt`,
+        run.flow,
+        run,
+        { phase: "agent", stepIndex: nextStepIndex, stepState: "running" },
+      );
+      return startSingleAgentStep(run, nextStepIndex);
+    }
+
+    const directFlow = createDirectSegmentFlow(
+      run.flow,
+      nextStepIndex,
+      segment.endStepIndex,
+    );
+    const directRange = nextStepIndex + 1 === segment.endStepIndex
+      ? `step ${nextStepIndex + 1}`
+      : `steps ${nextStepIndex + 1}–${segment.endStepIndex}`;
+    setStatus(`Running ${directRange} of “${run.flow.name}” directly from saved locators…`);
+    publishFlowEvent(
+      "progress",
+      `${directRange[0].toUpperCase()}${directRange.slice(1)} · Direct replay`,
+      run.flow,
+      run,
+      { phase: "direct", stepIndex: nextStepIndex, stepState: "running" },
+    );
+    const directResult = await sendRuntime("flow_record_run_direct", {
+      flow: directFlow,
+      replayContext: {
+        runId: run.id,
+        startStepIndex: nextStepIndex,
+        totalSteps: run.flow.steps.length,
+      },
+    });
+    if (activeFlowRun !== run) return false;
+    const completedDirectSteps = Math.max(
+      0,
+      Number(directResult.completedFlowSteps ?? directResult.completedSteps) || 0,
+    );
+    const completedDirectEnd = Math.min(
+      segment.endStepIndex,
+      nextStepIndex + completedDirectSteps,
+    );
+    run.completedSteps = Math.max(run.completedSteps, completedDirectEnd);
+    for (let completedStepIndex = nextStepIndex;
+      completedStepIndex < completedDirectEnd;
+      completedStepIndex += 1) {
+      run.reportedDirectStepIndexes.add(completedStepIndex);
+      publishFlowEvent(
+        "progress",
+        `Completed step ${completedStepIndex + 1} of ${run.flow.steps.length} directly.`,
+        run.flow,
+        run,
+        {
+          completedSteps: completedStepIndex + 1,
+          phase: "direct",
+          stepIndex: completedStepIndex,
+          stepState: "completed",
+        },
+      );
+    }
+    if (directResult.success && directResult.completed) {
+      return continueFlowRun(run, segment.endStepIndex);
+    }
+
+    const relativeFailureIndex = normalizedStepIndex(
+      directFlow,
+      directResult.resumeStepIndex,
+    );
+    const failedStepIndex = nextStepIndex + relativeFailureIndex;
+    const translatedResult = {
+      ...directResult,
+      resumeStepIndex: failedStepIndex,
+    };
+    return stopDirectFlowRun(run, translatedResult);
+  }
+
+  async function runFlow(flow) {
+    if (activeFlowRun) {
+      setStatus(`Flow “${activeFlowRun.flow.name}” is still running.`);
+      return false;
+    }
+    const plan = buildRecordedFlowHybridReplayPlan(flow);
+    if (!plan.flow || !plan.segments.length) {
+      setStatus(plan.reason || "This recorded flow has no steps to run.");
+      return false;
+    }
+    setStatus(`Opening a new chat for “${plan.flow.name}”…`);
+    let chatPrepared = false;
+    try {
+      chatPrepared = await prepareFlowRun(plan.flow) === true;
+    } catch (error) {
+      setStatus(error instanceof Error
+        ? error.message
+        : "Lumi could not open a new chat for this flow.");
+    }
+    if (!chatPrepared) {
       setPanelOpen(true);
+      return false;
+    }
+    const run = {
+      completedSteps: 0,
+      currentStepIndex: 0,
+      flow: plan.flow,
+      id: `recorded-flow-run-${Date.now()}-${++flowRunSequence}`,
+      plan,
+      reportedDirectStepIndexes: new Set(),
+    };
+    activeFlowRun = run;
+    try {
+      onFlowRunStateChange(true, run.flow);
+    } catch {
+      // The replay remains valid even if the host cannot lock chat navigation.
+    }
+    setPanelOpen(false);
+    const promptedStepCount = plan.segments
+      .filter((segment) => segment.type === "agent")
+      .reduce((total, segment) => total + segment.endStepIndex - segment.startStepIndex, 0);
+    const directStepCount = run.flow.steps.length - promptedStepCount;
+    publishFlowEvent(
+      "start",
+      `Run saved flow “${run.flow.name}” (${run.flow.steps.length} steps · ${directStepCount} direct · ${promptedStepCount} prompt)`,
+      run.flow,
+      run,
+      {
+        completedSteps: 0,
+        phase: "start",
+        stepIndex: 0,
+        stepState: "pending",
+      },
+    );
+    try {
+      return await continueFlowRun(run, 0);
+    } catch (error) {
+      stopUnexpectedFlowRun(run, run.currentStepIndex, error);
+      return false;
     }
   }
 
   function onRuntimeMessage(message) {
+    if (message?.type === EXTENSION_EVENTS.flowReplayProgress) {
+      const run = activeFlowRun;
+      if (!run || message.runId !== run.id) return false;
+      const incomingCompletedSteps = Number(message.completedSteps) || 0;
+      const incomingStepIndex = normalizedStepIndex(run.flow, message.stepIndex);
+      if (run.reportedDirectStepIndexes.has(incomingStepIndex)) return false;
+      run.reportedDirectStepIndexes.add(incomingStepIndex);
+      const completedSteps = Math.min(
+        run.flow.steps.length,
+        Math.max(run.completedSteps, incomingCompletedSteps),
+      );
+      run.completedSteps = completedSteps;
+      run.currentStepIndex = Math.min(
+        run.flow.steps.length - 1,
+        Math.max(run.currentStepIndex, incomingStepIndex),
+      );
+      const progressMessage = String(message.message || "").trim()
+        || `Completed ${completedSteps} of ${run.flow.steps.length} steps.`;
+      setStatus(progressMessage);
+      publishFlowEvent("progress", progressMessage, run.flow, run, {
+        completedSteps,
+        phase: "direct",
+        stepIndex: incomingStepIndex,
+        stepState: "completed",
+      });
+      return false;
+    }
     if (message?.type !== EXTENSION_EVENTS.flowRecordingChanged) return false;
     const incoming = message.draft || null;
     const sameDraft = draft
@@ -844,7 +1274,7 @@ export function createRecordedFlowPanel({
       promptTimers.delete(stepId);
       void sendRuntime("flow_record_update", { stepId, prompt })
         .then((result) => {
-          draft = result.draft;
+          acceptFlowState(result);
         })
         .catch((error) => setStatus(error.message));
     }, 280));
@@ -914,39 +1344,10 @@ export function createRecordedFlowPanel({
         (candidate) => candidate.flow.id === checkbox.dataset.flowImportSelect,
       );
       if (!item) return;
-      if (checkbox.checked && !item.ready && item.existingMatches.length) {
-        item.action = "overwrite";
-        item.existingFlowId = item.existingMatches[0].id;
-        validateImportReview();
-      }
-      item.selected = checkbox.checked && item.ready;
+      selectRecordedFlowImportItem(item, checkbox.checked);
       updateImportReviewControls();
       return;
     }
-    const select = event.target.closest?.("[data-flow-import-resolution]");
-    if (!select) return;
-    const item = importReviewItems.find(
-      (candidate) => candidate.flow.id === select.dataset.flowImportResolution,
-    );
-    if (!item) return;
-    const wasSelected = item.selected;
-    if (select.value.startsWith("overwrite:")) {
-      item.action = "overwrite";
-      item.existingFlowId = select.value.slice("overwrite:".length);
-      item.selected = wasSelected;
-    } else if (select.value === "rename") {
-      item.action = "rename";
-      item.existingFlowId = "";
-      if (recordedFlowNameKey(item.name) === recordedFlowNameKey(item.flow.name)) {
-        item.name = suggestImportedFlowName(item.flow.name, item.flow.id);
-      }
-      item.selected = false;
-    } else {
-      item.action = "";
-      item.existingFlowId = "";
-      item.selected = false;
-    }
-    updateImportReviewControls();
   });
   elements.importList.addEventListener("input", (event) => {
     const input = event.target.closest?.("[data-flow-import-rename]");
@@ -955,7 +1356,7 @@ export function createRecordedFlowPanel({
       (candidate) => candidate.flow.id === input.dataset.flowImportRename,
     );
     if (!item) return;
-    item.name = input.value;
+    renameRecordedFlowImportItem(item, input.value);
     updateImportReviewControls();
   });
   const flowDropEventTarget = documentObject.defaultView || documentObject;
@@ -1063,7 +1464,7 @@ export function createRecordedFlowPanel({
     nameTimerId = setTimeout(() => {
       void sendRuntime("flow_record_update", { name: elements.name.value })
         .then((result) => {
-          draft = result.draft;
+          acceptFlowState(result);
         })
         .catch((error) => setStatus(error.message));
     }, 280);
@@ -1107,7 +1508,7 @@ export function createRecordedFlowPanel({
         stepId: button.dataset.stepId,
         remove: action === "delete",
       });
-      draft = result.draft;
+      acceptFlowState(result);
       expandedPromptIds.delete(button.dataset.stepId);
       collapsedPromptIds.delete(button.dataset.stepId);
     }, "Could not update the recorded step.");
@@ -1119,7 +1520,7 @@ export function createRecordedFlowPanel({
     if (!flow) return;
     const action = button.dataset.flowLibraryAction;
     if (action === "run") {
-      void withBusy(() => runFlow(flow), "Could not run the saved flow.");
+      void withBusy(async () => runFlow(await freshSavedFlowForRun(flow)), "Could not run the saved flow.");
       return;
     }
     if (action === "edit") {
@@ -1160,6 +1561,14 @@ export function createRecordedFlowPanel({
   return {
     dispose() {
       if (draft?.recording) void sendRuntime("flow_record_stop").catch(() => {});
+      if (activeFlowRun) {
+        try {
+          onFlowRunStateChange(false, activeFlowRun.flow);
+        } catch {
+          // The host is already being disposed.
+        }
+        activeFlowRun = null;
+      }
       closeExportDialog();
       closeImportDialog();
       documentObject.documentElement.classList.remove("is-flow-import-dragging");

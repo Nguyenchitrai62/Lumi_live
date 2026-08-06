@@ -15,3 +15,10 @@ export function shouldRenderStandaloneToolActivity(orchestration) {
     && orchestration.stepId
   );
 }
+
+export function filterTaskTranscriptHistory(history = [], hiddenTaskIds = new Set()) {
+  const hidden = hiddenTaskIds instanceof Set
+    ? hiddenTaskIds
+    : new Set(Array.isArray(hiddenTaskIds) ? hiddenTaskIds : []);
+  return history.filter((event) => !hidden.has(event?.taskId));
+}
