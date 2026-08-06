@@ -33,6 +33,10 @@ import {
   localFileName,
   normalizeUploadFilePaths,
 } from "../browser/file-upload.js";
+import {
+  DEFAULT_RECORDED_FLOW_PAGE_LOAD_TIMEOUT_MS,
+  waitForRecordedFlowPageReady,
+} from "../browser/recorded-flow-page-readiness.js";
 import { createRecordedFlowService } from "./recorded-flow-service.js";
 import { createVideoAnalysisService } from "./video-analysis-service.js";
 
@@ -53,6 +57,9 @@ const CLICK_NEW_TAB_WATCH_MS = 2500;
 const FILE_CHOOSER_WAIT_MS = 10000;
 const RECORDED_FLOWS_STORAGE_KEY = STORAGE_KEYS.recordedFlows;
 const RECORDED_FLOW_DRAFT_STORAGE_KEY = STORAGE_KEYS.recordedFlowDraft;
+const RECORDED_FLOW_INTER_STEP_DELAY_MS = 250;
+const RECORDED_FLOW_NAVIGATION_START_GRACE_MS = 750;
+const RECORDED_FLOW_TARGET_TIMEOUT_MS = 30000;
 
 let connectedTabId = null;
 let fastModeEnabled = false;
@@ -251,15 +258,18 @@ function recordedFlowUrlMatches(actualValue, expectedValue) {
 }
 
 async function waitForRecordedFlowResultUrl(tabId, expectedUrl, action) {
-  let latest = null;
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= DEFAULT_RECORDED_FLOW_PAGE_LOAD_TIMEOUT_MS) {
     assertBrowserActionActive(action);
-    latest = await chrome.tabs.get(tabId).catch(() => null);
+    const latest = await chrome.tabs.get(tabId).catch(() => null);
     if (!latest) break;
     if (recordedFlowUrlMatches(latest.pendingUrl || latest.url, expectedUrl)) {
-      return latest.status === "complete"
-        ? latest
-        : waitForTabToSettle(tabId, action);
+      const ready = await waitForRecordedFlowPageReady(tabId, {
+        assertActive: () => assertBrowserActionActive(action),
+        getTab: (id) => chrome.tabs.get(id).catch(() => null),
+        navigationStartGraceMs: RECORDED_FLOW_NAVIGATION_START_GRACE_MS,
+      });
+      return ready.tab;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -267,13 +277,24 @@ async function waitForRecordedFlowResultUrl(tabId, expectedUrl, action) {
 }
 
 async function prepareRecordedFlowStart(flow, tab, action) {
-  if (!flow.startUrl || recordedFlowUrlMatches(tab.url, flow.startUrl)) return tab;
+  if (!flow.startUrl || recordedFlowUrlMatches(tab.pendingUrl || tab.url, flow.startUrl)) {
+    const ready = await waitForRecordedFlowPageReady(tab.id, {
+      assertActive: () => assertBrowserActionActive(action),
+      getTab: (id) => chrome.tabs.get(id).catch(() => null),
+    });
+    if (!flow.startUrl || recordedFlowUrlMatches(ready.tab.url, flow.startUrl)) return ready.tab;
+    tab = ready.tab;
+  }
   if (!isControllablePage(flow.startUrl)) {
     throw new Error("The recorded start URL is not a controllable web page.");
   }
   trackBrowserActionTab(action, tab.id);
   await chrome.tabs.update(tab.id, { url: flow.startUrl });
-  return waitForTabToSettle(tab.id, action);
+  const ready = await waitForRecordedFlowPageReady(tab.id, {
+    assertActive: () => assertBrowserActionActive(action),
+    getTab: (id) => chrome.tabs.get(id).catch(() => null),
+  });
+  return ready.tab;
 }
 
 async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
@@ -341,7 +362,7 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
           tabsApi: chrome.tabs,
           beforeTabIds: new Set(),
           sourceTab: tab,
-          timeoutMs: 100,
+          timeoutMs: RECORDED_FLOW_NAVIGATION_START_GRACE_MS,
         })
         : null;
       let result;
@@ -350,7 +371,11 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
           const url = String(step.value || step.url || "").trim();
           if (!isControllablePage(url)) throw new Error("The recorded navigation URL is not controllable.");
           await chrome.tabs.update(tab.id, { url });
-          tab = await waitForTabToSettle(tab.id, action);
+          const ready = await waitForRecordedFlowPageReady(tab.id, {
+            assertActive: () => assertBrowserActionActive(action),
+            getTab: (id) => chrome.tabs.get(id).catch(() => null),
+          });
+          tab = ready.tab;
           preparedControllerTabIds.delete(tab.id);
           result = { action: step.action, navigated: true, success: true };
         } else {
@@ -360,18 +385,43 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
             args: {
               confirmed: true,
               step,
-              timeoutMs: 10000,
+              timeoutMs: RECORDED_FLOW_TARGET_TIMEOUT_MS,
             },
           };
           try {
             result = await chrome.tabs.sendMessage(tab.id, replayMessage);
           } catch (deliveryError) {
-            // A click or form submit may have replaced the document without changing
-            // its URL. Reinstall the controller only after that delivery failure.
-            preparedControllerTabIds.delete(tab.id);
-            if (!await ensureController(tab.id, 5)) throw deliveryError;
-            preparedControllerTabIds.add(tab.id);
-            result = await chrome.tabs.sendMessage(tab.id, replayMessage);
+            let recoveredNavigation = null;
+            if (canOpenNewTab) {
+              const urlBeforeAction = String(tab.pendingUrl || tab.url || "");
+              const ready = await waitForRecordedFlowPageReady(tab.id, {
+                assertActive: () => assertBrowserActionActive(action),
+                getTab: (id) => chrome.tabs.get(id).catch(() => null),
+                navigationStartGraceMs: RECORDED_FLOW_NAVIGATION_START_GRACE_MS,
+              });
+              const urlAfterAction = String(ready.tab.pendingUrl || ready.tab.url || "");
+              if (ready.sawLoading || urlAfterAction !== urlBeforeAction) {
+                tab = ready.tab;
+                recoveredNavigation = {
+                  action: step.action,
+                  recoveredAfterNavigation: true,
+                  replayProtocolVersion: PAGE_CONTROLLER_PROTOCOL_VERSION,
+                  success: true,
+                  verifiedDirectReplay: true,
+                };
+              }
+            }
+            if (recoveredNavigation) {
+              preparedControllerTabIds.delete(tab.id);
+              result = recoveredNavigation;
+            } else {
+              // Reinstall only after the page has had time to begin and finish a
+              // navigation. This avoids reporting a controller failure mid-load.
+              preparedControllerTabIds.delete(tab.id);
+              if (!await ensureController(tab.id, 5)) throw deliveryError;
+              preparedControllerTabIds.add(tab.id);
+              result = await chrome.tabs.sendMessage(tab.id, replayMessage);
+            }
           }
           if (
             result?.success === true
@@ -418,6 +468,7 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
         if (openedTab?.id) {
           const activation = await activateClickedNewTab(openedTab, action, {
             fastMode: fastModeEnabled,
+            recordedFlow: true,
           });
           tab = await chrome.tabs.get(openedTab.id);
           if (activation.controllerReady) preparedControllerTabIds.add(tab.id);
@@ -426,9 +477,16 @@ async function executeRecordedFlowDirect(rawFlow, replayContext = {}) {
       if (step.resultUrl) {
         tab = await waitForRecordedFlowResultUrl(tab.id, step.resultUrl, action);
       } else {
-        const latest = await chrome.tabs.get(tab.id);
-        tab = latest.status === "complete" ? latest : await waitForTabToSettle(tab.id, action);
+        const ready = await waitForRecordedFlowPageReady(tab.id, {
+          assertActive: () => assertBrowserActionActive(action),
+          getTab: (id) => chrome.tabs.get(id).catch(() => null),
+          navigationStartGraceMs: canOpenNewTab
+            ? RECORDED_FLOW_NAVIGATION_START_GRACE_MS
+            : RECORDED_FLOW_INTER_STEP_DELAY_MS,
+        });
+        tab = ready.tab;
       }
+      if (canOpenNewTab) preparedControllerTabIds.delete(tab.id);
       await setConnectedTab(tab.id);
       completedSteps += 1;
       const nextAction = plan.steps[completedSteps];
@@ -1035,12 +1093,16 @@ async function collectWindowOpenCalls(tabId, token) {
   }
 }
 
-async function activateClickedNewTab(tab, action, { fastMode = false, restoreTabId = null } = {}) {
+async function activateClickedNewTab(tab, action, {
+  fastMode = false,
+  recordedFlow = false,
+  restoreTabId = null,
+} = {}) {
   if (!Number.isInteger(tab?.id)) {
     throw new Error("Chrome reported a new tab without an ID.");
   }
   trackBrowserActionTab(action, tab.id);
-  if (fastMode) {
+  if (fastMode && !recordedFlow) {
     await fastWorkspace.addTab(tab.id);
     fastPromptTargetTabId = tab.id;
     fastLastActiveWorkspaceTabId = tab.id;
@@ -1052,7 +1114,24 @@ async function activateClickedNewTab(tab, action, { fastMode = false, restoreTab
     await chrome.tabs.update(tab.id, { active: true });
     await chrome.windows.update(tab.windowId, { focused: true });
   }
-  const settledTab = await waitForClickedTabToSettle(tab.id, action);
+  const settledTab = recordedFlow
+    ? (await waitForRecordedFlowPageReady(tab.id, {
+      assertActive: () => assertBrowserActionActive(action),
+      getTab: (id) => chrome.tabs.get(id).catch(() => null),
+      tabIsReady: (candidate) => (
+        candidate?.status === "complete"
+        && isControllablePage(candidate.url)
+      ),
+    })).tab
+    : await waitForClickedTabToSettle(tab.id, action);
+  if (fastMode && recordedFlow) {
+    // Keep the popup in its original window and foreground until Chrome commits
+    // the destination. Grouping an about:blank tab can interrupt page-owned popup
+    // navigation; move it into Agent Space only after the real page is complete.
+    await fastWorkspace.addTab(tab.id);
+    fastPromptTargetTabId = tab.id;
+    fastLastActiveWorkspaceTabId = tab.id;
+  }
   const controllable = isControllablePage(settledTab.url);
   await setConnectedTab(controllable ? tab.id : null);
   const controllerReady = controllable ? await ensureController(tab.id, 5) : false;

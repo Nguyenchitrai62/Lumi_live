@@ -4341,6 +4341,21 @@ ${clippedAnchor.content}`);
   // extensions/lumi-live/browser/flow-recorder.js
   var INPUT_DEBOUNCE_MS = 650;
   var MAX_TEXT_CHARACTERS = 240;
+  var MAX_RECORDED_SELECTOR_CANDIDATES = 12;
+  var MAX_RECORDED_ANCESTORS = 6;
+  var STABLE_DATA_ATTRIBUTE_NAMES = [
+    "data-testid",
+    "data-test",
+    "data-cy",
+    "data-qa",
+    "data-action",
+    "data-route",
+    "data-href",
+    "data-key",
+    "data-id",
+    "data-control",
+    "data-name"
+  ];
   function compactText(value, limit = MAX_TEXT_CHARACTERS) {
     return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
   }
@@ -4354,7 +4369,7 @@ ${clippedAnchor.content}`);
     if (wrappingLabel) return compactText(wrappingLabel.innerText);
     const elementId = element?.id;
     if (!elementId) return "";
-    const escapedId = CSS.escape(elementId);
+    const escapedId = cssIdentifier(elementId);
     return compactText(element.ownerDocument.querySelector(`label[for="${escapedId}"]`)?.innerText);
   }
   function accessibleName(element) {
@@ -4365,23 +4380,49 @@ ${clippedAnchor.content}`);
   function attributeSelectorValue(value) {
     return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   }
+  function cssIdentifier(value) {
+    if (globalThis.CSS?.escape) return globalThis.CSS.escape(String(value));
+    return String(value).replace(/[^a-zA-Z0-9_-]/g, (character) => `\\${character.codePointAt(0).toString(16)} `);
+  }
   function isLikelyDynamicElementId(value) {
     const id = String(value || "");
     return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(id) || /^(?:react-select|headlessui|radix|mui|ember|mat-input|generated)[-_:]/i.test(id) || /[-_:]\d{5,}$/.test(id);
   }
-  function stableSelector(element) {
-    const testId = element.getAttribute("data-testid");
-    if (testId) return `[data-testid="${attributeSelectorValue(testId)}"]`;
-    if (element.id && !isLikelyDynamicElementId(element.id)) return `#${CSS.escape(element.id)}`;
-    const name = element.getAttribute("name");
-    if (name) {
-      const selector = `${element.tagName.toLowerCase()}[name="${attributeSelectorValue(name)}"]`;
-      if (element.ownerDocument.querySelectorAll(selector).length === 1) return selector;
+  function stableDataAttributes(element) {
+    const attributes = {};
+    for (const name of STABLE_DATA_ATTRIBUTE_NAMES) {
+      const value = compactText(element?.getAttribute?.(name), 240);
+      if (value && !/(?:password|passcode|token|secret|api.?key|private.?key)/i.test(name)) {
+        attributes[name] = value;
+      }
     }
+    return attributes;
+  }
+  function stableClassNames(element) {
+    return String(element?.getAttribute?.("class") || "").split(/\s+/).map((value) => compactText(value, 100)).filter((value) => value && !/^(?:active|focus|focused|hover|selected|disabled|open|closed)$/i.test(value) && !/^(?:css|jsx)-[a-z0-9]{5,}$/i.test(value)).slice(0, 12);
+  }
+  function selectorMatchesOnlyElement(element, selector) {
+    try {
+      const matches = Array.from(element.ownerDocument?.querySelectorAll?.(selector) || []);
+      return matches.length === 1 && matches[0] === element;
+    } catch {
+      return false;
+    }
+  }
+  function structuralSelector(element) {
     const parts = [];
     let current = element;
-    while (current?.nodeType === Node.ELEMENT_NODE && parts.length < 5) {
+    while (current?.nodeType === Node.ELEMENT_NODE && parts.length < 12) {
       let part = current.tagName.toLowerCase();
+      const testId = current.getAttribute("data-testid");
+      if (testId) {
+        parts.unshift(`[data-testid="${attributeSelectorValue(testId)}"]`);
+        return parts.join(" > ");
+      }
+      if (current.id && !isLikelyDynamicElementId(current.id)) {
+        parts.unshift(`#${cssIdentifier(current.id)}`);
+        return parts.join(" > ");
+      }
       const parent = current.parentElement;
       if (parent) {
         const siblings = Array.from(parent.children).filter((candidate) => candidate.tagName === current.tagName);
@@ -4393,22 +4434,116 @@ ${clippedAnchor.content}`);
     }
     return parts.join(" > ");
   }
-  function targetDescriptor(element) {
-    const text = ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName) ? "" : compactText(element.innerText || element.textContent);
-    const href = element instanceof HTMLAnchorElement ? element.href : "";
+  function stableSelectorCandidates(element) {
+    const tag = element.tagName.toLowerCase();
+    const candidates = [];
+    const add = (selector) => {
+      const normalized = compactText(selector, 1e3);
+      if (normalized && !candidates.includes(normalized)) candidates.push(normalized);
+    };
+    for (const [name2, value] of Object.entries(stableDataAttributes(element))) {
+      add(`[${name2}="${attributeSelectorValue(value)}"]`);
+    }
+    if (element.id) add(`#${cssIdentifier(element.id)}`);
+    const name = compactText(element.getAttribute("name"));
+    if (name) add(`${tag}[name="${attributeSelectorValue(name)}"]`);
+    const ariaLabel = compactText(element.getAttribute("aria-label"));
+    if (ariaLabel) add(`${tag}[aria-label="${attributeSelectorValue(ariaLabel)}"]`);
+    const type = compactText(element.getAttribute("type"), 60).toLowerCase();
+    if (type) add(`${tag}[type="${attributeSelectorValue(type)}"]`);
+    const role = compactText(element.getAttribute("role"), 80).toLowerCase();
+    if (role) add(`${tag}[role="${attributeSelectorValue(role)}"]`);
+    const classes = stableClassNames(element);
+    if (classes.length) add(`${tag}.${classes.slice(0, 3).map(cssIdentifier).join(".")}`);
+    add(structuralSelector(element));
+    return candidates.sort((left, right) => Number(selectorMatchesOnlyElement(element, right)) - Number(selectorMatchesOnlyElement(element, left))).slice(0, MAX_RECORDED_SELECTOR_CANDIDATES);
+  }
+  function stableSelector(element) {
+    return stableSelectorCandidates(element)[0] || "";
+  }
+  function contextDescriptor(element) {
+    if (!element) return null;
     return {
-      tag: element.tagName.toLowerCase(),
+      tag: String(element.tagName || "").toLowerCase(),
+      role: compactText(element.getAttribute?.("role"), 80).toLowerCase(),
+      name: accessibleName(element),
+      text: compactText(element.innerText || element.textContent),
+      title: compactText(element.getAttribute?.("title")),
+      testId: compactText(element.getAttribute?.("data-testid")),
+      elementId: compactText(element.id),
+      classNames: stableClassNames(element),
+      dataAttributes: stableDataAttributes(element),
+      selector: stableSelector(element)
+    };
+  }
+  function ancestorDescriptors(element) {
+    const ancestors = [];
+    for (let current = element?.parentElement; current && current !== element.ownerDocument?.body && ancestors.length < MAX_RECORDED_ANCESTORS; current = current.parentElement) {
+      ancestors.push(contextDescriptor(current));
+    }
+    return ancestors.filter(Boolean);
+  }
+  function recordedHoverTarget(element, ancestors) {
+    let hovered = [];
+    try {
+      hovered = Array.from(element.ownerDocument?.querySelectorAll?.(":hover") || []);
+    } catch {
+      return null;
+    }
+    const hoveredSet = new Set(hovered);
+    const ancestorElements = [];
+    for (let current = element?.parentElement; current; current = current.parentElement) {
+      ancestorElements.push(current);
+    }
+    const hoveredAncestorIndex = ancestorElements.findIndex((candidate) => hoveredSet.has(candidate));
+    if (hoveredAncestorIndex < 0) return null;
+    return ancestors[hoveredAncestorIndex] || contextDescriptor(ancestorElements[hoveredAncestorIndex]);
+  }
+  function semanticOrdinal(element, name) {
+    const tag = String(element.tagName || "").toLowerCase();
+    if (!tag || !name) return null;
+    const type = compactText(element.getAttribute?.("type"), 60).toLowerCase();
+    const selector = type ? `${tag}[type="${attributeSelectorValue(type)}"]` : tag;
+    let candidates = [];
+    try {
+      candidates = Array.from(element.ownerDocument?.querySelectorAll?.(selector) || []).filter((candidate) => accessibleName(candidate) === name);
+    } catch {
+      return null;
+    }
+    const index = candidates.indexOf(element);
+    return index >= 0 ? index : null;
+  }
+  function targetDescriptor(element, { origin = element } = {}) {
+    const text = ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName) ? "" : compactText(element.innerText || element.textContent);
+    const tag = element.tagName.toLowerCase();
+    const href = tag === "a" ? compactText(element.href || element.getAttribute("href"), 1e3) : "";
+    const name = accessibleName(element);
+    const selectors = stableSelectorCandidates(element);
+    const ancestors = ancestorDescriptors(element);
+    const form = element.form || element.closest?.("form");
+    return {
+      tag,
       type: compactText(element.getAttribute("type"), 60).toLowerCase(),
       role: compactText(element.getAttribute("role"), 80).toLowerCase(),
-      name: accessibleName(element),
+      name,
       label: associatedLabel(element),
       text,
+      title: compactText(element.getAttribute("title")),
+      value: ["button", "submit", "reset"].includes(String(element.type || "").toLowerCase()) ? compactText(element.value) : "",
       placeholder: compactText(element.getAttribute("placeholder")),
       testId: compactText(element.getAttribute("data-testid")),
       elementId: compactText(element.id),
       inputName: compactText(element.getAttribute("name")),
+      classNames: stableClassNames(element),
+      dataAttributes: stableDataAttributes(element),
       href,
-      selector: stableSelector(element)
+      selector: selectors[0] || "",
+      selectors,
+      semanticOrdinal: semanticOrdinal(element, name),
+      ancestors,
+      hoverTarget: recordedHoverTarget(element, ancestors),
+      form: form ? contextDescriptor(form) : null,
+      origin: origin && origin !== element ? contextDescriptor(origin) : null
     };
   }
   function isSensitiveInput(element) {
@@ -4547,7 +4682,7 @@ ${clippedAnchor.content}`);
       if (!element) return;
       emitStep({
         action: "click",
-        target: targetDescriptor(element)
+        target: targetDescriptor(element, { origin })
       });
     }
     function onSubmit(event) {
@@ -4609,6 +4744,31 @@ ${clippedAnchor.content}`);
   function clipText(value, limit) {
     return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
   }
+  function normalizeStringList(value, { limit = 12, textLimit = 1e3 } = {}) {
+    return [...new Set((Array.isArray(value) ? value : []).map((item) => clipText(item, textLimit)).filter(Boolean))].slice(0, limit);
+  }
+  function normalizeRecordedDataAttributes(value) {
+    if (!isObject(value)) return {};
+    return Object.fromEntries(Object.entries(value).map(([name, attributeValue]) => [
+      clipText(name, 100).toLowerCase(),
+      clipText(attributeValue, MAX_TARGET_TEXT_CHARACTERS)
+    ]).filter(([name, attributeValue]) => /^data-[a-z0-9_.:-]+$/i.test(name) && attributeValue && !/(?:password|passcode|token|secret|api.?key|private.?key)/i.test(name)).slice(0, 20));
+  }
+  function normalizeRecordedTargetContext(value) {
+    if (!isObject(value)) return null;
+    return {
+      tag: clipText(value.tag, 40).toLowerCase(),
+      role: clipText(value.role, 80).toLowerCase(),
+      name: clipText(value.name, MAX_TARGET_TEXT_CHARACTERS),
+      text: clipText(value.text, MAX_TARGET_TEXT_CHARACTERS),
+      title: clipText(value.title, MAX_TARGET_TEXT_CHARACTERS),
+      testId: clipText(value.testId, MAX_TARGET_TEXT_CHARACTERS),
+      elementId: clipText(value.elementId, MAX_TARGET_TEXT_CHARACTERS),
+      classNames: normalizeStringList(value.classNames, { textLimit: 100 }),
+      dataAttributes: normalizeRecordedDataAttributes(value.dataAttributes),
+      selector: clipText(value.selector, 1e3)
+    };
+  }
   function newId(prefix) {
     const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     return `${prefix}-${suffix}`;
@@ -4619,20 +4779,32 @@ ${clippedAnchor.content}`);
   }
   function normalizeRecordedTarget(value) {
     const source = isObject(value) ? value : {};
-    return {
+    const target = {
       tag: clipText(source.tag, 40).toLowerCase(),
       type: clipText(source.type, 60).toLowerCase(),
       role: clipText(source.role, 80).toLowerCase(),
       name: clipText(source.name, MAX_TARGET_TEXT_CHARACTERS),
       label: clipText(source.label, MAX_TARGET_TEXT_CHARACTERS),
       text: clipText(source.text, MAX_TARGET_TEXT_CHARACTERS),
+      title: clipText(source.title, MAX_TARGET_TEXT_CHARACTERS),
+      controlValue: clipText(source.controlValue ?? source.value, MAX_TARGET_TEXT_CHARACTERS),
       placeholder: clipText(source.placeholder, MAX_TARGET_TEXT_CHARACTERS),
       testId: clipText(source.testId, MAX_TARGET_TEXT_CHARACTERS),
       elementId: clipText(source.elementId, MAX_TARGET_TEXT_CHARACTERS),
       inputName: clipText(source.inputName, MAX_TARGET_TEXT_CHARACTERS),
+      classNames: normalizeStringList(source.classNames, { textLimit: 100 }),
+      dataAttributes: normalizeRecordedDataAttributes(source.dataAttributes),
       href: clipText(source.href, 1e3),
-      selector: clipText(source.selector, 1e3)
+      selector: clipText(source.selector, 1e3),
+      selectors: normalizeStringList(source.selectors, { textLimit: 1e3 }),
+      semanticOrdinal: Number.isInteger(source.semanticOrdinal) && source.semanticOrdinal >= 0 ? Math.min(source.semanticOrdinal, 1e3) : null,
+      ancestors: (Array.isArray(source.ancestors) ? source.ancestors : []).map(normalizeRecordedTargetContext).filter(Boolean).slice(0, 6),
+      hoverTarget: normalizeRecordedTargetContext(source.hoverTarget),
+      form: normalizeRecordedTargetContext(source.form),
+      origin: normalizeRecordedTargetContext(source.origin)
     };
+    if (!target.selectors.length && target.selector) target.selectors = [target.selector];
+    return target;
   }
   function normalizeStep(value, index = 0, depth = 0) {
     if (!isObject(value)) return null;
@@ -4691,7 +4863,6 @@ ${clippedAnchor.content}`);
 
   // extensions/lumi-live/browser/recorded-flow-replay.js
   var DEFAULT_TARGET_TIMEOUT_MS = 1e4;
-  var DISABLED_EXACT_TARGET_GRACE_MS = 750;
   var MAX_SEMANTIC_CANDIDATES = 5e3;
   var SEMANTIC_CONTROL_SELECTOR = [
     "button",
@@ -4759,6 +4930,12 @@ ${clippedAnchor.content}`);
   }
   function elementDescriptor2(element) {
     const tag = String(element?.tagName || "").toLowerCase();
+    const dataAttributes = {};
+    for (const attribute of Array.from(element?.attributes || [])) {
+      if (/^data-[a-z0-9_.:-]+$/i.test(attribute?.name || "")) {
+        dataAttributes[String(attribute.name).toLowerCase()] = compactText2(attribute.value, 240);
+      }
+    }
     return {
       tag,
       type: compactText2(element?.getAttribute?.("type") || element?.type, 60).toLowerCase(),
@@ -4766,10 +4943,16 @@ ${clippedAnchor.content}`);
       name: accessibleName2(element),
       label: associatedLabel2(element),
       text: ["input", "textarea", "select"].includes(tag) ? "" : compactText2(element?.innerText || element?.textContent, 240),
+      title: compactText2(element?.getAttribute?.("title"), 240),
+      controlValue: ["button", "submit", "reset"].includes(
+        String(element?.type || element?.getAttribute?.("type") || "").toLowerCase()
+      ) ? compactText2(element?.value, 240) : "",
       placeholder: compactText2(element?.getAttribute?.("placeholder"), 240),
       testId: compactText2(element?.getAttribute?.("data-testid"), 240),
       elementId: compactText2(element?.getAttribute?.("id") || element?.id, 240),
       inputName: compactText2(element?.getAttribute?.("name") || element?.name, 240),
+      classNames: String(element?.getAttribute?.("class") || "").split(/\s+/).map((value) => compactText2(value, 100)).filter(Boolean).slice(0, 20),
+      dataAttributes,
       href: compactText2(element?.href || element?.getAttribute?.("href"), 1e3)
     };
   }
@@ -4788,7 +4971,59 @@ ${clippedAnchor.content}`);
     score += scoreText(descriptor.label, target.label, 80, 40);
     score += scoreText(descriptor.placeholder, target.placeholder, 65, 30);
     score += scoreText(descriptor.text, target.text, 55, 25);
+    score += scoreText(descriptor.title, target.title, 45, 20);
+    score += scoreText(descriptor.controlValue, target.controlValue, 40, 20);
     return score;
+  }
+  function scoreAttributeIdentity(target, descriptor) {
+    let score = 0;
+    const expectedClasses = Array.isArray(target.classNames) ? target.classNames : [];
+    const actualClasses = new Set(descriptor.classNames || []);
+    score += Math.min(30, expectedClasses.filter((name) => actualClasses.has(name)).length * 6);
+    for (const [name, value] of Object.entries(target.dataAttributes || {})) {
+      if (descriptor.dataAttributes?.[name] === value) score += 35;
+    }
+    return score;
+  }
+  function scoreTargetContext(expected, element) {
+    if (!expected || !element) return 0;
+    const descriptor = elementDescriptor2(element);
+    let score = scoreSemanticIdentity(expected, descriptor) + scoreAttributeIdentity(expected, descriptor);
+    if (expected.testId && descriptor.testId === expected.testId) score += 140;
+    if (expected.elementId && descriptor.elementId === expected.elementId) score += 130;
+    if (expected.tag && descriptor.tag === expected.tag) score += 12;
+    return score;
+  }
+  function scoreAncestorIdentity(target, element) {
+    const expectedAncestors = Array.isArray(target.ancestors) ? target.ancestors : [];
+    if (!expectedAncestors.length) return 0;
+    const actualAncestors = [];
+    for (let current = element?.parentElement; current && actualAncestors.length < 10; current = current.parentElement) {
+      actualAncestors.push(current);
+    }
+    let total = 0;
+    for (let expectedIndex = 0; expectedIndex < expectedAncestors.length; expectedIndex += 1) {
+      let best = 0;
+      for (let actualIndex = 0; actualIndex < actualAncestors.length; actualIndex += 1) {
+        const contextScore = scoreTargetContext(
+          expectedAncestors[expectedIndex],
+          actualAncestors[actualIndex]
+        ) - Math.abs(expectedIndex - actualIndex) * 5;
+        best = Math.max(best, contextScore);
+      }
+      total += Math.min(70, best);
+    }
+    return Math.min(140, total);
+  }
+  function scoreRecordedOrdinal(target, element, descriptor) {
+    if (!Number.isInteger(target.semanticOrdinal) || target.semanticOrdinal < 0) return 0;
+    if (target.tag && descriptor.tag !== target.tag) return 0;
+    if (target.type && descriptor.type !== target.type) return 0;
+    const selector = target.type ? `${descriptor.tag}[type="${attributeSelectorValue2(target.type)}"]` : descriptor.tag;
+    const candidates = queryAll(element?.ownerDocument, selector).filter((candidate) => comparableText(accessibleName2(candidate)) === comparableText(target.name));
+    const candidateIndex = candidates.indexOf(element);
+    if (candidateIndex < 0) return 0;
+    return candidateIndex === target.semanticOrdinal ? 35 : -10;
   }
   function scoreRecordedTargetCandidate(target, element) {
     const descriptor = elementDescriptor2(element);
@@ -4801,11 +5036,18 @@ ${clippedAnchor.content}`);
     if (target.type && descriptor.type === target.type) score += 18;
     if (target.href && descriptor.href === target.href) score += 45;
     score += semanticScore;
+    score += scoreAttributeIdentity(target, descriptor);
+    score += scoreAncestorIdentity(target, element);
+    score += target.form ? Math.min(80, scoreTargetContext(
+      target.form,
+      element?.form || element?.closest?.("form")
+    )) : 0;
+    score += scoreRecordedOrdinal(target, element, descriptor);
     return score;
   }
   function hasSemanticIdentity(target) {
     return Boolean(
-      target.name || target.label || target.text || target.placeholder || target.role || target.inputName
+      target.name || target.label || target.text || target.placeholder || target.role || target.inputName || target.title || target.controlValue
     );
   }
   function candidateIsCompatible(target, element, strategy) {
@@ -4813,7 +5055,7 @@ ${clippedAnchor.content}`);
     const semanticScore = scoreSemanticIdentity(target, descriptor);
     if (target.tag && descriptor.tag && target.tag !== descriptor.tag) return false;
     if (target.type && descriptor.type && target.type !== descriptor.type) return false;
-    if (["testId", "inputName"].includes(strategy)) return true;
+    if (["testId", "inputName", "origin"].includes(strategy) || strategy.startsWith("data:")) return true;
     if (strategy === "elementId") {
       return !isLikelyDynamicElementId2(target.elementId) || !hasSemanticIdentity(target) || semanticScore >= 35;
     }
@@ -4833,6 +5075,35 @@ ${clippedAnchor.content}`);
       };
       if (!previous || entry.priority > previous.priority || entry.priority === previous.priority && entry.score > previous.score) candidateMap.set(element, entry);
     }
+  }
+  function queryRecordedContext(context, queryRoots) {
+    if (!context) return [];
+    const elements = [];
+    const add = (matches) => {
+      for (const element of matches) {
+        if (element && !elements.includes(element)) elements.push(element);
+      }
+    };
+    if (context.testId) {
+      add(queryRoots(`[data-testid="${attributeSelectorValue2(context.testId)}"]`));
+    }
+    if (context.elementId) {
+      add(queryRoots(`[id="${attributeSelectorValue2(context.elementId)}"]`));
+    }
+    for (const [name, value] of Object.entries(context.dataAttributes || {})) {
+      add(queryRoots(`[${name}="${attributeSelectorValue2(value)}"]`));
+    }
+    if (context.selector) add(queryRoots(context.selector));
+    return elements;
+  }
+  function recordedControlFromOrigin(origin, target) {
+    for (let current = origin; current; current = current.parentElement) {
+      const descriptor = elementDescriptor2(current);
+      if (target.tag && descriptor.tag !== target.tag) continue;
+      if (target.type && descriptor.type && descriptor.type !== target.type) continue;
+      return current;
+    }
+    return null;
   }
   function rankRecordedTargetCandidates(rawTarget, {
     documentObject = document,
@@ -4871,8 +5142,36 @@ ${clippedAnchor.content}`);
         target
       );
     }
-    if (target.selector) {
-      addCandidates(candidates, queryRoots(target.selector), "selector", 250, target);
+    for (const [name, value] of Object.entries(target.dataAttributes || {})) {
+      addCandidates(
+        candidates,
+        queryRoots(`[${name}="${attributeSelectorValue2(value)}"]`),
+        `data:${name}`,
+        425,
+        target
+      );
+    }
+    const selectors = [...new Set([
+      ...Array.isArray(target.selectors) ? target.selectors : [],
+      target.selector
+    ].filter(Boolean))];
+    for (let index = 0; index < selectors.length; index += 1) {
+      addCandidates(
+        candidates,
+        queryRoots(selectors[index]),
+        "selector",
+        Math.max(260, 330 - index * 5),
+        target
+      );
+    }
+    if (target.origin) {
+      addCandidates(
+        candidates,
+        queryRecordedContext(target.origin, queryRoots).map((origin) => recordedControlFromOrigin(origin, target)).filter(Boolean),
+        "origin",
+        440,
+        target
+      );
     }
     if (includeSemantic) {
       addCandidates(
@@ -4884,6 +5183,17 @@ ${clippedAnchor.content}`);
       );
     }
     return [...candidates.values()].sort((left, right) => right.priority - left.priority || right.score - left.score);
+  }
+  function findRecordedTarget(rawTarget, { documentObject = document } = {}) {
+    const ranked = rankRecordedTargetCandidates(rawTarget, { documentObject });
+    const match = ranked[0];
+    if (!match || match.priority === 0 && match.score < 35) return null;
+    return {
+      candidateCount: ranked.length,
+      element: match.element,
+      score: match.score,
+      strategy: match.strategy
+    };
   }
   function isElementVisible(element, windowObject) {
     if (!element?.isConnected) return false;
@@ -4930,6 +5240,31 @@ ${clippedAnchor.content}`);
   function firstUsableRecordedTargetCandidate(candidates, windowObject) {
     return candidates.find((candidate) => isElementVisible(candidate.element, windowObject) && isElementEnabled(candidate.element, windowObject)) || null;
   }
+  function dispatchRecordedHover(element, windowObject) {
+    if (!element) return false;
+    element.scrollIntoView?.({ block: "center", inline: "nearest" });
+    const path = [];
+    for (let current = element; current; current = current.parentElement) path.unshift(current);
+    const eventOptions = { bubbles: true, cancelable: true, pointerType: "mouse" };
+    for (const current of path) {
+      const PointerEventClass = windowObject.PointerEvent || windowObject.MouseEvent || windowObject.Event;
+      const MouseEventClass = windowObject.MouseEvent || windowObject.Event;
+      current.dispatchEvent?.(new PointerEventClass("pointerover", eventOptions));
+      current.dispatchEvent?.(new MouseEventClass("mouseover", eventOptions));
+      current.dispatchEvent?.(new MouseEventClass("mouseenter", { ...eventOptions, bubbles: false }));
+    }
+    element.focus?.({ preventScroll: true });
+    return true;
+  }
+  function revealRecordedTarget(rawTarget, {
+    documentObject = document,
+    windowObject = window
+  } = {}) {
+    const hoverTarget = rawTarget?.hoverTarget;
+    if (!hoverTarget) return false;
+    const hoverMatch = findRecordedTarget(hoverTarget, { documentObject });
+    return hoverMatch ? dispatchRecordedHover(hoverMatch.element, windowObject) : false;
+  }
   async function waitForRecordedTarget(rawTarget, {
     documentObject = document,
     windowObject = window,
@@ -4937,12 +5272,17 @@ ${clippedAnchor.content}`);
   } = {}) {
     const maximumWait = Math.min(3e4, Math.max(500, Number(timeoutMs) || DEFAULT_TARGET_TIMEOUT_MS));
     const startedAt = Date.now();
-    let disabledExactElement = null;
-    let disabledExactSince = 0;
     let lastMatch = null;
     let lastFallbackAt = -Infinity;
+    let lastRevealAt = -Infinity;
     while (Date.now() - startedAt <= maximumWait) {
       const elapsedMs = Date.now() - startedAt;
+      if (rawTarget?.hoverTarget && elapsedMs - lastRevealAt >= 250) {
+        lastRevealAt = elapsedMs;
+        if (revealRecordedTarget(rawTarget, { documentObject, windowObject })) {
+          await nextFrame(windowObject);
+        }
+      }
       const fastCandidates = eligibleRecordedTargetCandidates(rankRecordedTargetCandidates(
         rawTarget,
         {
@@ -4954,15 +5294,6 @@ ${clippedAnchor.content}`);
       let eligible = fastCandidates;
       let match = firstUsableRecordedTargetCandidate(fastCandidates, windowObject);
       const exactLocatorMatched = fastCandidates.some((candidate) => candidate.priority > 0);
-      const disabledExactMatch = exactLocatorMatched ? fastCandidates.find((candidate) => candidate.priority > 0 && isElementVisible(candidate.element, windowObject) && !isElementEnabled(candidate.element, windowObject)) : null;
-      if (disabledExactMatch?.element === disabledExactElement) {
-        if (Date.now() - disabledExactSince >= DISABLED_EXACT_TARGET_GRACE_MS) {
-          throw new Error("The recorded target was found but remained disabled, so it was not clicked.");
-        }
-      } else {
-        disabledExactElement = disabledExactMatch?.element || null;
-        disabledExactSince = disabledExactElement ? Date.now() : 0;
-      }
       if (!match && !exactLocatorMatched && elapsedMs - lastFallbackAt >= 250) {
         lastFallbackAt = elapsedMs;
         eligible = eligibleRecordedTargetCandidates(rankRecordedTargetCandidates(
@@ -4975,6 +5306,15 @@ ${clippedAnchor.content}`);
         lastMatch = match;
         if (await waitUntilStable(match.element, windowObject) && isElementVisible(match.element, windowObject) && isElementEnabled(match.element, windowObject)) {
           return { ...match, waitedMs: Date.now() - startedAt };
+        }
+      } else if (rawTarget?.hoverTarget && elapsedMs >= 500) {
+        const exactHiddenMatch = eligible.find((candidate) => candidate.priority > 0 && candidate.element?.isConnected && isElementEnabled(candidate.element, windowObject));
+        if (exactHiddenMatch && await waitUntilStable(exactHiddenMatch.element, windowObject)) {
+          return {
+            ...exactHiddenMatch,
+            hoverFallback: true,
+            waitedMs: Date.now() - startedAt
+          };
         }
       } else if (eligible.length) {
         [lastMatch] = eligible;
@@ -5127,6 +5467,7 @@ ${clippedAnchor.content}`);
       locatorStrategy: match.strategy,
       score: match.score,
       success: true,
+      hoverFallback: match.hoverFallback === true,
       waitedMs: match.waitedMs
     };
   }

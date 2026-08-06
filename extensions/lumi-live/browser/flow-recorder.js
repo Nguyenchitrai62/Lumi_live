@@ -1,5 +1,20 @@
 const INPUT_DEBOUNCE_MS = 650;
 const MAX_TEXT_CHARACTERS = 240;
+const MAX_RECORDED_SELECTOR_CANDIDATES = 12;
+const MAX_RECORDED_ANCESTORS = 6;
+const STABLE_DATA_ATTRIBUTE_NAMES = [
+  "data-testid",
+  "data-test",
+  "data-cy",
+  "data-qa",
+  "data-action",
+  "data-route",
+  "data-href",
+  "data-key",
+  "data-id",
+  "data-control",
+  "data-name",
+];
 
 function compactText(value, limit = MAX_TEXT_CHARACTERS) {
   return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
@@ -17,7 +32,7 @@ function associatedLabel(element) {
   if (wrappingLabel) return compactText(wrappingLabel.innerText);
   const elementId = element?.id;
   if (!elementId) return "";
-  const escapedId = CSS.escape(elementId);
+  const escapedId = cssIdentifier(elementId);
   return compactText(element.ownerDocument.querySelector(`label[for="${escapedId}"]`)?.innerText);
 }
 
@@ -41,6 +56,13 @@ function attributeSelectorValue(value) {
   return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+function cssIdentifier(value) {
+  if (globalThis.CSS?.escape) return globalThis.CSS.escape(String(value));
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, (character) => (
+    `\\${character.codePointAt(0).toString(16)} `
+  ));
+}
+
 function isLikelyDynamicElementId(value) {
   const id = String(value || "");
   return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(id)
@@ -48,20 +70,52 @@ function isLikelyDynamicElementId(value) {
     || /[-_:]\d{5,}$/.test(id);
 }
 
-function stableSelector(element) {
-  const testId = element.getAttribute("data-testid");
-  if (testId) return `[data-testid="${attributeSelectorValue(testId)}"]`;
-  if (element.id && !isLikelyDynamicElementId(element.id)) return `#${CSS.escape(element.id)}`;
-  const name = element.getAttribute("name");
-  if (name) {
-    const selector = `${element.tagName.toLowerCase()}[name="${attributeSelectorValue(name)}"]`;
-    if (element.ownerDocument.querySelectorAll(selector).length === 1) return selector;
+function stableDataAttributes(element) {
+  const attributes = {};
+  for (const name of STABLE_DATA_ATTRIBUTE_NAMES) {
+    const value = compactText(element?.getAttribute?.(name), 240);
+    if (value && !/(?:password|passcode|token|secret|api.?key|private.?key)/i.test(name)) {
+      attributes[name] = value;
+    }
   }
+  return attributes;
+}
 
+function stableClassNames(element) {
+  return String(element?.getAttribute?.("class") || "")
+    .split(/\s+/)
+    .map((value) => compactText(value, 100))
+    .filter((value) => (
+      value
+      && !/^(?:active|focus|focused|hover|selected|disabled|open|closed)$/i.test(value)
+      && !/^(?:css|jsx)-[a-z0-9]{5,}$/i.test(value)
+    ))
+    .slice(0, 12);
+}
+
+function selectorMatchesOnlyElement(element, selector) {
+  try {
+    const matches = Array.from(element.ownerDocument?.querySelectorAll?.(selector) || []);
+    return matches.length === 1 && matches[0] === element;
+  } catch {
+    return false;
+  }
+}
+
+function structuralSelector(element) {
   const parts = [];
   let current = element;
-  while (current?.nodeType === Node.ELEMENT_NODE && parts.length < 5) {
+  while (current?.nodeType === Node.ELEMENT_NODE && parts.length < 12) {
     let part = current.tagName.toLowerCase();
+    const testId = current.getAttribute("data-testid");
+    if (testId) {
+      parts.unshift(`[data-testid="${attributeSelectorValue(testId)}"]`);
+      return parts.join(" > ");
+    }
+    if (current.id && !isLikelyDynamicElementId(current.id)) {
+      parts.unshift(`#${cssIdentifier(current.id)}`);
+      return parts.join(" > ");
+    }
     const parent = current.parentElement;
     if (parent) {
       const siblings = Array.from(parent.children)
@@ -75,24 +129,138 @@ function stableSelector(element) {
   return parts.join(" > ");
 }
 
-function targetDescriptor(element) {
+function stableSelectorCandidates(element) {
+  const tag = element.tagName.toLowerCase();
+  const candidates = [];
+  const add = (selector) => {
+    const normalized = compactText(selector, 1000);
+    if (normalized && !candidates.includes(normalized)) candidates.push(normalized);
+  };
+  for (const [name, value] of Object.entries(stableDataAttributes(element))) {
+    add(`[${name}="${attributeSelectorValue(value)}"]`);
+  }
+  if (element.id) add(`#${cssIdentifier(element.id)}`);
+  const name = compactText(element.getAttribute("name"));
+  if (name) add(`${tag}[name="${attributeSelectorValue(name)}"]`);
+  const ariaLabel = compactText(element.getAttribute("aria-label"));
+  if (ariaLabel) add(`${tag}[aria-label="${attributeSelectorValue(ariaLabel)}"]`);
+  const type = compactText(element.getAttribute("type"), 60).toLowerCase();
+  if (type) add(`${tag}[type="${attributeSelectorValue(type)}"]`);
+  const role = compactText(element.getAttribute("role"), 80).toLowerCase();
+  if (role) add(`${tag}[role="${attributeSelectorValue(role)}"]`);
+  const classes = stableClassNames(element);
+  if (classes.length) add(`${tag}.${classes.slice(0, 3).map(cssIdentifier).join(".")}`);
+  add(structuralSelector(element));
+  return candidates
+    .sort((left, right) => (
+      Number(selectorMatchesOnlyElement(element, right))
+      - Number(selectorMatchesOnlyElement(element, left))
+    ))
+    .slice(0, MAX_RECORDED_SELECTOR_CANDIDATES);
+}
+
+function stableSelector(element) {
+  return stableSelectorCandidates(element)[0] || "";
+}
+
+function contextDescriptor(element) {
+  if (!element) return null;
+  return {
+    tag: String(element.tagName || "").toLowerCase(),
+    role: compactText(element.getAttribute?.("role"), 80).toLowerCase(),
+    name: accessibleName(element),
+    text: compactText(element.innerText || element.textContent),
+    title: compactText(element.getAttribute?.("title")),
+    testId: compactText(element.getAttribute?.("data-testid")),
+    elementId: compactText(element.id),
+    classNames: stableClassNames(element),
+    dataAttributes: stableDataAttributes(element),
+    selector: stableSelector(element),
+  };
+}
+
+function ancestorDescriptors(element) {
+  const ancestors = [];
+  for (
+    let current = element?.parentElement;
+    current && current !== element.ownerDocument?.body && ancestors.length < MAX_RECORDED_ANCESTORS;
+    current = current.parentElement
+  ) {
+    ancestors.push(contextDescriptor(current));
+  }
+  return ancestors.filter(Boolean);
+}
+
+function recordedHoverTarget(element, ancestors) {
+  let hovered = [];
+  try {
+    hovered = Array.from(element.ownerDocument?.querySelectorAll?.(":hover") || []);
+  } catch {
+    return null;
+  }
+  const hoveredSet = new Set(hovered);
+  const ancestorElements = [];
+  for (let current = element?.parentElement; current; current = current.parentElement) {
+    ancestorElements.push(current);
+  }
+  const hoveredAncestorIndex = ancestorElements.findIndex((candidate) => hoveredSet.has(candidate));
+  if (hoveredAncestorIndex < 0) return null;
+  return ancestors[hoveredAncestorIndex] || contextDescriptor(ancestorElements[hoveredAncestorIndex]);
+}
+
+function semanticOrdinal(element, name) {
+  const tag = String(element.tagName || "").toLowerCase();
+  if (!tag || !name) return null;
+  const type = compactText(element.getAttribute?.("type"), 60).toLowerCase();
+  const selector = type
+    ? `${tag}[type="${attributeSelectorValue(type)}"]`
+    : tag;
+  let candidates = [];
+  try {
+    candidates = Array.from(element.ownerDocument?.querySelectorAll?.(selector) || [])
+      .filter((candidate) => accessibleName(candidate) === name);
+  } catch {
+    return null;
+  }
+  const index = candidates.indexOf(element);
+  return index >= 0 ? index : null;
+}
+
+export function targetDescriptor(element, { origin = element } = {}) {
   const text = ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName)
     ? ""
     : compactText(element.innerText || element.textContent);
-  const href = element instanceof HTMLAnchorElement ? element.href : "";
+  const tag = element.tagName.toLowerCase();
+  const href = tag === "a" ? compactText(element.href || element.getAttribute("href"), 1000) : "";
+  const name = accessibleName(element);
+  const selectors = stableSelectorCandidates(element);
+  const ancestors = ancestorDescriptors(element);
+  const form = element.form || element.closest?.("form");
   return {
-    tag: element.tagName.toLowerCase(),
+    tag,
     type: compactText(element.getAttribute("type"), 60).toLowerCase(),
     role: compactText(element.getAttribute("role"), 80).toLowerCase(),
-    name: accessibleName(element),
+    name,
     label: associatedLabel(element),
     text,
+    title: compactText(element.getAttribute("title")),
+    value: ["button", "submit", "reset"].includes(String(element.type || "").toLowerCase())
+      ? compactText(element.value)
+      : "",
     placeholder: compactText(element.getAttribute("placeholder")),
     testId: compactText(element.getAttribute("data-testid")),
     elementId: compactText(element.id),
     inputName: compactText(element.getAttribute("name")),
+    classNames: stableClassNames(element),
+    dataAttributes: stableDataAttributes(element),
     href,
-    selector: stableSelector(element),
+    selector: selectors[0] || "",
+    selectors,
+    semanticOrdinal: semanticOrdinal(element, name),
+    ancestors,
+    hoverTarget: recordedHoverTarget(element, ancestors),
+    form: form ? contextDescriptor(form) : null,
+    origin: origin && origin !== element ? contextDescriptor(origin) : null,
   };
 }
 
@@ -254,7 +422,7 @@ export function createFlowRecorder({
     if (!element) return;
     emitStep({
       action: "click",
-      target: targetDescriptor(element),
+      target: targetDescriptor(element, { origin }),
     });
   }
 

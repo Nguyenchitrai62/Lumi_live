@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   executeRecordedFlowStep,
   findRecordedTarget,
+  scoreRecordedTargetCandidate,
   waitForRecordedTarget,
 } from "../browser/recorded-flow-replay.js";
 
@@ -12,6 +13,7 @@ function fakeElement({
   checked = false,
   clickToggles = true,
   disabled = false,
+  onDispatch = null,
   parent = null,
   tag = "button",
   text = "",
@@ -43,7 +45,11 @@ function fakeElement({
       events.push({ type: "click" });
     },
     closest() { return null; },
-    dispatchEvent(event) { events.push(event); return true; },
+    dispatchEvent(event) {
+      events.push(event);
+      onDispatch?.(event, this);
+      return true;
+    },
     focus() {},
     getAttribute(name) { return attributes.get(name) || null; },
     hasAttribute(name) { return attributes.has(name); },
@@ -66,7 +72,7 @@ function fakeDocument(elements) {
     querySelectorAll(selector) {
       if (selector === "*") return elements;
       if (selector.startsWith("label[for=")) return [];
-      const attributeMatch = selector.match(/(?:^|\[)(data-testid|id|name)="([^"]*)"\]/);
+      const attributeMatch = selector.match(/(?:^|\[)([a-z0-9_.:-]+)="([^"]*)"\]/i);
       if (attributeMatch) {
         const [, name, value] = attributeMatch;
         return elements.filter((element) => element.getAttribute(name) === value);
@@ -253,10 +259,123 @@ test("direct replay never falls back from a disabled exact target to another ena
       timeoutMs: 2000,
       windowObject: fakeWindow(),
     }),
-    /remained disabled, so it was not clicked/,
+    /did not become visible, enabled, and stable/,
   );
   assert.deepEqual(nextButton.events, []);
   assert.deepEqual(cancelButton.events, []);
+});
+
+test("direct target lookup uses an additional recorded data locator when the primary selector changed", () => {
+  const wrong = fakeElement({ attrs: { "data-action": "cancel" }, text: "Save" });
+  const target = fakeElement({ attrs: { "data-action": "save-boq" }, text: "Save" });
+  const documentObject = fakeDocument([wrong, target]);
+
+  const match = findRecordedTarget({
+    dataAttributes: { "data-action": "save-boq" },
+    name: "Save",
+    selector: "#stale-save-button",
+    selectors: ["#stale-save-button", '[data-action="save-boq"]'],
+    tag: "button",
+  }, { documentObject });
+
+  assert.equal(match.element, target);
+  assert.equal(match.strategy, "data:data-action");
+});
+
+test("direct target lookup uses recorded ancestor context to disambiguate duplicate buttons", () => {
+  const footer = fakeElement({ attrs: { id: "page-footer" }, tag: "div" });
+  const toolbar = fakeElement({ attrs: { id: "boq-form-actions" }, tag: "div" });
+  const wrong = fakeElement({ parent: footer, text: "Save" });
+  const target = fakeElement({ parent: toolbar, text: "Save" });
+  const documentObject = fakeDocument([footer, toolbar, wrong, target]);
+
+  const match = findRecordedTarget({
+    ancestors: [{ elementId: "boq-form-actions", tag: "div" }],
+    name: "Save",
+    tag: "button",
+  }, { documentObject });
+
+  assert.equal(match.element, target);
+  assert.ok(match.score > scoreRecordedTargetCandidate({ name: "Save", tag: "button" }, wrong));
+});
+
+test("direct target lookup can recover the button from a recorded child origin id", () => {
+  const button = fakeElement({ text: "" });
+  const icon = fakeElement({ attrs: { id: "save-boq-icon" }, parent: button, tag: "span" });
+  const documentObject = fakeDocument([button, icon]);
+
+  const match = findRecordedTarget({
+    name: "",
+    origin: { elementId: "save-boq-icon", selector: "#save-boq-icon", tag: "span" },
+    tag: "button",
+  }, { documentObject });
+
+  assert.equal(match.element, button);
+  assert.equal(match.strategy, "origin");
+});
+
+test("target waiting replays recorded hover context before looking for a mounted button", async () => {
+  const elements = [];
+  const target = fakeElement({ attrs: { "data-action": "save-row" }, text: "Save row" });
+  const hoverContainer = fakeElement({
+    attrs: { id: "boq-row-1" },
+    onDispatch(event) {
+      if (event.type === "mouseover" && !elements.includes(target)) elements.push(target);
+    },
+    tag: "div",
+  });
+  elements.push(hoverContainer);
+  const documentObject = fakeDocument(elements);
+
+  const match = await waitForRecordedTarget({
+    dataAttributes: { "data-action": "save-row" },
+    hoverTarget: { elementId: "boq-row-1", selector: "#boq-row-1", tag: "div" },
+    name: "Save row",
+    tag: "button",
+  }, {
+    documentObject,
+    timeoutMs: 1000,
+    windowObject: fakeWindow(),
+  });
+
+  assert.equal(match.element, target);
+  assert.ok(hoverContainer.events.some((event) => event.type === "mouseover"));
+});
+
+test("direct replay waits for an exact target to become enabled after page hydration", async () => {
+  const nextButton = fakeElement({
+    attrs: { id: "next-step", type: "button" },
+    disabled: true,
+    text: "Next",
+  });
+  const documentObject = fakeDocument([nextButton]);
+  const windowObject = fakeWindow();
+  let waitCount = 0;
+  windowObject.setTimeout = (callback) => {
+    waitCount += 1;
+    if (waitCount === 20) nextButton.disabled = false;
+    callback();
+  };
+
+  const result = await executeRecordedFlowStep({
+    action: "click",
+    target: {
+      elementId: "next-step",
+      name: "Next",
+      selector: "#next-step",
+      tag: "button",
+      type: "button",
+    },
+  }, {
+    confirmed: true,
+    documentObject,
+    timeoutMs: 2000,
+    windowObject,
+  });
+
+  assert.equal(result.success, true);
+  assert.ok(waitCount >= 20);
+  assert.deepEqual(nextButton.events.map((event) => event.type), ["click"]);
 });
 
 test("direct replay refuses a recorded child inside a disabled button", async () => {

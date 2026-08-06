@@ -170,6 +170,52 @@ test("flow normalization retains ordered actions and redacts sensitive values", 
   assert.equal(recordedStepTitle(flow.steps[1], 1), "Uncheck “Delete project”");
 });
 
+test("flow normalization preserves rich button locators and hover context", () => {
+  const flow = normalizeRecordedFlow({
+    id: "rich-locators",
+    name: "Rich button locators",
+    startUrl: "https://example.test/boq/23233",
+    steps: [recordedStep({
+      action: "click",
+      target: {
+        tag: "button",
+        type: "submit",
+        name: "Save",
+        selector: "#boq-form-actions > button",
+        selectors: [
+          "#boq-form-actions > button",
+          '[data-action="save-boq"]',
+          "button[type=submit]",
+        ],
+        classNames: ["ant-btn", "ant-btn-primary", "ant-btn"],
+        dataAttributes: {
+          "data-action": "save-boq",
+          "data-token": "must-not-survive",
+        },
+        semanticOrdinal: 1,
+        ancestors: [{ elementId: "boq-form-actions", tag: "div" }],
+        hoverTarget: { elementId: "boq-row", selector: "#boq-row", tag: "div" },
+        form: { elementId: "boq-form", selector: "#boq-form", tag: "form" },
+        origin: { elementId: "save-boq-icon", selector: "#save-boq-icon", tag: "span" },
+      },
+    })],
+  });
+  const target = flow.steps[0].target;
+
+  assert.deepEqual(target.selectors, [
+    "#boq-form-actions > button",
+    '[data-action="save-boq"]',
+    "button[type=submit]",
+  ]);
+  assert.deepEqual(target.classNames, ["ant-btn", "ant-btn-primary"]);
+  assert.deepEqual(target.dataAttributes, { "data-action": "save-boq" });
+  assert.equal(target.semanticOrdinal, 1);
+  assert.equal(target.ancestors[0].elementId, "boq-form-actions");
+  assert.equal(target.hoverTarget.elementId, "boq-row");
+  assert.equal(target.form.elementId, "boq-form");
+  assert.equal(target.origin.elementId, "save-boq-icon");
+});
+
 test("prompt-free flows build a flattened direct locator replay plan", () => {
   const firstBatch = appendRecordedStep([], recordedStep());
   const flow = {
@@ -923,7 +969,12 @@ test("extension wires recording, direct replay, persistence, and prompted agent 
   assert.match(worker, /failedAction/);
   assert.match(worker, /result\?\.success !== true/);
   assert.match(worker, /preparedControllerTabIds/);
-  assert.match(worker, /Reinstall the controller only after that delivery failure/);
+  assert.match(worker, /waitForRecordedFlowPageReady/);
+  assert.match(worker, /RECORDED_FLOW_TARGET_TIMEOUT_MS/);
+  assert.match(worker, /RECORDED_FLOW_NAVIGATION_START_GRACE_MS/);
+  assert.match(worker, /recordedFlow: true/);
+  assert.match(worker, /Grouping an about:blank tab can interrupt/);
+  assert.match(worker, /avoids reporting a controller failure mid-load/);
   assert.match(worker, /const canOpenNewTab = \["click", "submit"\]/);
   assert.match(worker, /newTabWatcher = canOpenNewTab/);
   assert.match(worker, /EXTENSION_EVENTS\.flowReplayProgress/);

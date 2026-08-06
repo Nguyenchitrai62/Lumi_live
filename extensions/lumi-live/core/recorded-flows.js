@@ -29,6 +29,44 @@ function clipText(value, limit) {
   return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
 }
 
+function normalizeStringList(value, { limit = 12, textLimit = 1000 } = {}) {
+  return [...new Set((Array.isArray(value) ? value : [])
+    .map((item) => clipText(item, textLimit))
+    .filter(Boolean))]
+    .slice(0, limit);
+}
+
+function normalizeRecordedDataAttributes(value) {
+  if (!isObject(value)) return {};
+  return Object.fromEntries(Object.entries(value)
+    .map(([name, attributeValue]) => [
+      clipText(name, 100).toLowerCase(),
+      clipText(attributeValue, MAX_TARGET_TEXT_CHARACTERS),
+    ])
+    .filter(([name, attributeValue]) => (
+      /^data-[a-z0-9_.:-]+$/i.test(name)
+      && attributeValue
+      && !/(?:password|passcode|token|secret|api.?key|private.?key)/i.test(name)
+    ))
+    .slice(0, 20));
+}
+
+function normalizeRecordedTargetContext(value) {
+  if (!isObject(value)) return null;
+  return {
+    tag: clipText(value.tag, 40).toLowerCase(),
+    role: clipText(value.role, 80).toLowerCase(),
+    name: clipText(value.name, MAX_TARGET_TEXT_CHARACTERS),
+    text: clipText(value.text, MAX_TARGET_TEXT_CHARACTERS),
+    title: clipText(value.title, MAX_TARGET_TEXT_CHARACTERS),
+    testId: clipText(value.testId, MAX_TARGET_TEXT_CHARACTERS),
+    elementId: clipText(value.elementId, MAX_TARGET_TEXT_CHARACTERS),
+    classNames: normalizeStringList(value.classNames, { textLimit: 100 }),
+    dataAttributes: normalizeRecordedDataAttributes(value.dataAttributes),
+    selector: clipText(value.selector, 1000),
+  };
+}
+
 function newId(prefix) {
   const suffix = globalThis.crypto?.randomUUID?.()
     || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -42,26 +80,44 @@ function normalizeTimestamp(value, fallback = Date.now()) {
 
 export function normalizeRecordedTarget(value) {
   const source = isObject(value) ? value : {};
-  return {
+  const target = {
     tag: clipText(source.tag, 40).toLowerCase(),
     type: clipText(source.type, 60).toLowerCase(),
     role: clipText(source.role, 80).toLowerCase(),
     name: clipText(source.name, MAX_TARGET_TEXT_CHARACTERS),
     label: clipText(source.label, MAX_TARGET_TEXT_CHARACTERS),
     text: clipText(source.text, MAX_TARGET_TEXT_CHARACTERS),
+    title: clipText(source.title, MAX_TARGET_TEXT_CHARACTERS),
+    controlValue: clipText(source.controlValue ?? source.value, MAX_TARGET_TEXT_CHARACTERS),
     placeholder: clipText(source.placeholder, MAX_TARGET_TEXT_CHARACTERS),
     testId: clipText(source.testId, MAX_TARGET_TEXT_CHARACTERS),
     elementId: clipText(source.elementId, MAX_TARGET_TEXT_CHARACTERS),
     inputName: clipText(source.inputName, MAX_TARGET_TEXT_CHARACTERS),
+    classNames: normalizeStringList(source.classNames, { textLimit: 100 }),
+    dataAttributes: normalizeRecordedDataAttributes(source.dataAttributes),
     href: clipText(source.href, 1000),
     selector: clipText(source.selector, 1000),
+    selectors: normalizeStringList(source.selectors, { textLimit: 1000 }),
+    semanticOrdinal: Number.isInteger(source.semanticOrdinal) && source.semanticOrdinal >= 0
+      ? Math.min(source.semanticOrdinal, 1000)
+      : null,
+    ancestors: (Array.isArray(source.ancestors) ? source.ancestors : [])
+      .map(normalizeRecordedTargetContext)
+      .filter(Boolean)
+      .slice(0, 6),
+    hoverTarget: normalizeRecordedTargetContext(source.hoverTarget),
+    form: normalizeRecordedTargetContext(source.form),
+    origin: normalizeRecordedTargetContext(source.origin),
   };
+  if (!target.selectors.length && target.selector) target.selectors = [target.selector];
+  return target;
 }
 
 export function recordedTargetKey(target) {
   const normalized = normalizeRecordedTarget(target);
   return normalized.testId
     || normalized.elementId
+    || normalized.selectors[0]
     || normalized.selector
     || [
       normalized.tag,

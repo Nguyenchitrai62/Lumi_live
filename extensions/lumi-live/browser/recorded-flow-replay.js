@@ -5,7 +5,6 @@ import {
 } from "./page-agent-safety.js";
 
 const DEFAULT_TARGET_TIMEOUT_MS = 10000;
-const DISABLED_EXACT_TARGET_GRACE_MS = 750;
 const MAX_SEMANTIC_CANDIDATES = 5000;
 const SEMANTIC_CONTROL_SELECTOR = [
   "button",
@@ -98,6 +97,12 @@ function accessibleName(element) {
 
 function elementDescriptor(element) {
   const tag = String(element?.tagName || "").toLowerCase();
+  const dataAttributes = {};
+  for (const attribute of Array.from(element?.attributes || [])) {
+    if (/^data-[a-z0-9_.:-]+$/i.test(attribute?.name || "")) {
+      dataAttributes[String(attribute.name).toLowerCase()] = compactText(attribute.value, 240);
+    }
+  }
   return {
     tag,
     type: compactText(element?.getAttribute?.("type") || element?.type, 60).toLowerCase(),
@@ -107,10 +112,20 @@ function elementDescriptor(element) {
     text: ["input", "textarea", "select"].includes(tag)
       ? ""
       : compactText(element?.innerText || element?.textContent, 240),
+    title: compactText(element?.getAttribute?.("title"), 240),
+    controlValue: ["button", "submit", "reset"].includes(
+      String(element?.type || element?.getAttribute?.("type") || "").toLowerCase(),
+    ) ? compactText(element?.value, 240) : "",
     placeholder: compactText(element?.getAttribute?.("placeholder"), 240),
     testId: compactText(element?.getAttribute?.("data-testid"), 240),
     elementId: compactText(element?.getAttribute?.("id") || element?.id, 240),
     inputName: compactText(element?.getAttribute?.("name") || element?.name, 240),
+    classNames: String(element?.getAttribute?.("class") || "")
+      .split(/\s+/)
+      .map((value) => compactText(value, 100))
+      .filter(Boolean)
+      .slice(0, 20),
+    dataAttributes,
     href: compactText(element?.href || element?.getAttribute?.("href"), 1000),
   };
 }
@@ -134,7 +149,67 @@ function scoreSemanticIdentity(target, descriptor) {
   score += scoreText(descriptor.label, target.label, 80, 40);
   score += scoreText(descriptor.placeholder, target.placeholder, 65, 30);
   score += scoreText(descriptor.text, target.text, 55, 25);
+  score += scoreText(descriptor.title, target.title, 45, 20);
+  score += scoreText(descriptor.controlValue, target.controlValue, 40, 20);
   return score;
+}
+
+function scoreAttributeIdentity(target, descriptor) {
+  let score = 0;
+  const expectedClasses = Array.isArray(target.classNames) ? target.classNames : [];
+  const actualClasses = new Set(descriptor.classNames || []);
+  score += Math.min(30, expectedClasses.filter((name) => actualClasses.has(name)).length * 6);
+  for (const [name, value] of Object.entries(target.dataAttributes || {})) {
+    if (descriptor.dataAttributes?.[name] === value) score += 35;
+  }
+  return score;
+}
+
+function scoreTargetContext(expected, element) {
+  if (!expected || !element) return 0;
+  const descriptor = elementDescriptor(element);
+  let score = scoreSemanticIdentity(expected, descriptor)
+    + scoreAttributeIdentity(expected, descriptor);
+  if (expected.testId && descriptor.testId === expected.testId) score += 140;
+  if (expected.elementId && descriptor.elementId === expected.elementId) score += 130;
+  if (expected.tag && descriptor.tag === expected.tag) score += 12;
+  return score;
+}
+
+function scoreAncestorIdentity(target, element) {
+  const expectedAncestors = Array.isArray(target.ancestors) ? target.ancestors : [];
+  if (!expectedAncestors.length) return 0;
+  const actualAncestors = [];
+  for (let current = element?.parentElement; current && actualAncestors.length < 10; current = current.parentElement) {
+    actualAncestors.push(current);
+  }
+  let total = 0;
+  for (let expectedIndex = 0; expectedIndex < expectedAncestors.length; expectedIndex += 1) {
+    let best = 0;
+    for (let actualIndex = 0; actualIndex < actualAncestors.length; actualIndex += 1) {
+      const contextScore = scoreTargetContext(
+        expectedAncestors[expectedIndex],
+        actualAncestors[actualIndex],
+      ) - Math.abs(expectedIndex - actualIndex) * 5;
+      best = Math.max(best, contextScore);
+    }
+    total += Math.min(70, best);
+  }
+  return Math.min(140, total);
+}
+
+function scoreRecordedOrdinal(target, element, descriptor) {
+  if (!Number.isInteger(target.semanticOrdinal) || target.semanticOrdinal < 0) return 0;
+  if (target.tag && descriptor.tag !== target.tag) return 0;
+  if (target.type && descriptor.type !== target.type) return 0;
+  const selector = target.type
+    ? `${descriptor.tag}[type="${attributeSelectorValue(target.type)}"]`
+    : descriptor.tag;
+  const candidates = queryAll(element?.ownerDocument, selector)
+    .filter((candidate) => comparableText(accessibleName(candidate)) === comparableText(target.name));
+  const candidateIndex = candidates.indexOf(element);
+  if (candidateIndex < 0) return 0;
+  return candidateIndex === target.semanticOrdinal ? 35 : -10;
 }
 
 export function scoreRecordedTargetCandidate(target, element) {
@@ -156,6 +231,13 @@ export function scoreRecordedTargetCandidate(target, element) {
   if (target.type && descriptor.type === target.type) score += 18;
   if (target.href && descriptor.href === target.href) score += 45;
   score += semanticScore;
+  score += scoreAttributeIdentity(target, descriptor);
+  score += scoreAncestorIdentity(target, element);
+  score += target.form ? Math.min(80, scoreTargetContext(
+    target.form,
+    element?.form || element?.closest?.("form"),
+  )) : 0;
+  score += scoreRecordedOrdinal(target, element, descriptor);
   return score;
 }
 
@@ -166,7 +248,9 @@ function hasSemanticIdentity(target) {
     || target.text
     || target.placeholder
     || target.role
-    || target.inputName,
+    || target.inputName
+    || target.title
+    || target.controlValue,
   );
 }
 
@@ -175,7 +259,10 @@ function candidateIsCompatible(target, element, strategy) {
   const semanticScore = scoreSemanticIdentity(target, descriptor);
   if (target.tag && descriptor.tag && target.tag !== descriptor.tag) return false;
   if (target.type && descriptor.type && target.type !== descriptor.type) return false;
-  if (["testId", "inputName"].includes(strategy)) return true;
+  if (
+    ["testId", "inputName", "origin"].includes(strategy)
+    || strategy.startsWith("data:")
+  ) return true;
   if (strategy === "elementId") {
     return !isLikelyDynamicElementId(target.elementId)
       || !hasSemanticIdentity(target)
@@ -202,6 +289,37 @@ function addCandidates(candidateMap, elements, strategy, priority, target) {
       || entry.priority === previous.priority && entry.score > previous.score
     ) candidateMap.set(element, entry);
   }
+}
+
+function queryRecordedContext(context, queryRoots) {
+  if (!context) return [];
+  const elements = [];
+  const add = (matches) => {
+    for (const element of matches) {
+      if (element && !elements.includes(element)) elements.push(element);
+    }
+  };
+  if (context.testId) {
+    add(queryRoots(`[data-testid="${attributeSelectorValue(context.testId)}"]`));
+  }
+  if (context.elementId) {
+    add(queryRoots(`[id="${attributeSelectorValue(context.elementId)}"]`));
+  }
+  for (const [name, value] of Object.entries(context.dataAttributes || {})) {
+    add(queryRoots(`[${name}="${attributeSelectorValue(value)}"]`));
+  }
+  if (context.selector) add(queryRoots(context.selector));
+  return elements;
+}
+
+function recordedControlFromOrigin(origin, target) {
+  for (let current = origin; current; current = current.parentElement) {
+    const descriptor = elementDescriptor(current);
+    if (target.tag && descriptor.tag !== target.tag) continue;
+    if (target.type && descriptor.type && descriptor.type !== target.type) continue;
+    return current;
+  }
+  return null;
 }
 
 function rankRecordedTargetCandidates(rawTarget, {
@@ -242,8 +360,38 @@ function rankRecordedTargetCandidates(rawTarget, {
       target,
     );
   }
-  if (target.selector) {
-    addCandidates(candidates, queryRoots(target.selector), "selector", 250, target);
+  for (const [name, value] of Object.entries(target.dataAttributes || {})) {
+    addCandidates(
+      candidates,
+      queryRoots(`[${name}="${attributeSelectorValue(value)}"]`),
+      `data:${name}`,
+      425,
+      target,
+    );
+  }
+  const selectors = [...new Set([
+    ...(Array.isArray(target.selectors) ? target.selectors : []),
+    target.selector,
+  ].filter(Boolean))];
+  for (let index = 0; index < selectors.length; index += 1) {
+    addCandidates(
+      candidates,
+      queryRoots(selectors[index]),
+      "selector",
+      Math.max(260, 330 - index * 5),
+      target,
+    );
+  }
+  if (target.origin) {
+    addCandidates(
+      candidates,
+      queryRecordedContext(target.origin, queryRoots)
+        .map((origin) => recordedControlFromOrigin(origin, target))
+        .filter(Boolean),
+      "origin",
+      440,
+      target,
+    );
   }
   if (includeSemantic) {
     addCandidates(
@@ -348,6 +496,33 @@ function firstUsableRecordedTargetCandidate(candidates, windowObject) {
   )) || null;
 }
 
+function dispatchRecordedHover(element, windowObject) {
+  if (!element) return false;
+  element.scrollIntoView?.({ block: "center", inline: "nearest" });
+  const path = [];
+  for (let current = element; current; current = current.parentElement) path.unshift(current);
+  const eventOptions = { bubbles: true, cancelable: true, pointerType: "mouse" };
+  for (const current of path) {
+    const PointerEventClass = windowObject.PointerEvent || windowObject.MouseEvent || windowObject.Event;
+    const MouseEventClass = windowObject.MouseEvent || windowObject.Event;
+    current.dispatchEvent?.(new PointerEventClass("pointerover", eventOptions));
+    current.dispatchEvent?.(new MouseEventClass("mouseover", eventOptions));
+    current.dispatchEvent?.(new MouseEventClass("mouseenter", { ...eventOptions, bubbles: false }));
+  }
+  element.focus?.({ preventScroll: true });
+  return true;
+}
+
+export function revealRecordedTarget(rawTarget, {
+  documentObject = document,
+  windowObject = window,
+} = {}) {
+  const hoverTarget = rawTarget?.hoverTarget;
+  if (!hoverTarget) return false;
+  const hoverMatch = findRecordedTarget(hoverTarget, { documentObject });
+  return hoverMatch ? dispatchRecordedHover(hoverMatch.element, windowObject) : false;
+}
+
 export async function waitForRecordedTarget(rawTarget, {
   documentObject = document,
   windowObject = window,
@@ -355,12 +530,17 @@ export async function waitForRecordedTarget(rawTarget, {
 } = {}) {
   const maximumWait = Math.min(30000, Math.max(500, Number(timeoutMs) || DEFAULT_TARGET_TIMEOUT_MS));
   const startedAt = Date.now();
-  let disabledExactElement = null;
-  let disabledExactSince = 0;
   let lastMatch = null;
   let lastFallbackAt = -Infinity;
+  let lastRevealAt = -Infinity;
   while (Date.now() - startedAt <= maximumWait) {
     const elapsedMs = Date.now() - startedAt;
+    if (rawTarget?.hoverTarget && elapsedMs - lastRevealAt >= 250) {
+      lastRevealAt = elapsedMs;
+      if (revealRecordedTarget(rawTarget, { documentObject, windowObject })) {
+        await nextFrame(windowObject);
+      }
+    }
     const fastCandidates = eligibleRecordedTargetCandidates(rankRecordedTargetCandidates(
       rawTarget,
       {
@@ -372,22 +552,6 @@ export async function waitForRecordedTarget(rawTarget, {
     let eligible = fastCandidates;
     let match = firstUsableRecordedTargetCandidate(fastCandidates, windowObject);
     const exactLocatorMatched = fastCandidates.some((candidate) => candidate.priority > 0);
-    const disabledExactMatch = exactLocatorMatched
-      ? fastCandidates.find((candidate) => (
-        candidate.priority > 0
-        && isElementVisible(candidate.element, windowObject)
-        && !isElementEnabled(candidate.element, windowObject)
-      ))
-      : null;
-    if (disabledExactMatch?.element === disabledExactElement) {
-      if (Date.now() - disabledExactSince >= DISABLED_EXACT_TARGET_GRACE_MS) {
-        throw new Error("The recorded target was found but remained disabled, so it was not clicked.");
-      }
-    } else {
-      disabledExactElement = disabledExactMatch?.element || null;
-      disabledExactSince = disabledExactElement ? Date.now() : 0;
-    }
-
     // Exact locators in the light DOM cover the common recorded-flow path without
     // walking every element. Shadow-root and semantic recovery stay available, but
     // are throttled because both require a full DOM scan. Once an exact compatible
@@ -409,6 +573,19 @@ export async function waitForRecordedTarget(rawTarget, {
         && isElementEnabled(match.element, windowObject)
       ) {
         return { ...match, waitedMs: Date.now() - startedAt };
+      }
+    } else if (rawTarget?.hoverTarget && elapsedMs >= 500) {
+      const exactHiddenMatch = eligible.find((candidate) => (
+        candidate.priority > 0
+        && candidate.element?.isConnected
+        && isElementEnabled(candidate.element, windowObject)
+      ));
+      if (exactHiddenMatch && await waitUntilStable(exactHiddenMatch.element, windowObject)) {
+        return {
+          ...exactHiddenMatch,
+          hoverFallback: true,
+          waitedMs: Date.now() - startedAt,
+        };
       }
     } else if (eligible.length) {
       [lastMatch] = eligible;
@@ -579,6 +756,7 @@ export async function executeRecordedFlowStep(rawStep, {
     locatorStrategy: match.strategy,
     score: match.score,
     success: true,
+    hoverFallback: match.hoverFallback === true,
     waitedMs: match.waitedMs,
   };
 }
