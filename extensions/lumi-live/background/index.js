@@ -37,6 +37,7 @@ import {
   DEFAULT_RECORDED_FLOW_PAGE_LOAD_TIMEOUT_MS,
   waitForRecordedFlowPageReady,
 } from "../browser/recorded-flow-page-readiness.js";
+import { recordedFlowUrlMatches } from "../browser/recorded-flow-url.js";
 import { createRecordedFlowService } from "./recorded-flow-service.js";
 import { createVideoAnalysisService } from "./video-analysis-service.js";
 
@@ -206,60 +207,6 @@ async function handleRecordedFlowStep(message, sender) {
   ) return;
   const draft = await recordedFlows.append(message.step);
   broadcastFlowRecordingChanged(draft);
-}
-
-function isDynamicRecordedUrlSegment(value) {
-  return /^\d{2,}$/.test(value)
-    || /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(value)
-    || /^[0-9a-z_-]{20,}$/i.test(value);
-}
-
-function dynamicRecordedUrlSegmentsMatch(expected, actual) {
-  if (/^\d{2,}$/.test(expected)) return /^\d{2,}$/.test(actual);
-  if (/^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(expected)) {
-    return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(actual);
-  }
-  return /^[0-9a-z_-]{20,}$/i.test(expected)
-    && /^[0-9a-z_-]{20,}$/i.test(actual);
-}
-
-function recordedUrlValueMatches(actual, expected) {
-  if (expected === "[redacted]" || actual === expected) return true;
-  return isDynamicRecordedUrlSegment(expected)
-    && dynamicRecordedUrlSegmentsMatch(expected, actual);
-}
-
-function recordedUrlHashMatches(actualHash, expectedHash) {
-  if (!expectedHash || expectedHash.includes("[redacted]")) return true;
-  const actualParts = actualHash.replace(/^#/, "").split("/");
-  const expectedParts = expectedHash.replace(/^#/, "").split("/");
-  return actualParts.length === expectedParts.length
-    && expectedParts.every((part, index) => recordedUrlValueMatches(actualParts[index], part));
-}
-
-function recordedFlowUrlMatches(actualValue, expectedValue) {
-  try {
-    const actual = new URL(actualValue);
-    const expected = new URL(expectedValue);
-    if (actual.origin !== expected.origin) return false;
-    const actualParts = actual.pathname.split("/").filter(Boolean);
-    const expectedParts = expected.pathname.split("/").filter(Boolean);
-    if (actualParts.length !== expectedParts.length) return false;
-    if (!expectedParts.every((part, index) => (
-      part === actualParts[index]
-      || isDynamicRecordedUrlSegment(part)
-        && dynamicRecordedUrlSegmentsMatch(part, actualParts[index])
-    ))) return false;
-    for (const [key, value] of expected.searchParams) {
-      const actualValues = actual.searchParams.getAll(key);
-      if (!actualValues.some((candidate) => recordedUrlValueMatches(candidate, value))) {
-        return false;
-      }
-    }
-    return recordedUrlHashMatches(actual.hash, expected.hash);
-  } catch {
-    return String(actualValue || "") === String(expectedValue || "");
-  }
 }
 
 async function waitForRecordedFlowResultUrl(tabId, expectedUrl, action) {

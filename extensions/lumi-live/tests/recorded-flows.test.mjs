@@ -1295,6 +1295,7 @@ test("extension wires recording, direct replay, persistence, and prompted agent 
   assert.match(panelEntry, /recordedFlowInternalTaskIds/);
   assert.match(panelEntry, /filterTaskTranscriptHistory/);
   assert.match(panelEntry, /stepState === "completed-all"/);
+  assert.match(panelEntry, /dataset\.state === "completed" && nextState === "failed"/);
   assert.match(panelEntry, /reportFlowEvent:\s*renderRecordedFlowEvent/);
   assert.match(panelEntry, /prepareFlowRun:\s*startRecordedFlowChatSession/);
   assert.match(panelEntry, /onFlowRunStateChange:\s*setRecordedFlowRunActive/);

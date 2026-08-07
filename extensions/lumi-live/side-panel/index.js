@@ -4540,6 +4540,9 @@ function renderRecordedFlowEvent({
     if (!item) return;
     item.row.hidden = false;
     if (item.row.dataset.state === "recovered" && nextState === "completed") return;
+    // A later page-readiness/postcondition error must not rewrite the factual
+    // result of an action that the replay controller already acknowledged.
+    if (item.row.dataset.state === "completed" && nextState === "failed") return;
     item.row.dataset.state = nextState;
     if (modeOverride === "agent" || modeOverride === "direct") {
       item.row.dataset.mode = modeOverride;
