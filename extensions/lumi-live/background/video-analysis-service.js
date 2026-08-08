@@ -15,8 +15,8 @@ const FILE_UPLOAD_ENDPOINT = "https://generativelanguage.googleapis.com/upload/v
 const FILE_API_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta";
 const GROQ_TRANSCRIPTION_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
 export const GROQ_TRANSCRIPTION_MODELS = Object.freeze([
-  "whisper-large-v3-turbo",
   "whisper-large-v3",
+  "whisper-large-v3-turbo",
 ]);
 export const GROQ_TRANSCRIPTION_MODEL = GROQ_TRANSCRIPTION_MODELS[0];
 export const MAX_GROQ_FREE_UPLOAD_BYTES = Math.floor(19.5 * 1024 * 1024);

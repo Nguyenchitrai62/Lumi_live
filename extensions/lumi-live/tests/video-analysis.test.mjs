@@ -1783,7 +1783,7 @@ test("uses Groq Whisper for a timestamped transcript when a direct audio track i
   assert.equal(storage.state.analyses[0].transcriptModel, undefined);
 });
 
-test("switches immediately from Whisper Turbo to Whisper Large V3 on Groq rate limit", async () => {
+test("switches immediately from Whisper Large V3 to Whisper Turbo on Groq rate limit", async () => {
   const storage = createMemoryStorage();
   const attemptedModels = [];
   const service = createVideoAnalysisService({
@@ -1811,7 +1811,7 @@ test("switches immediately from Whisper Turbo to Whisper Large V3 on Groq rate l
       assert.equal(init.body.get("url"), "https://cdn.example.com/model-failover.mp3");
       const model = init.body.get("model");
       attemptedModels.push(model);
-      if (model === "whisper-large-v3-turbo") {
+      if (model === "whisper-large-v3") {
         return new Response(JSON.stringify({ error: { message: "Rate limit reached" } }), {
           status: 429,
           headers: { "content-type": "application/json", "retry-after": "1" },
@@ -1820,7 +1820,7 @@ test("switches immediately from Whisper Turbo to Whisper Large V3 on Groq rate l
       return new Response(JSON.stringify({
         language: "en",
         duration: 20,
-        segments: [{ start: 0, end: 20, text: "Large V3 transcript" }],
+        segments: [{ start: 0, end: 20, text: "Turbo fallback transcript" }],
       }), { status: 200, headers: { "content-type": "application/json" } });
     },
     getTargetTab: async () => ({ id: 21, title: "Groq failover", url: "https://example.com/model-failover" }),
@@ -1832,10 +1832,10 @@ test("switches immediately from Whisper Turbo to Whisper Large V3 on Groq rate l
     args: { action: "transcript" },
   });
   assert.deepEqual(attemptedModels, GROQ_TRANSCRIPTION_MODELS);
-  assert.equal(result.transcriptModel, "whisper-large-v3");
+  assert.equal(result.transcriptModel, "whisper-large-v3-turbo");
   assert.equal(result.groqModelFallbackUsed, true);
   assert.equal(result.groqFallbackUsed, false);
-  assert.match(result.transcript, /Large V3 transcript/);
+  assert.match(result.transcript, /Turbo fallback transcript/);
 });
 
 test("treats any Groq failure as optional and summarizes audio directly with Gemini", async () => {
@@ -3466,8 +3466,8 @@ test("publishes the built-in video tool and its routing guidance", () => {
   assert.match(instruction, /high-demand, or temporary-capacity errors/i);
   assert.match(instruction, /caption or subtitle track/i);
   assert.match(instruction, /Do not reuse a transcript/i);
-  assert.match(instruction, /whisper-large-v3-turbo first/i);
-  assert.match(instruction, /whisper-large-v3 second/i);
+  assert.match(instruction, /whisper-large-v3 first/i);
+  assert.match(instruction, /whisper-large-v3-turbo/i);
   assert.match(instruction, /YouTube.*public watch URL directly to Gemini/is);
   assert.match(instruction, /Groq is only a speed optimization/i);
   assert.match(instruction, /summarize it directly in one pass/i);
