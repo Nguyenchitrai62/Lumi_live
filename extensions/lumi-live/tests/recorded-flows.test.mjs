@@ -775,6 +775,10 @@ test("recorded flow export downloads one dated JSON file", () => {
 test("flow JSON drag detection works when Chrome omits the file MIME type", () => {
   const jsonFile = { name: "lumi-recorded-flows-2026-08-05.json", type: "" };
   assert.deepEqual(recordedFlowJsonFilesFromTransfer({ files: [jsonFile] }), [jsonFile]);
+  assert.deepEqual(recordedFlowJsonFilesFromTransfer({
+    files: [],
+    items: [{ kind: "file", getAsFile: () => jsonFile }],
+  }), [jsonFile]);
   assert.equal(dataTransferContainsRecordedFlowJson({
     files: [],
     items: [{
@@ -788,6 +792,47 @@ test("flow JSON drag detection works when Chrome omits the file MIME type", () =
     files: [{ name: "notes.txt", type: "text/plain" }],
     items: [],
   }), false);
+});
+
+test("overwriting an imported flow keeps matching local upload bindings", async () => {
+  const local = new MemoryStorageArea();
+  const session = new MemoryStorageArea();
+  const service = createRecordedFlowService({
+    localStorageArea: local,
+    sessionStorageArea: session,
+    flowsStorageKey: "flows",
+    draftStorageKey: "draft",
+  });
+  await service.initialize();
+  await service.start({
+    sessionId: "recording-upload-import",
+    tabId: 10,
+    startUrl: "https://example.test/quotes",
+    startTitle: "Quotes",
+  });
+  await service.append(recordedStep({
+    action: "upload_file",
+    accept: ".pdf",
+    fileVariables: ["UPLOAD_FILE_1"],
+    files: [{ name: "quote.pdf", size: 100, type: "application/pdf" }],
+    localFilePaths: [],
+    target: { elementId: "quote-file", tag: "input", type: "file" },
+    value: undefined,
+  }));
+  await service.updateDraft({
+    localFilePaths: ["C:\\QC\\quote.pdf"],
+    stepId: "step-a",
+  });
+  const [savedFlow] = await service.list();
+  const payload = createRecordedFlowsExport([savedFlow]);
+
+  const imported = await service.importFlows(payload, [{
+    action: "overwrite",
+    existingFlowId: savedFlow.id,
+    flowId: savedFlow.id,
+  }]);
+
+  assert.deepEqual(imported.flows[0].steps[0].localFilePaths, ["C:\\QC\\quote.pdf"]);
 });
 
 test("a conflicting import renames inline to green-ready or overwrites by deliberate tick", () => {

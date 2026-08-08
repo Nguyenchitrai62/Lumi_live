@@ -2854,6 +2854,50 @@ function uniqueImportedFlowId(usedIds) {
   } while (usedIds.has(id));
   return id;
 }
+function uploadSteps(flow) {
+  const result = [];
+  const visit = (step) => {
+    if (step?.action === "upload_file") {
+      result.push(step);
+      return;
+    }
+    if (step?.action === "agent_group" && Array.isArray(step.children)) {
+      step.children.forEach(visit);
+    }
+  };
+  (flow?.steps || []).forEach(visit);
+  return result;
+}
+function uploadBindingKey(step) {
+  return JSON.stringify({
+    accept: String(step?.accept || ""),
+    files: (step?.files || []).map((file) => ({
+      name: String(file?.name || ""),
+      size: Number(file?.size) || 0,
+      type: String(file?.type || "")
+    })),
+    fileVariables: Array.from(step?.fileVariables || [], String),
+    multiple: step?.multiple === true
+  });
+}
+function preserveLocalUploadBindings(importedFlow, existingFlow) {
+  const imported = normalizeRecordedFlow(importedFlow);
+  const existing = normalizeRecordedFlow(existingFlow);
+  if (!imported || !existing) return imported;
+  const existingUploads = uploadSteps(existing);
+  const usedExistingUploads = /* @__PURE__ */ new Set();
+  for (const importedUpload of uploadSteps(imported)) {
+    const expectedCount = Math.max(
+      1,
+      importedUpload.fileVariables?.length || importedUpload.files?.length || 1
+    );
+    const existingIndex = existingUploads.findIndex((candidate, index) => !usedExistingUploads.has(index) && uploadBindingKey(candidate) === uploadBindingKey(importedUpload) && Array.isArray(candidate.localFilePaths) && candidate.localFilePaths.length === expectedCount);
+    if (existingIndex < 0) continue;
+    usedExistingUploads.add(existingIndex);
+    importedUpload.localFilePaths = [...existingUploads[existingIndex].localFilePaths];
+  }
+  return imported;
+}
 function createDraft({ sessionId, tabId, startUrl, startTitle }) {
   const now = Date.now();
   return {
@@ -3079,13 +3123,13 @@ function createRecordedFlowService({
           throw new Error("A flow can only overwrite a saved flow with the same name.");
         }
         overwrittenFlowIds.add(existingFlow.id);
-        selectedFlows.push(normalizeRecordedFlow({
+        selectedFlows.push(preserveLocalUploadBindings({
           ...importedFlow,
           id: existingFlow.id,
           name: existingFlow.name,
           createdAt: existingFlow.createdAt,
           updatedAt: Date.now()
-        }));
+        }, existingFlow));
         updatedCount += 1;
         continue;
       }

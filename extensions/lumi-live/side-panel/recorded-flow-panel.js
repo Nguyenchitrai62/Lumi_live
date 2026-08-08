@@ -44,7 +44,17 @@ export function isRecordedFlowJsonFile(file) {
 }
 
 export function recordedFlowJsonFilesFromTransfer(dataTransfer) {
-  return Array.from(dataTransfer?.files || []).filter(isRecordedFlowJsonFile);
+  const files = Array.from(dataTransfer?.files || []).filter(isRecordedFlowJsonFile);
+  if (files.length) return files;
+  return Array.from(dataTransfer?.items || []).flatMap((item) => {
+    if (item?.kind !== "file") return [];
+    try {
+      const file = item.getAsFile?.();
+      return isRecordedFlowJsonFile(file) ? [file] : [];
+    } catch {
+      return [];
+    }
+  });
 }
 
 export function dataTransferContainsRecordedFlowJson(dataTransfer) {
