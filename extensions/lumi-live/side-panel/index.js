@@ -327,6 +327,7 @@ let fastModeController = null;
 const setupTimeoutIds = new Set();
 
 const partialMessages = { user: null, lumi: null, thinking: null };
+const copyFeedbackTimers = new WeakMap();
 
 const avatarController = createAvatarController({
   elements: {
@@ -1129,6 +1130,11 @@ function createTranscriptSnapshotHtml() {
   for (const node of clone.querySelectorAll("[style]")) {
     node.removeAttribute("style");
   }
+  for (const button of clone.querySelectorAll(".message-copy-button")) {
+    button.removeAttribute("data-state");
+    button.setAttribute("aria-label", "Copy AI response");
+    button.textContent = "Copy";
+  }
   for (const disclosure of clone.querySelectorAll(
     ".message-thinking, .mcp-activity, .agent-step-card",
   )) {
@@ -1240,6 +1246,7 @@ async function restoreActiveChatSessionSnapshot(session) {
   elements.transcript.innerHTML = sanitizeStoredTranscriptHtml(
     snapshot.transcriptHtml,
   );
+  ensureRestoredMessageCopyButtons();
   markRestoredWorkbookAttachmentsExpired();
   for (const row of elements.transcript.querySelectorAll('.turn-work-status[data-state="working"]')) {
     row.dataset.state = "cancelled";
@@ -2007,6 +2014,7 @@ function setVisibleTranscriptText(message, text) {
   message.visibleText = visibleText;
   if (message.role === "lumi") renderMarkdown(message.content, visibleText);
   else message.content.textContent = visibleText;
+  if (message.copyButton) message.copyButton.disabled = !visibleText.trim();
 }
 
 function revealTranscriptText(message, targetText) {
@@ -2062,6 +2070,97 @@ function appendMessageTimestamp(article, timestamp = Date.now()) {
   footer.append(time);
   article.append(footer);
   return footer;
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Continue with the selection-based fallback below.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = typeof document.execCommand === "function" && document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("Clipboard is unavailable");
+}
+
+function getMessageCopyText(article) {
+  const content = article.querySelector(".message-content")
+    || Array.from(article.children).find((child) => child.tagName === "P");
+  return String(content?.innerText || content?.textContent || "").trim();
+}
+
+function createMessageCopyButton() {
+  const button = document.createElement("button");
+  button.className = "message-copy-button";
+  button.dataset.copyMessage = "true";
+  button.type = "button";
+  button.setAttribute("aria-label", "Copy AI response");
+  button.title = "Copy AI response";
+  button.textContent = "Copy";
+  return button;
+}
+
+function ensureMessageCopyButton(article) {
+  if (!article.matches(".message.message-lumi")
+    || article.classList.contains("message-capture")
+    || article.classList.contains("message-transcript-download")
+    || article.querySelector(".message-copy-button")) return;
+  const content = article.querySelector(".message-content")
+    || Array.from(article.children).find((child) => child.tagName === "P");
+  if (!content) return;
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
+  const button = createMessageCopyButton();
+  button.disabled = !getMessageCopyText(article);
+  actions.append(button);
+  const footer = article.querySelector(":scope > .message-meta");
+  if (footer) footer.before(actions);
+  else article.append(actions);
+}
+
+function ensureRestoredMessageCopyButtons() {
+  for (const article of elements.transcript.querySelectorAll(".message.message-lumi")) {
+    ensureMessageCopyButton(article);
+  }
+}
+
+async function handleMessageCopy(button) {
+  const article = button.closest(".message");
+  const text = article ? getMessageCopyText(article) : "";
+  if (!text) return;
+  const previousTimer = copyFeedbackTimers.get(button);
+  if (previousTimer) window.clearTimeout(previousTimer);
+
+  try {
+    await copyTextToClipboard(text);
+    button.dataset.state = "copied";
+    button.setAttribute("aria-label", "AI response copied");
+    button.textContent = "Copied";
+  } catch {
+    button.dataset.state = "error";
+    button.setAttribute("aria-label", "Copy AI response failed");
+    button.textContent = "Retry";
+  }
+
+  const timer = window.setTimeout(() => {
+    copyFeedbackTimers.delete(button);
+    if (!button.isConnected) return;
+    button.removeAttribute("data-state");
+    button.setAttribute("aria-label", "Copy AI response");
+    button.textContent = "Copy";
+  }, 1800);
+  copyFeedbackTimers.set(button, timer);
 }
 
 function ensureTurnWorkIndicator(work = activeTurnWork) {
@@ -2257,11 +2356,20 @@ function createMessage(role, text, {
     article.append(attachmentList);
   }
   article.append(content);
+  let copyButton = null;
+  if (role === "lumi") {
+    const actions = document.createElement("div");
+    actions.className = "message-actions";
+    copyButton = createMessageCopyButton();
+    copyButton.disabled = !text.trim();
+    actions.append(copyButton);
+    article.append(actions);
+  }
   appendMessageTimestamp(article, createdAt);
   elements.transcript.append(article);
   if (role === "user") ensureTurnWorkIndicator();
   scrollTranscriptToLatest();
-  return { article, content, role, text, visibleText: text };
+  return { article, content, copyButton, role, text, visibleText: text };
 }
 
 function createCapturedTabMessage(capture) {
@@ -4771,6 +4879,12 @@ for (const eventName of ["wheel", "touchstart", "pointerdown"]) {
   }, { passive: true });
 }
 elements.transcript.addEventListener("click", (event) => {
+  const copyButton = event.target.closest?.(".message-copy-button");
+  if (copyButton) {
+    event.preventDefault();
+    void handleMessageCopy(copyButton);
+    return;
+  }
   const link = event.target.closest?.(".markdown-body a[href]");
   if (!link) return;
   event.preventDefault();

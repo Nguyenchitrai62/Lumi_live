@@ -327,6 +327,13 @@ body.petals-off .petal-field { opacity: 0; }
 .message-content:not(.markdown-body) { white-space: pre-wrap; }
 .message-lumi { border-bottom-left-radius: 5px; background: rgba(255, 255, 255, .97); }
 .message-lumi span { color: var(--lavender-deep); }
+.message-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+.message-copy-button { min-height: 26px; border: 1px solid var(--line-strong); border-radius: 8px; padding: 0 9px; color: var(--muted); background: var(--surface); cursor: pointer; font-size: 9px; font-weight: 850; transition: border-color var(--ui-motion-fast) ease, color var(--ui-motion-fast) ease, background var(--ui-motion-fast) ease; }
+.message-copy-button:hover:not(:disabled) { border-color: #a795db; color: var(--lavender-deep); background: #f5f1ff; }
+.message-copy-button:focus-visible { outline: 2px solid var(--lavender); outline-offset: 2px; }
+.message-copy-button:disabled { opacity: .5; cursor: not-allowed; }
+.message-copy-button[data-state="copied"] { border-color: rgba(47,148,116,.35); color: #276d57; background: rgba(47,148,116,.1); }
+.message-copy-button[data-state="error"] { border-color: rgba(185,48,62,.4); color: var(--danger); background: rgba(185,48,62,.08); }
 .message-flow-notice { width: min(96%, 560px); }
 .message-flow-notice.is-error { border-color: rgba(185, 48, 62, .5); color: #7d1f2b; background: rgba(255, 239, 241, .98); }
 .message-flow-notice.is-error span { color: #a12635; }
@@ -770,6 +777,10 @@ html.is-flow-import-dragging .image-drop-hint { display: none; }
   .badge-live { color: #92ddc4; background: #253f38; }
   .badge-error { color: #f4a9b9; background: #472a34; }
   .message-lumi, .message-form { background: rgba(41, 34, 55, .96); }
+  .message-copy-button { border-color: #4b405f; color: #bdb2cc; background: #302a3e; }
+  .message-copy-button:hover:not(:disabled) { border-color: #806db8; color: #d6caff; background: #3a3151; }
+  .message-copy-button[data-state="copied"] { border-color: #315d50; color: #83d9ba; background: #223b35; }
+  .message-copy-button[data-state="error"] { border-color: #70404c; color: #f1a0b1; background: #452a34; }
   .message-flow-notice.is-error { color: #ffd6df; border-color: rgba(240, 112, 139, .62); background: rgba(83, 35, 49, .97); }
   .message-flow-notice.is-error span { color: #ff9eb4; }
   .message-flow-notice.is-info { border-color: rgba(173, 151, 255, .48); background: rgba(54, 45, 78, .97); }

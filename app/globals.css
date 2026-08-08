@@ -587,6 +587,12 @@ h1 { margin: 0; font-size: clamp(23px, 2vw, 29px); letter-spacing: -.05em; line-
 .message-user { margin-left: auto; text-align: right; }
 .message-user .message-author { margin-right: 6px; }
 .message-user p { color: #fff; text-align: left; border-radius: 17px 9px 17px 17px; background: linear-gradient(135deg, #9a87dd, #7f69cc); }
+.message-copy-button { display: inline-flex; align-items: center; gap: 5px; margin: 7px 0 0 6px; border: 1px solid var(--control-border); border-radius: 8px; padding: 5px 8px; color: var(--muted); background: var(--surface-solid); font-size: 9px; font-weight: 800; cursor: pointer; transition: border-color .2s ease, color .2s ease, background-color .2s ease; }
+.message-copy-button:hover:not(:disabled) { border-color: #afa0dc; color: #6f5abd; background: #f8f5ff; }
+.message-copy-button:focus-visible { outline: 2px solid #a796dd; outline-offset: 2px; }
+.message-copy-button:disabled { opacity: .45; cursor: not-allowed; }
+.message-copy-button[data-state="copied"] { border-color: rgba(62, 158, 125, .35); color: #2f9474; background: #effaf6; }
+.message-copy-button[data-state="error"] { border-color: rgba(189, 82, 108, .35); color: #b34f66; background: #fff3f5; }
 .mcp-tool-notice { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 9px; margin-top: 12px; border: 1px solid color-mix(in srgb, var(--warning) 36%, var(--line)); border-radius: 14px; padding: 10px; color: var(--ink); background: color-mix(in srgb, var(--warning) 11%, var(--surface-solid)); box-shadow: 0 10px 28px rgba(83,59,26,.11); }
 .mcp-tool-notice-icon { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 8px; color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, transparent); font-size: 12px; font-weight: 950; }
 .mcp-tool-notice-copy { min-width: 0; }
@@ -688,6 +694,10 @@ h1 { margin: 0; font-size: clamp(23px, 2vw, 29px); letter-spacing: -.05em; line-
 :root[data-theme="dark"] .microphone-panel-ready { border-color: #315d50; background: linear-gradient(135deg, #203a34, #252d42); }
 :root[data-theme="dark"] .microphone-panel-error { border-color: #70404c; background: #412832; }
 :root[data-theme="dark"] .message-form button:disabled { color: #746b83; background: #393342; }
+:root[data-theme="dark"] .message-copy-button { border-color: #4a405f; color: #b8aec8; background: #302a3e; }
+:root[data-theme="dark"] .message-copy-button:hover:not(:disabled) { border-color: #806db8; color: #d1c4ff; background: #3a3151; }
+:root[data-theme="dark"] .message-copy-button[data-state="copied"] { border-color: #315d50; color: #83d9ba; background: #223b35; }
+:root[data-theme="dark"] .message-copy-button[data-state="error"] { border-color: #70404c; color: #f1a0b1; background: #452a34; }
 :root[data-theme="dark"] .quick-prompts button:hover:not(:disabled) { border-color: #7767a7; background: #352e49; }
 :root[data-theme="dark"] .outfit-options button.selected { color: #d1c4ff; border-color: #7767aa; background: #39304f; }
 :root[data-theme="dark"] .scene-option.selected { box-shadow: 0 0 0 2px #211d2c inset, 0 0 0 1px #a994ed; }

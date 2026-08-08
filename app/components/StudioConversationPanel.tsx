@@ -1,4 +1,4 @@
-import type { FormEventHandler, RefObject } from "react";
+import { useEffect, useRef, useState, type FormEventHandler, type RefObject } from "react";
 import { PetalLayer } from "./PetalLayer";
 import { formatMcpValue } from "../lib/mcp";
 import { TOOL_ACTIVITY_LABELS } from "../lib/live/config";
@@ -21,6 +21,28 @@ type StudioConversationPanelProps = {
   onSubmit: FormEventHandler<HTMLFormElement>;
 };
 
+async function copyTextToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Continue with the selection-based fallback below.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = typeof document.execCommand === "function" && document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("Clipboard is unavailable");
+}
+
 export function StudioConversationPanel({
   petalsEnabled,
   status,
@@ -37,6 +59,30 @@ export function StudioConversationPanel({
   onInputChange,
   onSubmit,
 }: StudioConversationPanelProps) {
+  const [copyState, setCopyState] = useState<{ id: string; status: "copied" | "error" } | null>(null);
+  const copyFeedbackTimerRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (copyFeedbackTimerRef.current !== null) window.clearTimeout(copyFeedbackTimerRef.current);
+  }, []);
+
+  const handleCopy = async (message: ChatMessage) => {
+    if (!message.text.trim()) return;
+    if (copyFeedbackTimerRef.current !== null) window.clearTimeout(copyFeedbackTimerRef.current);
+
+    try {
+      await copyTextToClipboard(message.text);
+      setCopyState({ id: message.id, status: "copied" });
+    } catch {
+      setCopyState({ id: message.id, status: "error" });
+    }
+
+    copyFeedbackTimerRef.current = window.setTimeout(() => {
+      copyFeedbackTimerRef.current = null;
+      setCopyState((current) => current?.id === message.id ? null : current);
+    }, 1800);
+  };
+
   return (
     <aside className={`conversation-panel ${petalsEnabled ? "petals-enabled" : "petals-disabled"}`}>
       <PetalLayer className="conversation-petal-field" enabled={petalsEnabled} />
@@ -107,6 +153,24 @@ export function StudioConversationPanel({
           <div key={message.id} className={`message message-${message.role}`}>
             <span className="message-author">{message.role === "lumi" ? "Lumi" : "You"}</span>
             <p>{message.text}</p>
+            {message.role === "lumi" && (
+              <button
+                type="button"
+                className="message-copy-button"
+                data-state={copyState?.id === message.id ? copyState.status : "idle"}
+                onClick={() => void handleCopy(message)}
+                disabled={!message.text.trim()}
+                aria-label={copyState?.id === message.id && copyState.status === "copied"
+                  ? "AI response copied"
+                  : "Copy AI response"}
+                title="Copy AI response"
+              >
+                <span aria-hidden="true">{copyState?.id === message.id && copyState.status === "copied" ? "✓" : "▣"}</span>
+                {copyState?.id === message.id
+                  ? copyState.status === "copied" ? "Copied" : "Retry"
+                  : "Copy"}
+              </button>
+            )}
           </div>
         ))}
         <div ref={transcriptEndRef} />
